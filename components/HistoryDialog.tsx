@@ -1,5 +1,5 @@
-import { useEffect, useState } from 'react';
-import { Clock, AlertCircle } from 'lucide-react';
+import { useEffect, useMemo, useState } from 'react';
+import { Clock, AlertCircle, ChevronDown, ChevronRight, Download } from 'lucide-react';
 import {
   Dialog,
   DialogContent,
@@ -17,6 +17,7 @@ import {
   ContextMenuTrigger,
 } from './ui/context-menu';
 import { toast } from 'sonner';
+import { motion, AnimatePresence } from 'framer-motion';
 
 interface HistoryEntry {
   id: string;
@@ -77,6 +78,138 @@ export function HistoryDialog({ open, onOpenChange }: HistoryDialogProps) {
     return d.toLocaleString();
   };
 
+  const formatDateKey = (iso: string) => {
+    const d = new Date(iso);
+    return d.toISOString().slice(0, 10); // YYYY-MM-DD
+  };
+
+  const formatDateLabel = (dateKey: string) => {
+    const [year, month, day] = dateKey.split('-').map(Number);
+    const d = new Date(year, (month || 1) - 1, day || 1);
+    return d.toLocaleDateString(undefined, {
+      year: 'numeric',
+      month: 'short',
+      day: 'numeric',
+    });
+  };
+
+  const groupedByDate = useMemo(() => {
+    const groups = new Map<string, HistoryEntry[]>();
+    for (const entry of entries) {
+      const key = formatDateKey(entry.played_at);
+      if (!groups.has(key)) groups.set(key, []);
+      groups.get(key)!.push(entry);
+    }
+    // Sort dates descending (most recent first)
+    return Array.from(groups.entries()).sort(([a], [b]) => (a < b ? 1 : -1));
+  }, [entries]);
+
+  const [expandedDates, setExpandedDates] = useState<Set<string>>(new Set());
+
+  useEffect(() => {
+    // When entries load, auto-expand the most recent date for convenience
+    if (groupedByDate.length > 0) {
+      setExpandedDates(prev => {
+        if (prev.size > 0) return prev;
+        const next = new Set(prev);
+        next.add(groupedByDate[0][0]);
+        return next;
+      });
+    }
+  }, [groupedByDate.length]);
+
+  const toggleDate = (dateKey: string) => {
+    setExpandedDates(prev => {
+      const next = new Set(prev);
+      if (next.has(dateKey)) {
+        next.delete(dateKey);
+      } else {
+        next.add(dateKey);
+      }
+      return next;
+    });
+  };
+
+  const downloadJson = (filename: string, payload: any) => {
+    try {
+      const blob = new Blob([JSON.stringify(payload, null, 2)], {
+        type: 'application/json',
+      });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = filename;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+    } catch (err: any) {
+      console.error('Failed to download history log', err);
+      toast.error(err?.message || 'Failed to download history log');
+    }
+  };
+
+  const downloadCsv = (filename: string, rows: HistoryEntry[]) => {
+    try {
+      const headers = ['No', 'Song Name', 'Starting Time', 'Ending Time'];
+
+      const escape = (v: any) => {
+        if (v === null || v === undefined) return '';
+        const s = String(v).replace(/"/g, '""');
+        return `"${s}` + `"`;
+      };
+
+      const formatDateTime = (iso: string, durationSeconds: number) => {
+        const start = new Date(iso);
+        const end = new Date(start.getTime() + Math.max(0, durationSeconds) * 1000);
+
+        const toParts = (d: Date) => {
+          const dd = String(d.getDate()).padStart(2, '0');
+          const mm = String(d.getMonth() + 1).padStart(2, '0');
+          const yyyy = d.getFullYear();
+          const hh = String(d.getHours()).padStart(2, '0');
+          const mi = String(d.getMinutes()).padStart(2, '0');
+          const ss = String(d.getSeconds()).padStart(2, '0');
+          // Note: time format requested with double colon between hour and minute
+          const time = `${hh}::${mi}::${ss}`;
+          const date = `${dd}/${mm}/${yyyy}`;
+          return { date, time };
+        };
+
+        const s = toParts(start);
+        const e = toParts(end);
+        return {
+          start: `${s.date} ${s.time}`,
+          end: `${e.date} ${e.time}`,
+        };
+      };
+
+      const csvLines = [
+        headers.join(','),
+        ...rows.map((r, index) => {
+          const durationSeconds = (r.position_end ?? 0) - (r.position_start ?? 0);
+          const times = formatDateTime(r.played_at, durationSeconds);
+          const no = index + 1;
+          const songName = r.track_name || 'Unknown track';
+          return [no, songName, times.start, times.end].map(escape).join(',');
+        }),
+      ].join('\n');
+
+      const blob = new Blob([csvLines], { type: 'text/csv' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = filename;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+    } catch (err: any) {
+      console.error('Failed to download CSV history log', err);
+      toast.error(err?.message || 'Failed to download CSV history log');
+    }
+  };
+
   const handleAction = async (entry: HistoryEntry, action: 'putBackToLibrary' | 'addToQueue' | 'delete') => {
     try {
       if (action === 'delete') {
@@ -116,7 +249,7 @@ export function HistoryDialog({ open, onOpenChange }: HistoryDialogProps) {
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="sm:max-w-xl">
+      <DialogContent className="sm:max-w-3xl w-[96vw] max-w-3xl sm:p-6 p-4">
         <DialogHeader>
           <DialogTitle className="flex items-center gap-2">
             <Clock className="w-4 h-4" />
@@ -144,80 +277,149 @@ export function HistoryDialog({ open, onOpenChange }: HistoryDialogProps) {
               No playback history yet.
             </div>
           ) : (
-            <ScrollArea className="max-h-80 mt-1">
-              <div className="space-y-1 pr-2">
-                {entries.map((entry) => {
-                  const completed = Boolean(entry.completed);
-                  const fileOk = entry.file_status === 'ok';
+            <ScrollArea className="max-h-[26rem] mt-1">
+              <div className="space-y-2 pr-1.5">
+                {groupedByDate.map(([dateKey, dayEntries]) => {
+                  const expanded = expandedDates.has(dateKey);
+                  const label = formatDateLabel(dateKey);
+                  const total = dayEntries.length;
                   return (
-                    <ContextMenu key={entry.id}>
-                      <ContextMenuTrigger asChild>
-                        <div className="flex items-start gap-3 rounded-md border border-border/60 bg-background/60 px-3 py-2 hover:bg-accent/40 cursor-default">
-                          <div className="mt-1">
-                            <Clock className="w-3.5 h-3.5 text-muted-foreground" />
-                          </div>
-                          <div className="flex-1 min-w-0">
-                            <div className="flex justify-between gap-2">
-                              <div className="truncate">
-                                <div className="text-xs font-medium text-foreground truncate">
-                                  {entry.track_name || 'Unknown track'}
-                                </div>
-                                <div className="text-[11px] text-muted-foreground truncate">
-                                  {entry.track_artist || 'Unknown artist'}
-                                </div>
-                              </div>
-                              <div className="text-[11px] text-muted-foreground whitespace-nowrap">
-                                {formatTime(entry.played_at)}
-                              </div>
-                            </div>
-
-                            <div className="mt-1 flex flex-wrap items-center gap-1.5 text-[11px] text-muted-foreground">
-                              <span
-                                className={cn(
-                                  'px-1.5 py-0.5 rounded-full border border-border/70 bg-background/80',
-                                )}
-                              >
-                                {entry.source}
-                              </span>
-                              <span
-                                className={cn(
-                                  'px-1.5 py-0.5 rounded-full border border-border/70 bg-background/80',
-                                  completed
-                                    ? 'text-emerald-500 border-emerald-500/40 bg-emerald-500/5'
-                                    : 'text-amber-500 border-amber-500/40 bg-amber-500/5'
-                                )}
-                              >
-                                {completed ? 'Completed' : 'Stopped early'}
-                              </span>
-                              <span
-                                className={cn(
-                                  'px-1.5 py-0.5 rounded-full border border-border/70 bg-background/80',
-                                  fileOk
-                                    ? 'text-emerald-500 border-emerald-500/40 bg-emerald-500/5'
-                                    : 'text-destructive border-destructive/40 bg-destructive/5'
-                                )}
-                              >
-                                File {entry.file_status}
-                              </span>
-                            </div>
-                          </div>
+                    <div
+                      key={dateKey}
+                      className="rounded-lg border border-border/70 bg-background/60 overflow-hidden"
+                    >
+                      <div
+                        role="button"
+                        tabIndex={0}
+                        className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2 px-3 py-2 text-xs hover:bg-accent/40 focus:outline-none focus-visible:ring-1 focus-visible:ring-accent cursor-pointer"
+                        onClick={() => toggleDate(dateKey)}
+                        onKeyDown={(e) => {
+                          if (e.key === 'Enter' || e.key === ' ') {
+                            e.preventDefault();
+                            toggleDate(dateKey);
+                          }
+                        }}
+                      >
+                        <div className="flex items-center gap-2 min-w-0">
+                          {expanded ? (
+                            <ChevronDown className="w-3 h-3 text-muted-foreground" />
+                          ) : (
+                            <ChevronRight className="w-3 h-3 text-muted-foreground" />
+                          )}
+                          <span className="truncate font-medium text-foreground select-text">
+                            {label}
+                          </span>
+                          <span className="text-[10px] text-muted-foreground whitespace-nowrap">
+                            {total} item{total === 1 ? '' : 's'}
+                          </span>
                         </div>
-                      </ContextMenuTrigger>
-                      <ContextMenuContent>
-                        <ContextMenuItem onClick={() => handleAction(entry, 'putBackToLibrary')}>
-                          Put back into library
-                        </ContextMenuItem>
-                        <ContextMenuItem onClick={() => handleAction(entry, 'addToQueue')}>
-                          Put back into queue
-                        </ContextMenuItem>
-                        <ContextMenuItem
-                          onClick={() => handleAction(entry, 'delete')}
-                          className="text-destructive"
-                        >
-                          Remove from history
-                        </ContextMenuItem>
-                      </ContextMenuContent>
-                    </ContextMenu>
+                        <div className="flex items-center gap-1.5 sm:self-auto self-start">
+                          <button
+                            type="button"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              const filename = `history-${dateKey}.csv`;
+                              downloadCsv(filename, dayEntries);
+                            }}
+                            className="inline-flex items-center gap-1 rounded-md border border-border/70 bg-background/80 px-2 py-1 text-[11px] text-muted-foreground hover:bg-accent/60 hover:text-foreground transition-colors"
+                          >
+                            <Download className="w-3 h-3" />
+                            <span>CSV</span>
+                          </button>
+                        </div>
+                      </div>
+
+                      <AnimatePresence initial={false}>
+                        {expanded && (
+                          <motion.div
+                            initial={{ opacity: 0, height: 0 }}
+                            animate={{ opacity: 1, height: 'auto' }}
+                            exit={{ opacity: 0, height: 0 }}
+                            transition={{ duration: 0.16, ease: 'easeOut' }}
+                            className="border-t border-border/60 bg-background/40"
+                          >
+                            <div className="py-1.5 space-y-1.5">
+                              {dayEntries.map((entry) => {
+                                const completed = Boolean(entry.completed);
+                                const fileOk = entry.file_status === 'ok';
+                                return (
+                                  <ContextMenu key={entry.id}>
+                                    <ContextMenuTrigger asChild>
+                                      <div className="flex items-start gap-3 px-3 py-1.5 hover:bg-accent/40 cursor-default">
+                                        <div className="mt-1">
+                                          <Clock className="w-3.5 h-3.5 text-muted-foreground" />
+                                        </div>
+                                        <div className="flex-1 min-w-0">
+                                          <div className="flex justify-between gap-2">
+                                            <div className="truncate">
+                                              <div className="text-xs font-medium text-foreground truncate select-text">
+                                                {entry.track_name || 'Unknown track'}
+                                              </div>
+                                              <div className="text-[11px] text-muted-foreground truncate select-text">
+                                                {entry.track_artist || 'Unknown artist'}
+                                              </div>
+                                            </div>
+                                            <div className="flex items-center gap-1.5">
+                                              <div className="text-[11px] text-muted-foreground whitespace-nowrap select-text">
+                                                {formatTime(entry.played_at)}
+                                              </div>
+                                            </div>
+                                          </div>
+
+                                          <div className="mt-1 flex flex-wrap items-center gap-1.5 text-[11px] text-muted-foreground">
+                                            <span
+                                              className={cn(
+                                                'px-1.5 py-0.5 rounded-full border border-border/70 bg-background/80',
+                                              )}
+                                            >
+                                              {entry.source}
+                                            </span>
+                                            <span
+                                              className={cn(
+                                                'px-1.5 py-0.5 rounded-full border border-border/70 bg-background/80',
+                                                completed
+                                                  ? 'text-emerald-500 border-emerald-500/40 bg-emerald-500/5'
+                                                  : 'text-amber-500 border-amber-500/40 bg-amber-500/5'
+                                              )}
+                                            >
+                                              {completed ? 'Completed' : 'Stopped early'}
+                                            </span>
+                                            <span
+                                              className={cn(
+                                                'px-1.5 py-0.5 rounded-full border border-border/70 bg-background/80',
+                                                fileOk
+                                                  ? 'text-emerald-500 border-emerald-500/40 bg-emerald-500/5'
+                                                  : 'text-destructive border-destructive/40 bg-destructive/5'
+                                              )}
+                                            >
+                                              File {entry.file_status}
+                                            </span>
+                                          </div>
+                                        </div>
+                                      </div>
+                                    </ContextMenuTrigger>
+                                    <ContextMenuContent>
+                                      <ContextMenuItem onClick={() => handleAction(entry, 'putBackToLibrary')}>
+                                        Put back into library
+                                      </ContextMenuItem>
+                                      <ContextMenuItem onClick={() => handleAction(entry, 'addToQueue')}>
+                                        Put back into queue
+                                      </ContextMenuItem>
+                                      <ContextMenuItem
+                                        onClick={() => handleAction(entry, 'delete')}
+                                        className="text-destructive"
+                                      >
+                                        Remove from history
+                                      </ContextMenuItem>
+                                    </ContextMenuContent>
+                                  </ContextMenu>
+                                );
+                              })}
+                            </div>
+                          </motion.div>
+                        )}
+                      </AnimatePresence>
+                    </div>
                   );
                 })}
               </div>
