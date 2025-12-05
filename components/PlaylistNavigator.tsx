@@ -1,0 +1,178 @@
+import { useState, useMemo } from 'react';
+import { Search, Plus, Clock, Music } from 'lucide-react';
+import { Input } from './ui/input';
+import { Button } from './ui/button';
+import { Playlist, ScheduledPlaylist } from '../types';
+import { PlaylistFolder } from './PlaylistFolder';
+import { formatDuration } from '../lib/utils';
+import { cn } from '../lib/utils';
+
+interface PlaylistNavigatorProps {
+  playlists: Playlist[];
+  selectedPlaylist: Playlist | null;
+  onSelectPlaylist: (playlist: Playlist) => void;
+  onCreatePlaylist: () => void;
+  onRenamePlaylist: (playlistId: string) => void;
+  onDeletePlaylist: (playlistId: string) => void;
+  onToggleLockPlaylist: (playlistId: string) => void;
+  onDuplicatePlaylist: (playlistId: string) => void;
+  onSchedulePlaylist: (playlistId: string) => void;
+  scheduledPlaylists: ScheduledPlaylist[];
+}
+
+export function PlaylistNavigator({
+  playlists,
+  selectedPlaylist,
+  onSelectPlaylist,
+  onCreatePlaylist,
+  onRenamePlaylist,
+  onDeletePlaylist,
+  onToggleLockPlaylist,
+  onDuplicatePlaylist,
+  onSchedulePlaylist,
+  scheduledPlaylists,
+}: PlaylistNavigatorProps) {
+  const [searchQuery, setSearchQuery] = useState('');
+  const [showScheduledOnly, setShowScheduledOnly] = useState(false);
+
+  const nextScheduleByPlaylist = useMemo(() => {
+    const map: Record<string, ScheduledPlaylist | undefined> = {};
+    scheduledPlaylists
+      .filter(s => s.status === 'pending')
+      .forEach(s => {
+        const existing = map[s.playlistId];
+        if (!existing) {
+          map[s.playlistId] = s;
+          return;
+        }
+        const a = s.dateTime?.getTime() ?? Number.MAX_SAFE_INTEGER;
+        const b = existing.dateTime?.getTime() ?? Number.MAX_SAFE_INTEGER;
+        if (a < b) {
+          map[s.playlistId] = s;
+        }
+      });
+    return map;
+  }, [scheduledPlaylists]);
+
+  const filteredPlaylists = useMemo(() => {
+    return playlists.filter((playlist) => {
+      const matchesSearch = playlist.name.toLowerCase().includes(searchQuery.toLowerCase());
+      if (!matchesSearch) return false;
+      if (!showScheduledOnly) return true;
+      return Boolean(nextScheduleByPlaylist[playlist.id]);
+    });
+  }, [playlists, searchQuery, showScheduledOnly, nextScheduleByPlaylist]);
+
+  return (
+    <div className="h-full flex flex-col">
+      {/* Header */}
+      <div className="p-4 border-b border-border space-y-3">
+        <div className="flex items-center justify-between gap-2">
+          <h2 className="text-foreground">Playlists</h2>
+          <div className="flex items-center gap-2">
+            <Button
+              size="sm"
+              variant={showScheduledOnly ? 'default' : 'outline'}
+              className="h-7 px-2 text-[11px]"
+              onClick={() => setShowScheduledOnly((v) => !v)}
+              title="Show only playlists with pending schedules"
+            >
+              <span className="mr-1 text-xs">●</span>
+              Scheduled
+            </Button>
+            <Button size="sm" onClick={onCreatePlaylist}>
+              <Plus className="w-4 h-4 mr-2" />
+              New
+            </Button>
+          </div>
+        </div>
+
+        <div className="relative">
+          <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-muted-foreground" />
+          <Input
+            placeholder="Search playlists..."
+            value={searchQuery}
+            onChange={(e) => setSearchQuery(e.target.value)}
+            className="pl-9"
+          />
+        </div>
+      </div>
+
+      {/* Playlists List */}
+      <div className="flex-1 overflow-y-auto p-2 space-y-1">
+        {filteredPlaylists.map((playlist) => {
+          const nextSchedule = nextScheduleByPlaylist[playlist.id];
+          const scheduleLabel = nextSchedule?.dateTime
+            ? nextSchedule.dateTime.toLocaleString(undefined, {
+                month: 'short',
+                day: '2-digit',
+                hour: '2-digit',
+                minute: '2-digit',
+                second: '2-digit',
+                hour12: true,
+              })
+            : undefined;
+
+          return (
+            <div key={playlist.id}>
+              <PlaylistFolder
+                playlist={playlist}
+                onClick={() => onSelectPlaylist(playlist)}
+                onRename={() => onRenamePlaylist(playlist.id)}
+                onDelete={() => onDeletePlaylist(playlist.id)}
+                onToggleLock={() => onToggleLockPlaylist(playlist.id)}
+                onDuplicate={() => onDuplicatePlaylist(playlist.id)}
+                onSchedule={() => onSchedulePlaylist(playlist.id)}
+                scheduleLabel={scheduleLabel}
+              />
+            </div>
+          );
+        })}
+      </div>
+
+      {/* Metadata Summary */}
+      {selectedPlaylist && (
+        <div className="border-t border-border p-4 space-y-2 bg-accent/20">
+          <h3 className="text-sm text-foreground">{selectedPlaylist.name}</h3>
+          <div className="flex items-center gap-4 text-xs text-muted-foreground">
+            <div className="flex items-center gap-1">
+              <Music className="w-3 h-3" />
+              <span>{selectedPlaylist.tracks.length} tracks</span>
+            </div>
+            <div className="flex items-center gap-1">
+              <Clock className="w-3 h-3" />
+              <span>{formatDuration(selectedPlaylist.duration)}</span>
+            </div>
+          </div>
+          {(() => {
+            const next = nextScheduleByPlaylist[selectedPlaylist.id];
+            if (!next || !next.dateTime) return null;
+            return (
+              <div className="flex items-center gap-2 text-[11px] text-muted-foreground">
+                <Clock className="w-3 h-3" />
+                <span>Next schedule:</span>
+                <span>{next.dateTime.toLocaleString(undefined, {
+                  month: 'short',
+                  day: '2-digit',
+                  hour: '2-digit',
+                  minute: '2-digit',
+                  second: '2-digit',
+                  hour12: true,
+                })}</span>
+              </div>
+            );
+          })()}
+          <Button
+            size="sm"
+            variant="outline"
+            className="w-full"
+            onClick={() => onSchedulePlaylist(selectedPlaylist.id)}
+            disabled={selectedPlaylist.locked}
+          >
+            Schedule Playlist
+          </Button>
+        </div>
+      )}
+    </div>
+  );
+}
