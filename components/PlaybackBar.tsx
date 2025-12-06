@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef } from 'react';
-import { Play, Pause, SkipForward, SkipBack, Radio } from 'lucide-react';
+import { Play, Pause, SkipForward, SkipBack, Radio, Repeat } from 'lucide-react';
 import { Button } from './ui/button';
 import { Slider } from './ui/slider';
 import { Track } from '../types';
@@ -45,8 +45,6 @@ export function PlaybackBar({
   const [showPauseConfirm, setShowPauseConfirm] = useState(false);
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const [duration, setDuration] = useState(0);
-  const fadeOutStartedRef = useRef(false);
-  const fadeOutIntervalRef = useRef<number | null>(null);
 
   // Sync audio element with current track
   useEffect(() => {
@@ -56,16 +54,11 @@ export function PlaybackBar({
     if (currentTrack) {
       audio.src = currentTrack.filePath;
       audio.currentTime = 0;
-      audio.volume = 0;
+      // Start at full volume; crossfade logic will only gently fade near the end
+      audio.volume = 1;
       setCurrentTime(0);
       // Prefer track.duration from metadata if available; otherwise will be updated from loadedmetadata
       setDuration(currentTrack.duration || 0);
-      // Reset any previous fades when track changes
-      fadeOutStartedRef.current = false;
-      if (fadeOutIntervalRef.current !== null) {
-        window.clearInterval(fadeOutIntervalRef.current);
-        fadeOutIntervalRef.current = null;
-      }
       if (isPlaying) {
         audio.play().catch(() => {
           // Playback might be blocked by browser autoplay policies
@@ -84,6 +77,13 @@ export function PlaybackBar({
     if (!currentTrack) return;
 
     if (isPlaying) {
+      try {
+        // Ensure volume is at full when starting/resuming playback
+        audio.volume = 1;
+      } catch {
+        // ignore volume set errors
+      }
+
       audio.play().catch(() => {
         // Ignore play failures here; user interaction may be required
       });
@@ -102,27 +102,9 @@ export function PlaybackBar({
 
       const effectiveDuration = duration || audio.duration || 0;
       const sliderSeconds = crossfadeSeconds ?? 0;
-      // Use a short 2–3s window derived from slider for both fade-in and fade-out
       const fadeWindow = Math.min(sliderSeconds > 0 ? sliderSeconds : 2, 3);
 
-      // Fade-in at the start: first fadeWindow seconds ramp volume 0 → 1
-      if (fadeWindow > 0 && audio.currentTime <= fadeWindow) {
-        const ratio = Math.max(0, Math.min(1, audio.currentTime / fadeWindow));
-        try {
-          audio.volume = ratio;
-        } catch {
-          // ignore
-        }
-      } else {
-        // Ensure full volume outside the fade-in window unless fade-out overrides
-        try {
-          audio.volume = 1;
-        } catch {
-          // ignore
-        }
-      }
-
-      // Smart end-fade: last fadeWindow seconds fade 1 → 0
+      // Gentle end-fade only: last fadeWindow seconds fade 1 → 0
       if (
         effectiveDuration > 0 &&
         fadeWindow > 0 &&
@@ -132,6 +114,12 @@ export function PlaybackBar({
         const ratio = Math.max(0, Math.min(1, remaining / fadeWindow));
         try {
           audio.volume = ratio;
+        } catch {
+          // ignore
+        }
+      } else {
+        try {
+          audio.volume = 1;
         } catch {
           // ignore
         }
@@ -166,11 +154,6 @@ export function PlaybackBar({
       audio.removeEventListener('timeupdate', handleTimeUpdate);
       audio.removeEventListener('loadedmetadata', handleLoadedMetadata);
       audio.removeEventListener('ended', handleEnded);
-
-      if (fadeOutIntervalRef.current !== null) {
-        window.clearInterval(fadeOutIntervalRef.current);
-        fadeOutIntervalRef.current = null;
-      }
     };
   }, [onNext, duration, crossfadeSeconds, repeatQueue, currentTrack]);
 
@@ -194,9 +177,9 @@ export function PlaybackBar({
   return (
     <>
       <audio ref={audioRef} className="hidden" />
-      <div className="h-24 bg-background border-t border-border flex items-center px-6 gap-6">
+      <div className="h-20 bg-background border-t border-border flex items-center px-5 gap-5">
         {/* Current Track Info */}
-        <div className="flex items-center gap-3 w-64">
+        <div className="flex items-center gap-3 w-64 min-w-[12rem]">
           {currentTrack ? (
             <>
               <div className="w-12 h-12 bg-accent rounded flex items-center justify-center">
@@ -213,8 +196,8 @@ export function PlaybackBar({
         </div>
 
         {/* Playback Controls */}
-        <div className="flex-1 flex flex-col gap-2">
-          <div className="flex items-center justify-center gap-2">
+        <div className="flex-1 flex flex-col gap-1.5">
+          <div className="flex items-center justify-center gap-1.5">
             <Button size="sm" variant="ghost" onClick={onPrevious}>
               <SkipBack className="w-4 h-4" />
             </Button>
@@ -236,8 +219,8 @@ export function PlaybackBar({
 
           {/* Seek Bar */}
           {currentTrack && (
-            <div className="flex items-center gap-3">
-              <span className="text-xs text-muted-foreground w-12 text-right">
+            <div className="flex items-center gap-2.5">
+              <span className="text-[11px] text-muted-foreground w-12 text-right tabular-nums">
                 {formatDuration(currentTime)}
               </span>
               <Slider
@@ -245,9 +228,9 @@ export function PlaybackBar({
                 max={duration || currentTrack.duration || 0}
                 step={1}
                 onValueChange={handleSeek}
-                className="flex-1"
+                className="flex-1 h-1.5"
               />
-              <span className="text-xs text-muted-foreground w-12">
+              <span className="text-[11px] text-muted-foreground w-12 text-left tabular-nums">
                 {formatDuration(duration || currentTrack.duration || 0)}
               </span>
             </div>
@@ -255,27 +238,30 @@ export function PlaybackBar({
         </div>
 
         {/* Additional Controls */}
-        <div className="flex items-center gap-6">
+        <div className="flex items-center gap-4">
           {/* Crossfade */}
           <div className="flex items-center gap-2">
-            <span className="text-xs text-muted-foreground">Crossfade</span>
+            <span className="text-[11px] text-muted-foreground">Crossfade</span>
             <Slider
               value={[crossfadeSeconds]}
               max={12}
               step={1}
               onValueChange={(vals) => onCrossfadeChange(vals[0] ?? 0)}
-              className="w-24"
+              className="w-24 h-1.5"
             />
-            <span className="text-xs text-muted-foreground w-6">{crossfadeSeconds}s</span>
+            <span className="text-[11px] text-muted-foreground w-6 text-right tabular-nums">{crossfadeSeconds}s</span>
           </div>
           {/* Repeat Queue */}
           <div className="flex items-center gap-2">
             <Button
               size="sm"
-              variant={repeatQueue ? "default" : "outline"}
+              variant={repeatQueue ? 'default' : 'outline'}
               onClick={onToggleRepeatQueue}
+              aria-pressed={repeatQueue}
+              className="gap-1 px-3"
             >
-              Repeat
+              <Repeat className="w-3.5 h-3.5" />
+              <span className="text-xs">Repeat</span>
             </Button>
           </div>
         </div>

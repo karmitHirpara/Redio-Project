@@ -4,14 +4,30 @@ import { v4 as uuidv4 } from 'uuid';
 import path from 'path';
 import fs from 'fs';
 import crypto from 'crypto';
+import { fileURLToPath } from 'url';
+import { dirname } from 'path';
 import { query, run, get } from '../config/database.js';
 
 const router = express.Router();
 
+// Ensure we use the same uploads directory as the main server (server.js)
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = dirname(__filename);
+
+// If UPLOAD_PATH is absolute, use it as-is; otherwise resolve relative to this file
+const rawUploadPath = process.env.UPLOAD_PATH || 'uploads';
+const uploadsDir = path.isAbsolute(rawUploadPath)
+  ? rawUploadPath
+  : path.join(__dirname, '..', rawUploadPath);
+
+if (!fs.existsSync(uploadsDir)) {
+  fs.mkdirSync(uploadsDir, { recursive: true });
+}
+
 // Configure multer for file uploads
 const storage = multer.diskStorage({
   destination: (req, file, cb) => {
-    cb(null, process.env.UPLOAD_PATH || 'uploads');
+    cb(null, uploadsDir);
   },
   filename: (req, file, cb) => {
     const uniqueName = `${uuidv4()}${path.extname(file.originalname)}`;
@@ -121,11 +137,32 @@ router.post('/upload', upload.single('file'), async (req, res) => {
     // Check if file already exists
     const existing = await get('SELECT * FROM tracks WHERE hash = ?', [hash]);
     if (existing) {
-      // Remove uploaded file
+      // If the DB says we already have this audio but the underlying file
+      // is missing on disk, treat this upload as a repair: keep the new
+      // file, update file_path for the existing track, and return it.
+      const existingFilePath = path.join(
+        uploadsDir,
+        path.basename(existing.file_path || '')
+      );
+
+      if (!fs.existsSync(existingFilePath)) {
+        const newRelativePath = `/uploads/${path.basename(req.file.filename)}`;
+
+        await run('UPDATE tracks SET file_path = ? WHERE id = ?', [
+          newRelativePath,
+          existing.id,
+        ]);
+
+        const repaired = await get('SELECT * FROM tracks WHERE id = ?', [existing.id]);
+        return res.status(200).json(repaired);
+      }
+
+      // True duplicate: underlying file exists already. Remove the freshly
+      // uploaded file and signal a duplicate to the caller.
       fs.unlinkSync(req.file.path);
-      return res.status(409).json({ 
+      return res.status(409).json({
         error: 'Duplicate file',
-        existingTrack: existing 
+        existingTrack: existing,
       });
     }
 
@@ -166,7 +203,7 @@ router.delete('/:id', async (req, res) => {
     }
 
     // Delete file if it exists
-    const filePath = path.join(process.env.UPLOAD_PATH || 'uploads', path.basename(track.file_path));
+    const filePath = path.join(uploadsDir, path.basename(track.file_path));
     if (fs.existsSync(filePath)) {
       fs.unlinkSync(filePath);
     }

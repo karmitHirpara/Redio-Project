@@ -21,11 +21,11 @@ interface TrackRowProps {
   onRemove?: () => void;
   showRemove?: boolean;
   isLibrary?: boolean;
-  isSelected?: boolean;         // selected state (e.g. clicked)
-  isFocused?: boolean;          // keyboard focus / current cursor row
-  onSelect?: () => void;        // click/select handler
-  onFocusRow?: () => void;      // parent sets focused index
-  onKeyDown?: (e: React.KeyboardEvent) => void; // parent handles arrows
+  isSelected?: boolean;         
+  isFocused?: boolean;          
+  onSelect?: () => void;        
+  onFocusRow?: () => void;      
+  onKeyDown?: (e: React.KeyboardEvent) => void; 
 }
 
 export function TrackRow({
