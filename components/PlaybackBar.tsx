@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef } from 'react';
-import { Play, Pause, SkipForward, SkipBack, Radio, Repeat } from 'lucide-react';
+import { Play, Pause, SkipForward, SkipBack, Radio } from 'lucide-react';
 import { Button } from './ui/button';
 import { Slider } from './ui/slider';
 import { Track } from '../types';
@@ -18,61 +18,111 @@ import {
 
 interface PlaybackBarProps {
   currentTrack: Track | null;
+  /**
+   * The upcoming track in the queue, used for future enhancements.
+   */
+  nextTrack: Track | null;
   isPlaying: boolean;
   onPlayPause: () => void;
   onNext: () => void;
   onPrevious: () => void;
   isLive: boolean;
-  repeatQueue: boolean;
-  onToggleRepeatQueue: () => void;
   crossfadeSeconds: number;
   onCrossfadeChange: (value: number) => void;
 }
 
 export function PlaybackBar({
   currentTrack,
+  nextTrack,
   isPlaying,
   onPlayPause,
   onNext,
   onPrevious,
   isLive,
-  repeatQueue,
-  onToggleRepeatQueue,
   crossfadeSeconds,
   onCrossfadeChange,
 }: PlaybackBarProps) {
   const [currentTime, setCurrentTime] = useState(0);
   const [showPauseConfirm, setShowPauseConfirm] = useState(false);
-  const audioRef = useRef<HTMLAudioElement | null>(null);
+  const primaryAudioRef = useRef<HTMLAudioElement | null>(null);
   const [duration, setDuration] = useState(0);
+
+  // Simple fade state for single-audio playback
+  const fadeRafRef = useRef<number | null>(null);
+  const endDelayTimeoutRef = useRef<number | null>(null);
+
+  const getActiveAudio = () => primaryAudioRef.current;
 
   // Sync audio element with current track
   useEffect(() => {
-    const audio = audioRef.current;
+    const audio = getActiveAudio();
     if (!audio) return;
 
     if (currentTrack) {
       audio.src = currentTrack.filePath;
       audio.currentTime = 0;
-      // Start at full volume; crossfade logic will only gently fade near the end
-      audio.volume = 1;
       setCurrentTime(0);
-      // Prefer track.duration from metadata if available; otherwise will be updated from loadedmetadata
       setDuration(currentTrack.duration || 0);
+
+      // Only run a fade-in if we are actively playing when a brand new track
+      // is loaded. Start from a small, audible volume so there is no "dead"
+      // first second.
       if (isPlaying) {
         audio.play().catch(() => {
           // Playback might be blocked by browser autoplay policies
         });
+
+        if (fadeRafRef.current !== null) {
+          cancelAnimationFrame(fadeRafRef.current);
+        }
+
+        const minFadeSeconds = 0.4;
+        const maxFadeSeconds = 3;
+        const fadeSeconds = Math.min(maxFadeSeconds, Math.max(minFadeSeconds, (crossfadeSeconds || 1.5) / 2));
+        const fadeDurationMs = fadeSeconds * 1000;
+        const start = performance.now();
+        const startVolume = 0.2; // immediately audible
+        const targetVolume = 1;
+        try {
+          audio.volume = startVolume;
+        } catch {}
+
+        const step = () => {
+          const now = performance.now();
+          const ratio = Math.min(1, Math.max(0, (now - start) / fadeDurationMs));
+          const eased = 1 - Math.cos((ratio * Math.PI) / 2);
+          const v = startVolume + (targetVolume - startVolume) * eased;
+          try {
+            audio.volume = v;
+          } catch {}
+
+          if (ratio < 1 && isPlaying) {
+            fadeRafRef.current = requestAnimationFrame(step);
+          } else {
+            fadeRafRef.current = null;
+            try {
+              audio.volume = 1;
+            } catch {}
+          }
+        };
+
+        fadeRafRef.current = requestAnimationFrame(step);
+      } else {
+        // If we're not playing yet, keep the track at normal volume so the
+        // first play click feels instant.
+        try {
+          audio.volume = 1;
+        } catch {}
       }
     } else {
       audio.removeAttribute('src');
       setCurrentTime(0);
     }
-  }, [currentTrack]);
+  }, [currentTrack, isPlaying]);
 
   // Play / pause audio when isPlaying changes
   useEffect(() => {
-    const audio = audioRef.current;
+    const audio = getActiveAudio();
     if (!audio) return;
     if (!currentTrack) return;
 
@@ -94,34 +144,32 @@ export function PlaybackBar({
 
   // Attach timeupdate and ended listeners
   useEffect(() => {
-    const audio = audioRef.current;
+    const audio = getActiveAudio();
     if (!audio) return;
 
     const handleTimeUpdate = () => {
       setCurrentTime(audio.currentTime);
 
+      // Gentle fade-out near the end of the track. We use an eased curve so the
+      // tail sounds smooth rather than mechanical.
       const effectiveDuration = duration || audio.duration || 0;
-      const sliderSeconds = crossfadeSeconds ?? 0;
-      const fadeWindow = Math.min(sliderSeconds > 0 ? sliderSeconds : 2, 3);
+      const baseWindow = Math.min(5, Math.max(1, crossfadeSeconds || 2));
+      const fadeWindow = baseWindow; // seconds
 
-      // Gentle end-fade only: last fadeWindow seconds fade 1 → 0
-      if (
-        effectiveDuration > 0 &&
-        fadeWindow > 0 &&
-        audio.currentTime >= effectiveDuration - fadeWindow
-      ) {
-        const remaining = Math.max(0, effectiveDuration - audio.currentTime);
-        const ratio = Math.max(0, Math.min(1, remaining / fadeWindow));
-        try {
-          audio.volume = ratio;
-        } catch {
-          // ignore
-        }
-      } else {
-        try {
-          audio.volume = 1;
-        } catch {
-          // ignore
+      if (!isPlaying) return;
+
+      if (effectiveDuration > 0 && audio.currentTime > 0) {
+        const remaining = effectiveDuration - audio.currentTime;
+        if (remaining <= fadeWindow && remaining >= 0) {
+          const linear = Math.max(0, Math.min(1, remaining / fadeWindow));
+          const eased = (Math.sin((linear * Math.PI) / 2)); // slow, smooth tail
+          try {
+            audio.volume = eased;
+          } catch {}
+        } else {
+          try {
+            audio.volume = 1;
+          } catch {}
         }
       }
     };
@@ -133,17 +181,19 @@ export function PlaybackBar({
     };
 
     const handleEnded = () => {
-      if (repeatQueue && currentTrack) {
-        // Loop the same track seamlessly when repeat is enabled
-        audio.currentTime = 0;
-        setCurrentTime(0);
-        audio.play().catch(() => {
-          // ignore autoplay issues
-        });
-        return;
+      // Clear any existing end-delay timer
+      if (endDelayTimeoutRef.current !== null) {
+        window.clearTimeout(endDelayTimeoutRef.current);
+        endDelayTimeoutRef.current = null;
       }
+
       setCurrentTime(0);
-      onNext();
+
+      const delayMs = Math.max(0, (crossfadeSeconds ?? 0) * 1000);
+      endDelayTimeoutRef.current = window.setTimeout(() => {
+        endDelayTimeoutRef.current = null;
+        onNext();
+      }, delayMs);
     };
 
     audio.addEventListener('timeupdate', handleTimeUpdate);
@@ -155,7 +205,7 @@ export function PlaybackBar({
       audio.removeEventListener('loadedmetadata', handleLoadedMetadata);
       audio.removeEventListener('ended', handleEnded);
     };
-  }, [onNext, duration, crossfadeSeconds, repeatQueue, currentTrack]);
+  }, [onNext, duration, crossfadeSeconds, currentTrack, nextTrack]);
 
   const handlePlayPause = () => {
     if (isLive && isPlaying) {
@@ -168,7 +218,7 @@ export function PlaybackBar({
   const handleSeek = (value: number[]) => {
     const newTime = value[0];
     setCurrentTime(newTime);
-    const audio = audioRef.current;
+    const audio = getActiveAudio();
     if (audio && currentTrack) {
       audio.currentTime = newTime;
     }
@@ -176,7 +226,7 @@ export function PlaybackBar({
 
   return (
     <>
-      <audio ref={audioRef} className="hidden" />
+      <audio ref={primaryAudioRef} className="hidden" />
       <div className="h-20 bg-background border-t border-border flex items-center px-5 gap-5">
         {/* Current Track Info */}
         <div className="flex items-center gap-3 w-64 min-w-[12rem]">
@@ -250,19 +300,6 @@ export function PlaybackBar({
               className="w-24 h-1.5"
             />
             <span className="text-[11px] text-muted-foreground w-6 text-right tabular-nums">{crossfadeSeconds}s</span>
-          </div>
-          {/* Repeat Queue */}
-          <div className="flex items-center gap-2">
-            <Button
-              size="sm"
-              variant={repeatQueue ? 'default' : 'outline'}
-              onClick={onToggleRepeatQueue}
-              aria-pressed={repeatQueue}
-              className="gap-1 px-3"
-            >
-              <Repeat className="w-3.5 h-3.5" />
-              <span className="text-xs">Repeat</span>
-            </Button>
           </div>
         </div>
       </div>

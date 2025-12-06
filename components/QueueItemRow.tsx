@@ -45,7 +45,7 @@ export function QueueItemRow({
           className={cn(
             "group flex items-center gap-1.5 px-2 py-1 rounded-md transition-colors cursor-pointer",
             "hover:bg-accent/40",
-            isPlaying && "bg-primary/10 border border-primary/20",
+            isPlaying && "bg-primary/10 border border-primary/30 shadow-sm",
             isNext && !isPlaying && "bg-accent/25"
           )}
           onDragStart={() => onDragStart(index)}
@@ -66,10 +66,12 @@ export function QueueItemRow({
           )}
 
           <div className="flex-1 min-w-0">
-            <div className={cn(
-              "text-xs truncate",
-              isPlaying ? "text-primary" : "text-foreground"
-            )}>
+            <div
+              className={cn(
+                "text-xs truncate",
+                isPlaying ? "text-foreground font-semibold" : "text-foreground"
+              )}
+            >
               {item.track.name}
             </div>
             <div className="flex items-center gap-1.5 text-[11px] text-muted-foreground">

@@ -25,7 +25,6 @@ export default function App() {
   const [currentTrackId, setCurrentTrackId] = useState<string | null>(null);
   const [isPlaying, setIsPlaying] = useState(false);
   const [isLive, setIsLive] = useState(true);
-  const [repeatQueue, setRepeatQueue] = useState(false);
   const [scheduledPlaylists, setScheduledPlaylists] = useState<ScheduledPlaylist[]>([]);
   const [crossfadeSeconds, setCrossfadeSeconds] = useState(3);
   const [nowPlayingStart, setNowPlayingStart] = useState<Date | null>(null);
@@ -47,7 +46,23 @@ export default function App() {
   const leftPanel = useResizable({ initialWidth: 320, minWidth: 250, maxWidth: 500 });
   const rightPanel = useResizable({ initialWidth: 320, minWidth: 250, maxWidth: 500 });
 
-  const currentTrack = queue.find(item => item.track.id === currentTrackId)?.track || null;
+  const currentQueueItem = currentTrackId
+    ? queue.find((item) => item.track.id === currentTrackId) || null
+    : null;
+  const currentTrack = currentQueueItem?.track || null;
+  const currentQueueItemId = currentQueueItem?.id || null;
+
+  // Determine the next track in the queue for crossfade/preview logic.
+  const currentIndex = currentTrackId
+    ? queue.findIndex((item) => item.track.id === currentTrackId)
+    : -1;
+  const nextTrack = (() => {
+    if (queue.length === 0) return null;
+    if (currentIndex >= 0 && currentIndex < queue.length - 1) {
+      return queue[currentIndex + 1].track;
+    }
+    return null;
+  })();
 
   const timing = useQueueTiming({
     queue,
@@ -1451,6 +1466,7 @@ export default function App() {
           <QueuePanel
             queue={queue}
             currentTrackId={currentTrackId}
+            currentQueueItemId={currentQueueItemId}
             onRemoveFromQueue={handleRemoveFromQueue}
             onReorderQueue={handleReorderQueue}
             timing={timing}
@@ -1543,13 +1559,12 @@ export default function App() {
       {/* Bottom Playback Bar */}
       <PlaybackBar
         currentTrack={currentTrack}
+        nextTrack={nextTrack}
         isPlaying={isPlaying}
         onPlayPause={handlePlayPause}
         onNext={handleNext}
         onPrevious={handlePrevious}
         isLive={isLive}
-        repeatQueue={repeatQueue}
-        onToggleRepeatQueue={() => setRepeatQueue((v) => !v)}
         crossfadeSeconds={crossfadeSeconds}
         onCrossfadeChange={setCrossfadeSeconds}
       />

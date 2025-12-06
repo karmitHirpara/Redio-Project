@@ -8,6 +8,7 @@ import { QueueTimingResult } from '../hooks/useQueueTiming';
 interface QueuePanelProps {
   queue: QueueItem[];
   currentTrackId: string | null;
+  currentQueueItemId: string | null;
   onRemoveFromQueue: (id: string) => void;
   onReorderQueue: (items: QueueItem[]) => void;
   timing?: QueueTimingResult;
@@ -16,6 +17,7 @@ interface QueuePanelProps {
 export function QueuePanel({
   queue,
   currentTrackId,
+  currentQueueItemId,
   onRemoveFromQueue,
   onReorderQueue,
   timing,
@@ -80,8 +82,8 @@ export function QueuePanel({
                   return (
                     <QueueItemRow
                       item={item}
-                      isPlaying={item.track.id === currentTrackId}
-                      isNext={index === 0 && item.track.id !== currentTrackId}
+                      isPlaying={item.id === currentQueueItemId}
+                      isNext={index === 0 && item.id !== currentQueueItemId}
                       onRemove={() => onRemoveFromQueue(item.id)}
                       index={index}
                       onDragStart={handleDragStart}

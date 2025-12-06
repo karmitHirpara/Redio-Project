@@ -97,11 +97,6 @@ router.put('/:id', async (req, res) => {
       return res.status(404).json({ error: 'Playlist not found' });
     }
 
-    if (playlist.locked && !locked) {
-      // Can't modify locked playlist unless unlocking
-      return res.status(403).json({ error: 'Playlist is locked' });
-    }
-
     if (name) {
       // Check if new name already exists
       const existing = await get('SELECT * FROM playlists WHERE name = ? AND id != ?', [name, req.params.id]);

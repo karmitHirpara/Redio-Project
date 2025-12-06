@@ -167,7 +167,6 @@ export function PlaylistNavigator({
             variant="outline"
             className="w-full"
             onClick={() => onSchedulePlaylist(selectedPlaylist.id)}
-            disabled={selectedPlaylist.locked}
           >
             Schedule Playlist
           </Button>
