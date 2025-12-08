@@ -346,7 +346,8 @@ export function LibraryPanel({
                   initial={{ opacity: 0, height: 0 }}
                   animate={{ opacity: 1, height: 'auto' }}
                   exit={{ opacity: 0, height: 0 }}
-                  className="ml-6 border-l border-border/40 pl-3 mt-1 space-y-0.5"
+                  transition={{ duration: 0.22, ease: 'easeInOut' }}
+                  className="ml-6 border-l border-border/40 pl-3 mt-1 space-y-0.5 overflow-hidden"
                 >
                   {tracksInFolder.length === 0 ? (
                     <div className="text-[11px] text-muted-foreground/80 pl-5 py-0.5">

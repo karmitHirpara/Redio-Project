@@ -40,6 +40,7 @@ export default function App() {
     fileName: string;
   } | null>(null);
   const duplicateDecisionResolver = useRef<((choice: 'skip' | 'add') => void) | null>(null);
+  const [dismissedScheduleIds, setDismissedScheduleIds] = useState<string[]>([]);
 
   const prevQueueLengthRef = useRef(0);
 
@@ -101,6 +102,7 @@ export default function App() {
         toast.error(error.message || 'Failed to load tracks');
       });
   }, []);
+
 
   // WebSocket connection for real-time events (disabled unless VITE_WS_URL is set)
   useEffect(() => {
@@ -719,14 +721,13 @@ export default function App() {
 
     try {
       const res = await fetch(`/api/playlists/${playlistId}`, {
-        method: 'DELETE'
+        method: 'DELETE',
       });
 
       if (!res.ok) {
         const data = await res.json().catch(() => null);
         throw new Error(data?.error || `Failed to delete playlist (${res.status})`);
       }
-
       toast.success('Playlist deleted');
     } catch (error: any) {
       console.error('Failed to delete playlist', error);
@@ -1168,6 +1169,40 @@ export default function App() {
     }
   };
 
+  const handleScheduleDialogOpenChange = (open: boolean) => {
+    setScheduleDialogOpen(open);
+    if (!open) {
+      setSelectedPlaylistForSchedule(null);
+    }
+  };
+
+  const handleDeleteSchedule = async (scheduleId: string) => {
+    const schedule = scheduledPlaylists.find((s) => s.id === scheduleId);
+    if (!schedule) return;
+
+    const playlist = playlists.find((p) => p.id === schedule.playlistId);
+    if (playlist?.locked) {
+      toast.error('Unlock playlist to remove this schedule');
+      return;
+    }
+
+    try {
+      const res = await fetch(`/api/schedules/${scheduleId}`, {
+        method: 'DELETE',
+      });
+      if (!res.ok) {
+        const data = await res.json().catch(() => null);
+        throw new Error(data?.error || `Failed to delete schedule (${res.status})`);
+      }
+      setScheduledPlaylists(prev => prev.filter((s) => s.id !== scheduleId));
+      setDismissedScheduleIds(prev => prev.filter((id) => id !== scheduleId));
+      toast.success('Schedule removed');
+    } catch (error: any) {
+      console.error('Failed to remove schedule', error);
+      toast.error(error.message || 'Failed to remove schedule');
+    }
+  };
+
   useEffect(() => {
     const interval = setInterval(() => {
       const now = new Date();
@@ -1456,6 +1491,7 @@ export default function App() {
             queue={queue}
             onImportFilesToPlaylist={handleImportFilesToPlaylist}
             onQueueTrackFromPlaylist={handleAddToQueue}
+            onDeleteSchedule={handleDeleteSchedule}
           />
         </div>
 
@@ -1480,10 +1516,13 @@ export default function App() {
                 </span>
               </div>
               <div className="max-h-40 overflow-auto space-y-1">
-                {scheduledPlaylists.map((s) => {
+                {scheduledPlaylists
+                  .filter((s) => !dismissedScheduleIds.includes(s.id))
+                  .map((s) => {
                   const isPending = s.status === 'pending';
                   const isDatetime = s.type === 'datetime';
                   const playlistForSchedule = playlists.find(p => p.id === s.playlistId);
+                  const isLocked = playlistForSchedule?.locked;
                   const playlistDurationSeconds = playlistForSchedule?.duration ?? (playlistForSchedule?.tracks.reduce((sum, t) => sum + (t.duration || 0), 0) || 0);
                   const label = isDatetime && s.dateTime
                     ? s.dateTime.toLocaleString(undefined, {
@@ -1499,22 +1538,10 @@ export default function App() {
                       ? `${s.triggerPosition === 'after' ? 'after' : 'before'} song`
                       : 'song-trigger';
 
-                  const handleCancel = async () => {
-                    if (!isPending) return;
-                    try {
-                      const res = await fetch(`/api/schedules/${s.id}`, {
-                        method: 'DELETE',
-                      });
-                      if (!res.ok) {
-                        const data = await res.json().catch(() => null);
-                        throw new Error(data?.error || `Failed to delete schedule (${res.status})`);
-                      }
-                      setScheduledPlaylists(prev => prev.filter(sp => sp.id !== s.id));
-                      toast.success('Schedule cancelled');
-                    } catch (error: any) {
-                      console.error('Failed to cancel schedule', error);
-                      toast.error(error.message || 'Failed to cancel schedule');
-                    }
+                  const handleDismiss = () => {
+                    setDismissedScheduleIds((prev) =>
+                      prev.includes(s.id) ? prev : [...prev, s.id]
+                    );
                   };
 
                   return (
@@ -1540,10 +1567,9 @@ export default function App() {
                       </div>
                       <button
                         type="button"
-                        onClick={handleCancel}
-                        disabled={!isPending}
-                        className="text-[10px] px-1 py-0.5 rounded border border-border hover:bg-destructive hover:text-destructive-foreground disabled:opacity-40 disabled:hover:bg-transparent disabled:hover:text-inherit"
-                        title={isPending ? 'Cancel schedule' : 'Already completed'}
+                        onClick={handleDismiss}
+                        className="text-[10px] px-1 py-0.5 rounded border border-border hover:bg-accent hover:text-foreground"
+                        title="Dismiss from list (schedule will still run)"
                       >
                         ✕
                       </button>
@@ -1570,14 +1596,16 @@ export default function App() {
       />
 
       <Toaster position="bottom-right" />
-      
-      <SchedulePlaylistDialog
-        open={scheduleDialogOpen}
-        onOpenChange={setScheduleDialogOpen}
-        playlistName={selectedPlaylistForSchedule?.name || ''}
-        queue={queue}
-        onSchedule={handleScheduleConfirm}
-      />
+
+      {scheduleDialogOpen && selectedPlaylistForSchedule && (
+        <SchedulePlaylistDialog
+          open={scheduleDialogOpen}
+          onOpenChange={handleScheduleDialogOpenChange}
+          playlistName={selectedPlaylistForSchedule.name}
+          queue={queue}
+          onSchedule={handleScheduleConfirm}
+        />
+      )}
 
       <HistoryDialog open={historyOpen} onOpenChange={setHistoryOpen} />
 

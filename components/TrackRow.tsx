@@ -26,6 +26,7 @@ interface TrackRowProps {
   onSelect?: () => void;        
   onFocusRow?: () => void;      
   onKeyDown?: (e: React.KeyboardEvent) => void; 
+  startTimeLabel?: string; // optional: scheduled start time for this track
 }
 
 export function TrackRow({
@@ -41,6 +42,7 @@ export function TrackRow({
   onSelect,
   onFocusRow,
   onKeyDown,
+  startTimeLabel,
 }: TrackRowProps) {
   const [isHovered, setIsHovered] = useState(false);
 
@@ -82,7 +84,7 @@ export function TrackRow({
               {formatDuration(track.duration)}
             </div>
             <div className="text-[10px] text-muted-foreground text-right tabular-nums opacity-60">
-              {formatFileSize(track.size)}
+              {startTimeLabel ? startTimeLabel : formatFileSize(track.size)}
             </div>
           </div>
 

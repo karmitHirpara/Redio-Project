@@ -69,12 +69,6 @@ export function PlaylistFolder({
         <ContextMenuItem onClick={onClick}>
           Open
         </ContextMenuItem>
-        {onSchedule && (
-          <ContextMenuItem onClick={onSchedule}>
-            <Calendar className="w-3 h-3 mr-2" />
-            Add Schedule
-          </ContextMenuItem>
-        )}
         <ContextMenuItem onClick={onDuplicate}>
           Duplicate
         </ContextMenuItem>

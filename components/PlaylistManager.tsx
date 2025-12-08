@@ -21,6 +21,7 @@ interface PlaylistManagerProps {
   onImportFilesToPlaylist: (playlistId: string, files: File[]) => void;
   onQueueTrackFromPlaylist: (track: Track) => void;
   scheduledPlaylists: ScheduledPlaylist[];
+  onDeleteSchedule: (scheduleId: string) => void | Promise<void>;
 }
 
 export function PlaylistManager({
@@ -40,9 +41,27 @@ export function PlaylistManager({
   onImportFilesToPlaylist,
   onQueueTrackFromPlaylist,
   scheduledPlaylists,
+  onDeleteSchedule,
 }: PlaylistManagerProps) {
   const [selectedPlaylist, setSelectedPlaylist] = useState<Playlist | null>(null);
   const [isEditorOpen, setIsEditorOpen] = useState(false);
+
+  const selectedPlaylistStartTime = (() => {
+    if (!selectedPlaylist) return null;
+    const candidates = scheduledPlaylists.filter((s) =>
+      s.playlistId === selectedPlaylist.id &&
+      s.type === 'datetime' &&
+      s.status === 'pending' &&
+      s.dateTime
+    );
+    if (candidates.length === 0) return null;
+    const earliest = candidates.reduce((min, s) => {
+      const t = s.dateTime ? s.dateTime.getTime() : Number.MAX_SAFE_INTEGER;
+      return t < min ? t : min;
+    }, Number.MAX_SAFE_INTEGER);
+    if (!isFinite(earliest)) return null;
+    return new Date(earliest);
+  })();
 
   const handleSelectPlaylist = (playlist: Playlist) => {
     setSelectedPlaylist(playlist);
@@ -76,6 +95,7 @@ export function PlaylistManager({
           onDuplicatePlaylist={onDuplicatePlaylist}
           onSchedulePlaylist={onSchedulePlaylist}
           scheduledPlaylists={scheduledPlaylists}
+          onDeleteSchedule={onDeleteSchedule}
         />
       </div>
 
@@ -99,6 +119,7 @@ export function PlaylistManager({
               onReorderTracks={(tracks) => onReorderPlaylistTracks(selectedPlaylist.id, tracks)}
               onImportFiles={(files) => onImportFilesToPlaylist(selectedPlaylist.id, files)}
               onQueueTrack={onQueueTrackFromPlaylist}
+              scheduledStartTime={selectedPlaylistStartTime}
             />
           </motion.div>
         )}

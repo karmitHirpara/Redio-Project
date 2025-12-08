@@ -4,26 +4,45 @@ import { query, run, get } from '../config/database.js';
 
 const router = express.Router();
 
-// Get all playlists with tracks
+// Get all playlists with tracks (optimized to avoid N+1 queries)
 router.get('/', async (req, res) => {
   try {
+    // Load all playlists first
     const playlists = await query('SELECT * FROM playlists ORDER BY created_at DESC');
-    
-    // Get tracks for each playlist
-    for (let playlist of playlists) {
-      const tracks = await query(`
-        SELECT t.*, pt.position
-        FROM tracks t
-        JOIN playlist_tracks pt ON t.id = pt.track_id
-        WHERE pt.playlist_id = ?
-        ORDER BY pt.position
-      `, [playlist.id]);
-      
+
+    if (playlists.length === 0) {
+      return res.json([]);
+    }
+
+    const playlistIds = playlists.map((p) => p.id);
+
+    // Load all tracks for these playlists in a single joined query
+    const trackRows = await query(
+      `SELECT pt.playlist_id, pt.position, t.*
+       FROM playlist_tracks pt
+       JOIN tracks t ON t.id = pt.track_id
+       WHERE pt.playlist_id IN (${playlistIds.map(() => '?').join(',')})
+       ORDER BY pt.playlist_id, pt.position`,
+      playlistIds,
+    );
+
+    // Group tracks by playlist_id
+    const tracksByPlaylist = new Map();
+    for (const row of trackRows) {
+      const { playlist_id, position, ...track } = row;
+      const arr = tracksByPlaylist.get(playlist_id) || [];
+      arr.push({ ...track, position });
+      tracksByPlaylist.set(playlist_id, arr);
+    }
+
+    // Attach tracks and durations
+    for (const playlist of playlists) {
+      const tracks = tracksByPlaylist.get(playlist.id) || [];
       playlist.tracks = tracks;
-      playlist.duration = tracks.reduce((sum, track) => sum + track.duration, 0);
+      playlist.duration = tracks.reduce((sum, track) => sum + (track.duration || 0), 0);
       playlist.locked = Boolean(playlist.locked);
     }
-    
+
     res.json(playlists);
   } catch (error) {
     res.status(500).json({ error: error.message });

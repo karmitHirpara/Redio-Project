@@ -18,6 +18,7 @@ interface PlaylistNavigatorProps {
   onDuplicatePlaylist: (playlistId: string) => void;
   onSchedulePlaylist: (playlistId: string) => void;
   scheduledPlaylists: ScheduledPlaylist[];
+  onDeleteSchedule: (scheduleId: string) => void | Promise<void>;
 }
 
 export function PlaylistNavigator({
@@ -31,6 +32,7 @@ export function PlaylistNavigator({
   onDuplicatePlaylist,
   onSchedulePlaylist,
   scheduledPlaylists,
+  onDeleteSchedule,
 }: PlaylistNavigatorProps) {
   const [searchQuery, setSearchQuery] = useState('');
   const [showScheduledOnly, setShowScheduledOnly] = useState(false);
@@ -55,11 +57,30 @@ export function PlaylistNavigator({
   }, [scheduledPlaylists]);
 
   const filteredPlaylists = useMemo(() => {
-    return playlists.filter((playlist) => {
+    const base = playlists.filter((playlist) => {
       const matchesSearch = playlist.name.toLowerCase().includes(searchQuery.toLowerCase());
       if (!matchesSearch) return false;
       if (!showScheduledOnly) return true;
+      // In Scheduled view, only include playlists that have a pending next schedule
       return Boolean(nextScheduleByPlaylist[playlist.id]);
+    });
+
+    if (!showScheduledOnly) {
+      // Keep original ordering when not in Scheduled mode
+      return base;
+    }
+
+    // In Scheduled view, sort by upcoming schedule time (earliest first)
+    return [...base].sort((a, b) => {
+      const sa = nextScheduleByPlaylist[a.id];
+      const sb = nextScheduleByPlaylist[b.id];
+
+      const ta = sa?.dateTime?.getTime() ?? Number.MAX_SAFE_INTEGER;
+      const tb = sb?.dateTime?.getTime() ?? Number.MAX_SAFE_INTEGER;
+
+      if (ta !== tb) return ta - tb;
+      // Stable fallback by name for equal times
+      return a.name.localeCompare(b.name);
     });
   }, [playlists, searchQuery, showScheduledOnly, nextScheduleByPlaylist]);
 
@@ -133,7 +154,25 @@ export function PlaylistNavigator({
       {/* Metadata Summary */}
       {selectedPlaylist && (
         <div className="border-t border-border p-4 space-y-2 bg-accent/20">
-          <h3 className="text-sm text-foreground">{selectedPlaylist.name}</h3>
+          <div className="flex items-center justify-between gap-2">
+            <h3 className="text-sm text-foreground">{selectedPlaylist.name}</h3>
+            {(() => {
+              const next = nextScheduleByPlaylist[selectedPlaylist.id];
+              if (!next || next.status !== 'pending') return null;
+              const disabled = selectedPlaylist.locked;
+              return (
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  className="h-6 px-2 text-[11px]"
+                  onClick={() => onDeleteSchedule(next.id)}
+                  disabled={disabled}
+                >
+                  Cancel
+                </Button>
+              );
+            })()}
+          </div>
           <div className="flex items-center gap-4 text-xs text-muted-foreground">
             <div className="flex items-center gap-1">
               <Music className="w-3 h-3" />

@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { Calendar, Clock, Music } from 'lucide-react';
 import {
   Dialog,
@@ -48,6 +48,17 @@ export function SchedulePlaylistDialog({
   const [time, setTime] = useState('');
   const [selectedSongId, setSelectedSongId] = useState('');
   const [triggerPosition, setTriggerPosition] = useState<'before' | 'after'>('after');
+
+  // Reset form state whenever the dialog is closed so it reopens cleanly
+  useEffect(() => {
+    if (!open) {
+      setMode('datetime');
+      setDate('');
+      setTime('');
+      setSelectedSongId('');
+      setTriggerPosition('after');
+    }
+  }, [open]);
 
   const handleSchedule = () => {
     if (mode === 'datetime') {

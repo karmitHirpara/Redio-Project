@@ -16,6 +16,7 @@ interface PlaylistEditorProps {
   onReorderTracks: (tracks: Track[]) => void;
   onImportFiles: (files: File[]) => void;
   onQueueTrack: (track: Track) => void;
+  scheduledStartTime?: Date | null;
 }
 
 export function PlaylistEditor({
@@ -27,7 +28,8 @@ export function PlaylistEditor({
   onRemoveTrack,
   onReorderTracks,
   onImportFiles,
-  onQueueTrack
+  onQueueTrack,
+  scheduledStartTime,
 }: PlaylistEditorProps) {
   const [searchQuery, setSearchQuery] = useState('');
   const fileInputRef = useRef<HTMLInputElement | null>(null);
@@ -74,6 +76,23 @@ export function PlaylistEditor({
     setDragIndex(null);
   };
 
+  // Precompute per-track start time labels when a scheduled start time is available
+  const startTimeByTrackId: Record<string, string> = {};
+  if (scheduledStartTime instanceof Date && !isNaN(scheduledStartTime.getTime())) {
+    let cursor = new Date(scheduledStartTime.getTime());
+    for (const t of playlist.tracks) {
+      const label = cursor.toLocaleTimeString(undefined, {
+        hour: '2-digit',
+        minute: '2-digit',
+        second: '2-digit',
+        hour12: true,
+      });
+      startTimeByTrackId[t.id] = label;
+      const durationSec = t.duration || 0;
+      cursor = new Date(cursor.getTime() + durationSec * 1000);
+    }
+  }
+
   return (
     <div className="h-full flex flex-col bg-background">
       {/* Header */}
@@ -87,14 +106,6 @@ export function PlaylistEditor({
             </div>
           </div>
           <div className="flex items-center gap-2">
-            <Button
-              size="sm"
-              variant="outline"
-              disabled={playlist.tracks.length === 0}
-              onClick={onPlayPlaylistNow}
-            >
-              Play
-            </Button>
             <Button
               size="sm"
               variant="secondary"
@@ -112,7 +123,7 @@ export function PlaylistEditor({
         <div className="flex items-center gap-2">
           <div className="relative flex-1">
             <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-muted-foreground" />
-            <Input
+            <Input 
               placeholder="Search in playlist..."
               value={searchQuery}
               onChange={(e) => setSearchQuery(e.target.value)}
@@ -179,6 +190,7 @@ export function PlaylistEditor({
                     playlists={[]}
                     onRemove={() => onRemoveTrack(track.id)}
                     showRemove={!playlist.locked}
+                    startTimeLabel={startTimeByTrackId[track.id]}
                   />
                 </div>
               </div>

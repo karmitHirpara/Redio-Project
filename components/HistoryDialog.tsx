@@ -318,13 +318,13 @@ export function HistoryDialog({ open, onOpenChange }: HistoryDialogProps) {
                             type="button"
                             onClick={(e) => {
                               e.stopPropagation();
-                              const filename = `history-${dateKey}.csv`;
+                              const filename = `history-${dateKey}.xlsx`;
                               downloadCsv(filename, dayEntries);
                             }}
                             className="inline-flex items-center gap-1 rounded-md border border-border/70 bg-background/80 px-2 py-1 text-[11px] text-muted-foreground hover:bg-accent/60 hover:text-foreground transition-colors"
                           >
                             <Download className="w-3 h-3" />
-                            <span>CSV</span>
+                            <span>Excel</span>
                           </button>
                         </div>
                       </div>
@@ -339,61 +339,66 @@ export function HistoryDialog({ open, onOpenChange }: HistoryDialogProps) {
                             className="border-t border-border/60 bg-background/40"
                           >
                             <div className="py-1.5 space-y-1.5">
-                              {dayEntries.map((entry) => {
-                                const completed = Boolean(entry.completed);
-                                const fileOk = entry.file_status === 'ok';
+                              {/* Column header */}
+                              <div className="px-3 pb-1 pt-0.5 text-[11px] text-muted-foreground border-b border-border/40 hidden sm:grid sm:grid-cols-[40px,minmax(0,2fr),minmax(0,1.4fr),minmax(0,1.4fr)] gap-2">
+                                <span className="uppercase tracking-wide">No</span>
+                                <span className="uppercase tracking-wide">Song</span>
+                                <span className="uppercase tracking-wide">Start</span>
+                                <span className="uppercase tracking-wide">End</span>
+                              </div>
+
+                              {dayEntries.map((entry, idx) => {
+                                const durationSeconds = (entry.position_end ?? 0) - (entry.position_start ?? 0);
+                                const start = new Date(entry.played_at);
+                                const end = new Date(start.getTime() + Math.max(0, durationSeconds) * 1000);
+                                const startTime = start.toLocaleTimeString(undefined, {
+                                  hour: '2-digit',
+                                  minute: '2-digit',
+                                  second: '2-digit',
+                                  hour12: true,
+                                });
+                                const endTime = end.toLocaleTimeString(undefined, {
+                                  hour: '2-digit',
+                                  minute: '2-digit',
+                                  second: '2-digit',
+                                  hour12: true,
+                                });
+
                                 return (
                                   <ContextMenu key={entry.id}>
                                     <ContextMenuTrigger asChild>
-                                      <div className="flex items-start gap-3 px-3 py-1.5 hover:bg-accent/40 cursor-default">
-                                        <div className="mt-1">
-                                          <Clock className="w-3.5 h-3.5 text-muted-foreground" />
-                                        </div>
-                                        <div className="flex-1 min-w-0">
-                                          <div className="flex justify-between gap-2">
-                                            <div className="truncate">
-                                              <div className="text-xs font-medium text-foreground truncate select-text">
-                                                {entry.track_name || 'Unknown track'}
-                                              </div>
-                                              <div className="text-[11px] text-muted-foreground truncate select-text">
-                                                {entry.track_artist || 'Unknown artist'}
-                                              </div>
-                                            </div>
-                                            <div className="flex items-center gap-1.5">
-                                              <div className="text-[11px] text-muted-foreground whitespace-nowrap select-text">
-                                                {formatTime(entry.played_at)}
-                                              </div>
+                                      <div className="px-3 py-1.5 hover:bg-accent/40 cursor-default">
+                                        <div className="hidden sm:grid sm:grid-cols-[40px,minmax(0,2fr),minmax(0,1.4fr),minmax(0,1.4fr)] gap-2 items-center text-[12px]">
+                                          <div className="flex items-center gap-1 text-muted-foreground">
+                                            <Clock className="w-3.5 h-3.5" />
+                                            <span className="tabular-nums">{idx + 1}</span>
+                                          </div>
+                                          <div className="truncate">
+                                            <div className="text-xs font-medium text-foreground truncate select-text">
+                                              {entry.track_name || 'Unknown track'}
                                             </div>
                                           </div>
+                                          <div className="text-[11px] text-muted-foreground truncate select-text tabular-nums">
+                                            {startTime}
+                                          </div>
+                                          <div className="text-[11px] text-muted-foreground truncate select-text tabular-nums">
+                                            {endTime}
+                                          </div>
+                                        </div>
 
-                                          <div className="mt-1 flex flex-wrap items-center gap-1.5 text-[11px] text-muted-foreground">
-                                            <span
-                                              className={cn(
-                                                'px-1.5 py-0.5 rounded-full border border-border/70 bg-background/80',
-                                              )}
-                                            >
-                                              {entry.source}
-                                            </span>
-                                            <span
-                                              className={cn(
-                                                'px-1.5 py-0.5 rounded-full border border-border/70 bg-background/80',
-                                                completed
-                                                  ? 'text-emerald-500 border-emerald-500/40 bg-emerald-500/5'
-                                                  : 'text-amber-500 border-amber-500/40 bg-amber-500/5'
-                                              )}
-                                            >
-                                              {completed ? 'Completed' : 'Stopped early'}
-                                            </span>
-                                            <span
-                                              className={cn(
-                                                'px-1.5 py-0.5 rounded-full border border-border/70 bg-background/80',
-                                                fileOk
-                                                  ? 'text-emerald-500 border-emerald-500/40 bg-emerald-500/5'
-                                                  : 'text-destructive border-destructive/40 bg-destructive/5'
-                                              )}
-                                            >
-                                              File {entry.file_status}
-                                            </span>
+                                        {/* Mobile-friendly stacked layout */}
+                                        <div className="sm:hidden flex items-start gap-3">
+                                          <div className="mt-1">
+                                            <Clock className="w-3.5 h-3.5 text-muted-foreground" />
+                                          </div>
+                                          <div className="flex-1 min-w-0">
+                                            <div className="text-xs font-medium text-foreground truncate select-text">
+                                              {idx + 1}. {entry.track_name || 'Unknown track'}
+                                            </div>
+                                            <div className="mt-0.5 flex flex-col gap-0.5 text-[11px] text-muted-foreground">
+                                              <span className="select-text">Start: {startTime}</span>
+                                              <span className="select-text">End: {endTime}</span>
+                                            </div>
                                           </div>
                                         </div>
                                       </div>
