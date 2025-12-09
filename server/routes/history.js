@@ -22,6 +22,39 @@ router.get('/', async (req, res) => {
   }
 });
 
+// Update an existing history entry (e.g. extend listening time or mark completed)
+router.put('/:id', async (req, res) => {
+  try {
+    const existing = await get('SELECT * FROM playback_history WHERE id = ?', [req.params.id]);
+    if (!existing) {
+      return res.status(404).json({ error: 'History entry not found' });
+    }
+
+    const {
+      positionStart,
+      positionEnd,
+      completed,
+    } = req.body;
+
+    const newPositionStart = positionStart != null ? positionStart : existing.position_start;
+    const newPositionEnd = positionEnd != null ? positionEnd : existing.position_end;
+    const newCompleted =
+      typeof completed === 'boolean' ? (completed ? 1 : 0) : existing.completed;
+
+    await run(
+      `UPDATE playback_history
+       SET position_start = ?, position_end = ?, completed = ?
+       WHERE id = ?`,
+      [newPositionStart, newPositionEnd, newCompleted, req.params.id]
+    );
+
+    const updated = await get('SELECT * FROM playback_history WHERE id = ?', [req.params.id]);
+    res.json(updated);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
 // Create a history entry
 router.post('/', async (req, res) => {
   try {

@@ -41,6 +41,8 @@ export default function App() {
   } | null>(null);
   const duplicateDecisionResolver = useRef<((choice: 'skip' | 'add') => void) | null>(null);
   const [dismissedScheduleIds, setDismissedScheduleIds] = useState<string[]>([]);
+  const [historySessions, setHistorySessions] = useState<Record<string, { id: string; seconds: number }>>({});
+  const [nowIst, setNowIst] = useState<Date | null>(null);
 
   const prevQueueLengthRef = useRef(0);
 
@@ -73,6 +75,19 @@ export default function App() {
     nowPlayingStart,
     crossfadeSeconds,
   });
+
+  // Keep a lightweight IST clock for display in the top bar
+  useEffect(() => {
+    const update = () => {
+      const istString = new Date().toLocaleString('en-IN', {
+        timeZone: 'Asia/Kolkata',
+      });
+      setNowIst(new Date(istString));
+    };
+    update();
+    const id = window.setInterval(update, 1000);
+    return () => window.clearInterval(id);
+  }, []);
 
   // Load tracks from backend so library reflects database
   useEffect(() => {
@@ -1205,7 +1220,10 @@ export default function App() {
 
   useEffect(() => {
     const interval = setInterval(() => {
-      const now = new Date();
+      // Use IST as the reference clock for datetime schedules
+      const nowIst = new Date(
+        new Date().toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' })
+      );
 
       setScheduledPlaylists(prev => {
         // 1-minute warning for upcoming datetime schedules
@@ -1215,7 +1233,7 @@ export default function App() {
             schedule.status === 'pending' &&
             schedule.dateTime
           ) {
-            const msUntil = schedule.dateTime.getTime() - now.getTime();
+            const msUntil = schedule.dateTime.getTime() - nowIst.getTime();
             if (msUntil <= 60_000 && msUntil > 0 && !datetimeWarnedRef.current.has(schedule.id)) {
               datetimeWarnedRef.current.add(schedule.id);
               toast.info('Scheduled playlist starting soon', {
@@ -1229,7 +1247,7 @@ export default function App() {
           schedule.type === 'datetime' &&
           schedule.status === 'pending' &&
           schedule.dateTime &&
-          schedule.dateTime <= now
+          schedule.dateTime <= nowIst
         );
 
         if (due.length === 0) {
@@ -1312,25 +1330,77 @@ export default function App() {
   };
 
   // Playback Controls
+  // Record real listening time for tracks by accumulating wall-clock seconds
+  // in a single history row per track (for this app session).
   const logPlaybackHistory = (track: Track, options?: { completed?: boolean; source?: string }) => {
-    const payload = {
-      trackId: track.id,
-      playedAt: new Date().toISOString(),
-      positionStart: 0,
-      positionEnd: track.duration,
-      completed: options?.completed ?? true,
-      source: options?.source ?? 'queue',
-      fileStatus: 'ok'
-    };
+    const source = options?.source ?? 'queue';
+    const completed = options?.completed ?? true;
 
-    // Fire-and-forget; errors are logged in console only
-    fetch('/api/history', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(payload)
-    }).catch((error) => {
-      console.error('Failed to write playback history', error);
-    });
+    // Derive how long this track has actually been playing based on nowPlayingStart
+    const now = new Date();
+    const baseStart = nowPlayingStart ?? now;
+    const elapsedSeconds = Math.max(0, Math.round((now.getTime() - baseStart.getTime()) / 1000));
+    if (elapsedSeconds <= 0) {
+      return;
+    }
+
+    const existingSession = historySessions[track.id];
+    const newTotalSeconds = (existingSession?.seconds ?? 0) + elapsedSeconds;
+
+    if (existingSession) {
+      // Update existing history row with new cumulative listening time
+      fetch(`/api/history/${existingSession.id}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          positionStart: 0,
+          positionEnd: newTotalSeconds,
+          completed,
+        }),
+      })
+        .then(() => {
+          setHistorySessions((prev) => ({
+            ...prev,
+            [track.id]: { id: existingSession.id, seconds: newTotalSeconds },
+          }));
+        })
+        .catch((error) => {
+          console.error('Failed to update playback history', error);
+        });
+    } else {
+      const payload = {
+        trackId: track.id,
+        playedAt: baseStart.toISOString(),
+        positionStart: 0,
+        positionEnd: newTotalSeconds,
+        completed,
+        source,
+        fileStatus: 'ok',
+      };
+
+      fetch('/api/history', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      })
+        .then(async (res) => {
+          if (!res.ok) {
+            const data = await res.json().catch(() => null);
+            throw new Error(data?.error || `Failed to create history entry (${res.status})`);
+          }
+          return res.json();
+        })
+        .then((entry) => {
+          if (!entry || !entry.id) return;
+          setHistorySessions((prev) => ({
+            ...prev,
+            [track.id]: { id: String(entry.id), seconds: newTotalSeconds },
+          }));
+        })
+        .catch((error) => {
+          console.error('Failed to write playback history', error);
+        });
+    }
   };
 
   const handlePlayPause = () => {
@@ -1435,9 +1505,36 @@ export default function App() {
   return (
     <div className="h-screen flex flex-col bg-background text-foreground transition-colors duration-200">
       {/* Top Bar */}
-      <div className="h-12 bg-background border-b border-border flex items-center justify-between px-4">
-        <h1 className="text-foreground">Radio Automation</h1>
-        <div className="flex items-center gap-2">
+      <div className="h-12 bg-background border-b border-border flex items-center px-4">
+        <div className="flex items-center gap-2 flex-1 min-w-0">
+          <h1 className="text-foreground whitespace-nowrap">Radio Automation</h1>
+        </div>
+
+        <div className="flex-1 flex items-center justify-center text-xs text-muted-foreground tabular-nums">
+          {nowIst && (() => {
+            const raw = nowIst.toLocaleTimeString('en-IN', {
+              timeZone: 'Asia/Kolkata',
+              hour: '2-digit',
+              minute: '2-digit',
+              second: '2-digit',
+              hour12: true,
+            });
+            // Force AM/PM to uppercase for a cleaner look
+            const parts = raw.split(' ');
+            if (parts.length > 1) {
+              const suffix = parts.pop()!;
+              const time = parts.join(' ');
+              return (
+                <span>
+                  {time} {suffix.toUpperCase()}
+                </span>
+              );
+            }
+            return <span>{raw}</span>;
+          })()}
+        </div>
+
+        <div className="flex items-center gap-2 flex-1 justify-end">
           <Button
             variant="ghost"
             size="sm"

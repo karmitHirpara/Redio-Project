@@ -46,6 +46,7 @@ export function PlaybackBar({
   const [showPauseConfirm, setShowPauseConfirm] = useState(false);
   const primaryAudioRef = useRef<HTMLAudioElement | null>(null);
   const [duration, setDuration] = useState(0);
+  const lastTrackIdRef = useRef<string | null>(null);
 
   // Simple fade state for single-audio playback
   const fadeRafRef = useRef<number | null>(null);
@@ -53,21 +54,26 @@ export function PlaybackBar({
 
   const getActiveAudio = () => primaryAudioRef.current;
 
-  // Sync audio element with current track
+  // Sync audio element with current track. Only reset position when the track changes,
+  // so pausing and resuming continues from the same spot.
   useEffect(() => {
     const audio = getActiveAudio();
     if (!audio) return;
 
     if (currentTrack) {
-      audio.src = currentTrack.filePath;
-      audio.currentTime = 0;
-      setCurrentTime(0);
-      setDuration(currentTrack.duration || 0);
+      const trackChanged = currentTrack.id !== lastTrackIdRef.current;
+      if (trackChanged) {
+        lastTrackIdRef.current = currentTrack.id;
+        audio.src = currentTrack.filePath;
+        audio.currentTime = 0;
+        setCurrentTime(0);
+        setDuration(currentTrack.duration || 0);
+      }
 
       // Only run a fade-in if we are actively playing when a brand new track
       // is loaded. Start from a small, audible volume so there is no "dead"
       // first second.
-      if (isPlaying) {
+      if (trackChanged && isPlaying) {
         audio.play().catch(() => {
           // Playback might be blocked by browser autoplay policies
         });
@@ -78,7 +84,10 @@ export function PlaybackBar({
 
         const minFadeSeconds = 0.4;
         const maxFadeSeconds = 3;
-        const fadeSeconds = Math.min(maxFadeSeconds, Math.max(minFadeSeconds, (crossfadeSeconds || 1.5) / 2));
+        const fadeSeconds = Math.min(
+          maxFadeSeconds,
+          Math.max(minFadeSeconds, (crossfadeSeconds || 1.5) / 2),
+        );
         const fadeDurationMs = fadeSeconds * 1000;
         const start = performance.now();
         const startVolume = 0.2; // immediately audible
@@ -107,7 +116,7 @@ export function PlaybackBar({
         };
 
         fadeRafRef.current = requestAnimationFrame(step);
-      } else {
+      } else if (!isPlaying) {
         // If we're not playing yet, keep the track at normal volume so the
         // first play click feels instant.
         try {
@@ -117,8 +126,9 @@ export function PlaybackBar({
     } else {
       audio.removeAttribute('src');
       setCurrentTime(0);
+      lastTrackIdRef.current = null;
     }
-  }, [currentTrack, isPlaying]);
+  }, [currentTrack, isPlaying, crossfadeSeconds]);
 
   // Play / pause audio when isPlaying changes
   useEffect(() => {

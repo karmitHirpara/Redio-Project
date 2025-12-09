@@ -41,15 +41,16 @@ export function HistoryDialog({ open, onOpenChange }: HistoryDialogProps) {
   const [entries, setEntries] = useState<HistoryEntry[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [hasLoadedOnce, setHasLoadedOnce] = useState(false);
 
   useEffect(() => {
     if (!open) return;
     let cancelled = false;
 
-    const load = async () => {
-      setLoading(true);
+    const load = async (showSpinner: boolean) => {
       setError(null);
       try {
+        if (!cancelled && showSpinner) setLoading(true);
         const res = await fetch('/api/history?limit=100');
         if (!res.ok) {
           throw new Error(`Failed to load history (${res.status})`);
@@ -57,30 +58,42 @@ export function HistoryDialog({ open, onOpenChange }: HistoryDialogProps) {
         const data: HistoryEntry[] = await res.json();
         if (!cancelled) {
           setEntries(data);
+          if (showSpinner && !hasLoadedOnce) {
+            setHasLoadedOnce(true);
+          }
         }
       } catch (err: any) {
         if (!cancelled) {
           setError(err.message || 'Failed to load history');
         }
       } finally {
-        if (!cancelled) setLoading(false);
+        if (!cancelled && showSpinner) setLoading(false);
       }
     };
 
-    load();
+    // Initial load when dialog opens: show spinner only if we haven't loaded before
+    load(!hasLoadedOnce);
+    // Poll periodically while open so history stays in sync as songs play, without spinner
+    const intervalId = window.setInterval(() => load(false), 5000);
+
     return () => {
       cancelled = true;
+      window.clearInterval(intervalId);
     };
-  }, [open]);
+  }, [open, hasLoadedOnce]);
 
   const formatTime = (iso: string) => {
     const d = new Date(iso);
-    return d.toLocaleString();
+    return d.toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' });
   };
 
   const formatDateKey = (iso: string) => {
     const d = new Date(iso);
-    return d.toISOString().slice(0, 10); // YYYY-MM-DD
+    const year = d.getFullYear();
+    const month = String(d.getMonth() + 1).padStart(2, '0');
+    const day = String(d.getDate()).padStart(2, '0');
+    // YYYY-MM-DD in the user's local calendar, so "today" groups correctly
+    return `${year}-${month}-${day}`;
   };
 
   const formatDateLabel = (dateKey: string) => {
@@ -351,13 +364,15 @@ export function HistoryDialog({ open, onOpenChange }: HistoryDialogProps) {
                                 const durationSeconds = (entry.position_end ?? 0) - (entry.position_start ?? 0);
                                 const start = new Date(entry.played_at);
                                 const end = new Date(start.getTime() + Math.max(0, durationSeconds) * 1000);
-                                const startTime = start.toLocaleTimeString(undefined, {
+                                const startTime = start.toLocaleTimeString('en-IN', {
+                                  timeZone: 'Asia/Kolkata',
                                   hour: '2-digit',
                                   minute: '2-digit',
                                   second: '2-digit',
                                   hour12: true,
                                 });
-                                const endTime = end.toLocaleTimeString(undefined, {
+                                const endTime = end.toLocaleTimeString('en-IN', {
+                                  timeZone: 'Asia/Kolkata',
                                   hour: '2-digit',
                                   minute: '2-digit',
                                   second: '2-digit',

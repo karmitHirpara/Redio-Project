@@ -124,7 +124,8 @@ export function PlaylistNavigator({
         {filteredPlaylists.map((playlist) => {
           const nextSchedule = nextScheduleByPlaylist[playlist.id];
           const scheduleLabel = nextSchedule?.dateTime
-            ? nextSchedule.dateTime.toLocaleString(undefined, {
+            ? nextSchedule.dateTime.toLocaleString('en-IN', {
+                timeZone: 'Asia/Kolkata',
                 month: 'short',
                 day: '2-digit',
                 hour: '2-digit',
@@ -190,7 +191,8 @@ export function PlaylistNavigator({
               <div className="flex items-center gap-2 text-[11px] text-muted-foreground">
                 <Clock className="w-3 h-3" />
                 <span>Next schedule:</span>
-                <span>{next.dateTime.toLocaleString(undefined, {
+                <span>{next.dateTime.toLocaleString('en-IN', {
+                  timeZone: 'Asia/Kolkata',
                   month: 'short',
                   day: '2-digit',
                   hour: '2-digit',
