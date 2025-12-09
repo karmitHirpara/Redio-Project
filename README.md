@@ -136,49 +136,67 @@ Redio Project/
 └── README.md, SETUP.md      # Docs
 ```
 
-## 🔌 API Overview (backend)
+## 🧠 High-level Architecture & Data Flow
+
+- **Frontend (React/Vite)**
+  - `App.tsx` is the main orchestrator.
+    - Loads **tracks**, **playlists**, **queue**, and **schedules** from the backend on startup.
+    - Manages playback state: `currentTrackId`, `isPlaying`, `nowPlayingStart`, `crossfadeSeconds`.
+    - Wires three main panels and the playback bar:
+      - **LibraryPanel** – imports/organises tracks and folders.
+      - **PlaylistManager** – CRUD, locking, duplication, and scheduling.
+      - **QueuePanel** – live queue view with timing for each item.
+      - **PlaybackBar** – single `<audio>` element, crossfade-style fading, and transport controls.
+    - Uses `useQueueTiming` to estimate **start/end time for each queue item** based on wall‑clock and crossfade.
+    - Maintains a lightweight top‑center **clock** (`nowIst`) which is used both for display and to drive datetime schedules.
+
+- **Backend (Express + SQLite)**
+  - `server.js` exposes `/api/*` routes and a `/ws` WebSocket endpoint.
+  - Routes encapsulate domain logic:
+    - `tracks.js` – upload, duplicate detection, alias creation.
+    - `playlists.js` – playlists and playlist_tracks.
+    - `queue.js` – queue CRUD + `queue-updated` events over WebSocket.
+    - `schedules.js` – create/list/update/delete schedules.
+    - `history.js` – playback history create/update/actions.
+  - All persistent state (tracks, playlists, queue, schedules, history) lives in SQLite; the React app is effectively a **thin client** on top.
+
+Typical flow:
+
+1. Tracks are uploaded → stored as `tracks` rows.
+2. Playlists reference tracks via `playlist_tracks`.
+3. Queue holds a sequence of `queue` rows, each pointing at a track.
+4. Playback runs from the queue; as tracks start and finish, `App.tsx` logs listening time to `playback_history`.
+5. Schedules, when due, manipulate the queue (prepending scheduled playlist tracks) and are marked `completed`.
+
+## 🔌 Backend Responsibilities (high level)
 
 ### Tracks
 
-- `GET /api/tracks` – List all tracks
-- `GET /api/tracks/:id` – Get single track
-- `POST /api/tracks/upload` – Upload an audio file  
-  - Computes file hash, checks duplicates.  
-  - On duplicate: returns `409` + `existingTrack` instead of storing a new file.
-- `POST /api/tracks/alias` – Create another track row pointing to the **same file** (alias) with auto-renamed title.
-- `DELETE /api/tracks/:id` – Delete track (and related queue/playlists entries via FK behavior).
+- Stores uploaded audio files and their metadata (name, artist, duration, size, file path, hash).
+- Detects duplicate audio by file hash and supports creating *alias* tracks that point to the same file with auto‑renamed titles.
+- Deleting a track also cleans up related queue and playlist entries via database relations.
 
 ### Playlists
 
-- `GET /api/playlists` – All playlists with their tracks.
-- `GET /api/playlists/:id` – Single playlist with tracks.
-- `POST /api/playlists` – Create playlist.
-- `PUT /api/playlists/:id` – Rename or lock/unlock playlist.
-- `DELETE /api/playlists/:id` – Delete playlist.
-- `POST /api/playlists/:id/tracks` – Attach one or more track IDs.
-- `DELETE /api/playlists/:id/tracks/:trackId` – Remove track from playlist.
-- `PUT /api/playlists/:id/reorder` – Reorder playlist tracks by track ID list.
+- Manages creation, renaming, locking/unlocking, duplication, and deletion of playlists.
+- Keeps an ordered list of tracks per playlist and persists this order in the database.
+- Supports attaching/removing tracks and reordering them.
 
 ### Queue
 
-- `GET /api/queue` – Current queue items with track info.
-- `POST /api/queue` – Add a track to queue (optionally with `fromPlaylist`).
-- `PUT /api/queue/reorder` – Reorder queue by queue ID list.
-- `DELETE /api/queue/:id` – Remove a specific item.
-- `DELETE /api/queue` – Clear queue.
-
-> Queue mutations also emit a `queue-updated` WebSocket event with the full queue payload.
+- Stores the current play queue as an ordered list of items referencing tracks.
+- Supports adding, removing, reordering, and clearing queue items.
+- Emits `queue-updated` events over WebSocket when the queue changes so connected clients can stay in sync.
 
 ### Schedules
 
-- `GET /api/schedules` – List schedules (joined with playlist names).
-- `POST /api/schedules` – Create schedule (datetime or song-trigger).
-- `PUT /api/schedules/:id` – Update status (e.g. `completed`).
-- `DELETE /api/schedules/:id` – Remove schedule.
+- Persists playlist schedules, both **datetime** and **song-trigger** types, including their status (`pending`, `completed`).
+- Provides the data the frontend uses to show upcoming schedules and to decide when to start scheduled playlists.
 
 ### Playback History
 
-- `POST /api/history` – Log completed track plays (best-effort; failures logged to console only).
+- Records how long each track has actually been listened to (start/end positions, completed flag, source, file status).
+- Allows existing history rows to be updated so multiple listens to the same track in one session can be accumulated.
 
 ## 🎨 Usage Guide
 
@@ -225,11 +243,81 @@ Redio Project/
 2. Crossfade slider controls the fade window (~2–3s max) used for fade-in at the start and fade-out at the end of tracks.
 3. The `LIVE` badge indicates live mode; pausing shows a confirmation dialog.
 
+## ⏱ Time & Scheduling Semantics
+
+- **Display timezone**
+  - All user‑visible times (clock, queue, schedules, history) are formatted in **IST** (`Asia/Kolkata`) with uppercase `AM/PM`.
+
+- **Top bar clock**
+  - `App.tsx` maintains `nowIst` with a 1‑second interval.
+  - This same clock drives both the visual clock and datetime schedule evaluation, so operators see what the scheduler sees.
+
+- **Datetime schedules**
+  - Created via **Schedule Playlist** → `POST /api/schedules` with `type: 'datetime'` and a `date_time`.
+  - On the frontend, `App.tsx` polls this list and holds it in `scheduledPlaylists`.
+  - Every second, a `useEffect`:
+    - Sends a **1‑minute warning toast** when a pending datetime schedule is within 60s.
+    - Finds all schedules where `dateTime <= nowIst` and `status === 'pending'`.
+    - For each due schedule:
+      - Looks up the playlist and builds a list of `QueueItem`s for its tracks.
+  - Due schedules **preempt** the queue:
+    - If a track is currently playing:
+      - It is removed from the queue.
+      - Its listening time so far is logged as a **partial history** row (`completed: false`).
+    - All scheduled playlist items are **prepended** to the queue.
+    - Playback immediately jumps to the first scheduled track and starts playing.
+    - Schedules are updated to `status = 'completed'` both locally and via `PUT /api/schedules/:id`.
+  - When the scheduled playlist finishes, playback continues with the remaining queue items. The interrupted song is **not** resumed.
+
+- **Song‑trigger schedules**
+  - When `handleNext` moves off a queue item, any `song-trigger` schedules tied to that queue row are detected.
+  - The scheduled playlist tracks are inserted before/after the remaining queue according to `triggerPosition`, and the schedule status is updated.
+
+## 📜 Playback History Semantics
+
+- `App.tsx` maintains an in‑memory map `historySessions: trackId → { id, seconds }` for the current browser session.
+- When leaving a track (user skip, natural end, or schedule preemption), `logPlaybackHistory`:
+  - Computes **elapsed wall‑clock time** since `nowPlayingStart`.
+  - If no history session exists for that track yet:
+    - Creates a new `playback_history` row via `POST /api/history` with
+      - `positionStart = 0`, `positionEnd = elapsedSeconds`.
+  - If a session already exists:
+    - Extends the existing row via `PUT /api/history/:id`, updating `positionEnd` with the **cumulative** seconds and optionally `completed`.
+- This means repeated plays of the same track in one app session are **accumulated** in a single history row, unless the browser is refreshed.
+
+History UI:
+
+- `HistoryDialog.tsx` polls `/api/history` while open and shows a simple list:
+  - Song name
+  - Start time
+  - End time (derived from `positionEnd` and `positionStart`)
+  - Grouped by local calendar date.
+
 ## 🔧 Configuration
 
 ### Theme
 
 Use the theme toggle in the top-right to switch between **default** (dark) and **light**.
+
+## 📈 Reliability & Operational Notes
+
+- **Scheduler lifetime**
+  - Datetime schedule evaluation currently runs **in the browser** (React `useEffect`), not as a cron on the server.
+  - For schedules to fire on time, at least one browser session with the app open must be running. For 24/7 automation, keep a dedicated machine/tab open.
+
+- **Queue & timing robustness**
+  - `useQueueTiming` computes queue timings against wall‑clock and `nowPlayingStart` using `crossfadeSeconds` so that the queue panel shows realistic “will play at” times.
+  - If `crossfadeSeconds` is changed, future items’ estimated times adjust automatically.
+
+- **Default crossfade**
+  - `crossfadeSeconds` defaults to **2s**, which is a good compromise between smooth transitions and timing accuracy.
+
+- **Error handling**
+  - Most network operations show a toast on failure and log to the console for diagnostics.
+  - Playback history writes are best‑effort; failures do **not** stop playback but may result in missing history rows.
+
+- **Auto-cleanup of scheduled UI**
+  - The “Scheduled” panel in the right column auto‑hides ~3 seconds after there are no pending schedules left, to avoid UI clutter.
 
 ## 🐛 Troubleshooting
 

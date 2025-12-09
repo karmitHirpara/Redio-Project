@@ -26,7 +26,7 @@ export default function App() {
   const [isPlaying, setIsPlaying] = useState(false);
   const [isLive, setIsLive] = useState(true);
   const [scheduledPlaylists, setScheduledPlaylists] = useState<ScheduledPlaylist[]>([]);
-  const [crossfadeSeconds, setCrossfadeSeconds] = useState(3);
+  const [crossfadeSeconds, setCrossfadeSeconds] = useState(2);
   const [nowPlayingStart, setNowPlayingStart] = useState<Date | null>(null);
   const pauseStartedAtRef = useRef<Date | null>(null);
   const datetimeWarnedRef = useRef<Set<string>>(new Set());
@@ -81,10 +81,32 @@ export default function App() {
     const update = () => {
       setNowIst(new Date());
     };
+
     update();
     const id = window.setInterval(update, 1000);
     return () => window.clearInterval(id);
   }, []);
+
+  // Auto-dismiss the Scheduled panel a few seconds after there are no
+  // visible schedules left, so the UI does not stay cluttered.
+  useEffect(() => {
+    const pendingCount = scheduledPlaylists.filter((s) => s.status === 'pending').length;
+
+    // Only auto-hide once there are schedules in history but none pending.
+    if (scheduledPlaylists.length === 0 || pendingCount > 0) {
+      return;
+    }
+
+    const timeoutId = window.setTimeout(() => {
+      setDismissedScheduleIds((prev) => {
+        const allIds = scheduledPlaylists.map((s) => s.id);
+        const merged = Array.from(new Set([...prev, ...allIds]));
+        return merged;
+      });
+    }, 3000);
+
+    return () => window.clearTimeout(timeoutId);
+  }, [scheduledPlaylists]);
 
   // Load tracks from backend so library reflects database
   useEffect(() => {
@@ -1167,12 +1189,14 @@ export default function App() {
       if (config.mode === 'datetime') {
         toast.success(`Playlist "${selectedPlaylistForSchedule.name}" scheduled`, {
           description: config.dateTime ? `Will start at ${config.dateTime.toLocaleString()}` : undefined,
+          duration: 3000,
         });
       } else {
         const queueItem = queue.find(q => q.id === config.queueSongId);
         const position = config.triggerPosition === 'after' ? 'after' : 'before';
         toast.success(`Playlist "${selectedPlaylistForSchedule.name}" scheduled`, {
           description: `Will start ${position} "${queueItem?.track.name}"`,
+          duration: 3000,
         });
       }
     } catch (error: any) {
@@ -1212,114 +1236,6 @@ export default function App() {
     } catch (error: any) {
       console.error('Failed to remove schedule', error);
       toast.error(error.message || 'Failed to remove schedule');
-    }
-  };
-
-  useEffect(() => {
-    const interval = setInterval(() => {
-      const now = new Date();
-
-      setScheduledPlaylists(prev => {
-        // 1-minute warning for upcoming datetime schedules
-        prev.forEach((schedule) => {
-          if (
-            schedule.type === 'datetime' &&
-            schedule.status === 'pending' &&
-            schedule.dateTime
-          ) {
-            const msUntil = schedule.dateTime.getTime() - now.getTime();
-            if (msUntil <= 60_000 && msUntil > 0 && !datetimeWarnedRef.current.has(schedule.id)) {
-              datetimeWarnedRef.current.add(schedule.id);
-              toast.info('Scheduled playlist starting soon', {
-                description: `"${schedule.playlistName}" will start in about 1 minute`,
-              });
-            }
-          }
-        });
-
-        const due = prev.filter((schedule) =>
-          schedule.type === 'datetime' &&
-          schedule.status === 'pending' &&
-          schedule.dateTime &&
-          schedule.dateTime <= now
-        );
-
-        if (due.length === 0) {
-          return prev;
-        }
-
-        // Sort due schedules for deterministic handling
-        const sortedDue = [...due].sort((a, b) => {
-          const aTime = a.dateTime?.getTime() ?? 0;
-          const bTime = b.dateTime?.getTime() ?? 0;
-          if (aTime !== bTime) return aTime - bTime;
-          return a.playlistName.localeCompare(b.playlistName);
-        });
-
-        // Enqueue playlists for all due schedules in one queue update
-        setQueue((prevQueue) => {
-          let queueAcc = [...prevQueue];
-
-          sortedDue.forEach((schedule) => {
-            const playlist = playlists.find((p) => p.id === schedule.playlistId);
-            if (!playlist || playlist.tracks.length === 0) {
-              return;
-            }
-
-            const startOrder = queueAcc.length;
-            const newItems: QueueItem[] = playlist.tracks.map((track, index) => ({
-              id: generateId(),
-              track,
-              fromPlaylist: playlist.name,
-              order: startOrder + index,
-            }));
-            queueAcc = [...queueAcc, ...newItems];
-          });
-
-          return queueAcc;
-        });
-
-        // Mark each due schedule as completed in backend (fire-and-forget)
-        sortedDue.forEach((schedule) => {
-          fetch(`/api/schedules/${schedule.id}`, {
-            method: 'PUT',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ status: 'completed' }),
-          }).catch((error) => {
-            console.error('Failed to update schedule status', error);
-          });
-        });
-
-        // Update local status once
-        return prev.map((schedule) =>
-          due.some((d) => d.id === schedule.id)
-            ? { ...schedule, status: 'completed' as ScheduledPlaylist['status'] }
-            : schedule
-        );
-      });
-    }, 5000);
-
-    return () => clearInterval(interval);
-  }, [playlists]);
-
-  const handleRemoveTrack = (trackId: string) => {
-    setTrackToRemove(trackId);
-  };
-
-  const confirmRemoveTrack = async () => {
-    if (!trackToRemove) return;
-    const id = trackToRemove;
-    setTrackToRemove(null);
-
-    try {
-      const res = await fetch(`/api/tracks/${id}`, { method: 'DELETE' });
-      if (!res.ok) {
-        throw new Error('Failed to remove track');
-      }
-      setTracks(prev => prev.filter(track => track.id !== id));
-    } catch (error) {
-      console.error(error);
-      toast.error('Failed to remove track');
     }
   };
 
@@ -1394,6 +1310,149 @@ export default function App() {
         .catch((error) => {
           console.error('Failed to write playback history', error);
         });
+    }
+  };
+
+  useEffect(() => {
+    // Drive datetime schedules off the same 1s clock used for the top bar so
+    // they fire as soon as their configured time (to the second) is reached.
+    if (!nowIst) return;
+
+    const now = nowIst;
+
+    setScheduledPlaylists(prev => {
+      // 1-minute warning for upcoming datetime schedules
+      prev.forEach((schedule) => {
+        if (
+          schedule.type === 'datetime' &&
+          schedule.status === 'pending' &&
+          schedule.dateTime
+        ) {
+          const msUntil = schedule.dateTime.getTime() - now.getTime();
+          if (msUntil <= 60_000 && msUntil > 0 && !datetimeWarnedRef.current.has(schedule.id)) {
+            datetimeWarnedRef.current.add(schedule.id);
+            toast.info('Scheduled playlist starting soon', {
+              description: `"${schedule.playlistName}" will start in about 1 minute`,
+            });
+          }
+        }
+      });
+
+      const due = prev.filter((schedule) =>
+        schedule.type === 'datetime' &&
+        schedule.status === 'pending' &&
+        schedule.dateTime &&
+        schedule.dateTime <= now
+      );
+
+      if (due.length === 0) {
+        return prev;
+      }
+
+      // Sort due schedules for deterministic handling
+      const sortedDue = [...due].sort((a, b) => {
+        const aTime = a.dateTime?.getTime() ?? 0;
+        const bTime = b.dateTime?.getTime() ?? 0;
+        if (aTime !== bTime) return aTime - bTime;
+        return a.playlistName.localeCompare(b.playlistName);
+      });
+
+      // Build queue items for all due schedules in one shot so we can
+      // preempt the currently playing track and make the first scheduled
+      // track start immediately.
+      const scheduledItems: QueueItem[] = [];
+
+      sortedDue.forEach((schedule) => {
+        const playlist = playlists.find((p) => p.id === schedule.playlistId);
+        if (!playlist || playlist.tracks.length === 0) {
+          return;
+        }
+
+        const startOrder = scheduledItems.length;
+        const newItems: QueueItem[] = playlist.tracks.map((track, index) => ({
+          id: generateId(),
+          track,
+          fromPlaylist: playlist.name,
+          order: startOrder + index,
+        }));
+        scheduledItems.push(...newItems);
+      });
+
+      if (scheduledItems.length === 0) {
+        return prev;
+      }
+
+      // Preempt the current track (if any): log its partial listening time,
+      // drop it from the queue, then prepend the scheduled items so that when
+      // they finish, playback resumes with the remaining queue.
+      setQueue((prevQueue) => {
+        let baseQueue = [...prevQueue];
+
+        if (currentTrackId) {
+          const currentIndex = baseQueue.findIndex((item) => item.track.id === currentTrackId);
+          if (currentIndex >= 0) {
+            const finishedItem = baseQueue[currentIndex];
+            // Log partial history for the interrupted track
+            logPlaybackHistory(finishedItem.track, { completed: false, source: 'queue' });
+            baseQueue = baseQueue.filter((_, idx) => idx !== currentIndex);
+          }
+        }
+
+        const reindexedBase = baseQueue.map((item, idx) => ({
+          ...item,
+          order: scheduledItems.length + idx,
+        }));
+
+        const newQueue = [...scheduledItems, ...reindexedBase];
+
+        // Immediately jump playback to the first scheduled track
+        if (scheduledItems.length > 0) {
+          setCurrentTrackId(scheduledItems[0].track.id);
+          setIsPlaying(true);
+          setNowPlayingStart(now);
+        }
+
+        return newQueue;
+      });
+
+      // Mark each due schedule as completed in backend (fire-and-forget)
+      sortedDue.forEach((schedule) => {
+        fetch(`/api/schedules/${schedule.id}`, {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ status: 'completed' }),
+        }).catch((error) => {
+          console.error('Failed to update schedule status', error);
+        });
+      });
+
+      // Update local status once
+      return prev.map((schedule) =>
+        due.some((d) => d.id === schedule.id)
+          ? { ...schedule, status: 'completed' as ScheduledPlaylist['status'] }
+          : schedule
+      );
+    });
+  }, [playlists, nowIst, currentTrackId, logPlaybackHistory]);
+
+  const handleRemoveTrack = (trackId: string) => {
+    setTrackToRemove(trackId);
+  };
+
+  const confirmRemoveTrack = async () => {
+    if (!trackToRemove) return;
+    const id = trackToRemove;
+    setTrackToRemove(null);
+
+    try {
+      const res = await fetch(`/api/tracks/${id}`, { method: 'DELETE' });
+      if (!res.ok) {
+        throw new Error('Failed to remove track');
+      }
+      setTracks(prev => prev.filter(track => track.id !== id));
+    } catch (error) {
+      console.error(error);
+      toast.error('Failed to remove track');
     }
   };
 
@@ -1599,7 +1658,7 @@ export default function App() {
             timing={timing}
             now={nowIst}
           />
-          {scheduledPlaylists.length > 0 && (
+          {scheduledPlaylists.some((s) => !dismissedScheduleIds.includes(s.id)) && (
             <div className="border-t border-border p-2 text-xs space-y-1 bg-muted/40">
               <div className="flex items-center justify-between">
                 <div className="text-foreground text-xs font-medium">Scheduled</div>
