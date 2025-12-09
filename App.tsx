@@ -76,13 +76,10 @@ export default function App() {
     crossfadeSeconds,
   });
 
-  // Keep a lightweight IST clock for display in the top bar
+  // Keep a lightweight clock for display in the top bar
   useEffect(() => {
     const update = () => {
-      const istString = new Date().toLocaleString('en-IN', {
-        timeZone: 'Asia/Kolkata',
-      });
-      setNowIst(new Date(istString));
+      setNowIst(new Date());
     };
     update();
     const id = window.setInterval(update, 1000);
@@ -1220,10 +1217,7 @@ export default function App() {
 
   useEffect(() => {
     const interval = setInterval(() => {
-      // Use IST as the reference clock for datetime schedules
-      const nowIst = new Date(
-        new Date().toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' })
-      );
+      const now = new Date();
 
       setScheduledPlaylists(prev => {
         // 1-minute warning for upcoming datetime schedules
@@ -1233,7 +1227,7 @@ export default function App() {
             schedule.status === 'pending' &&
             schedule.dateTime
           ) {
-            const msUntil = schedule.dateTime.getTime() - nowIst.getTime();
+            const msUntil = schedule.dateTime.getTime() - now.getTime();
             if (msUntil <= 60_000 && msUntil > 0 && !datetimeWarnedRef.current.has(schedule.id)) {
               datetimeWarnedRef.current.add(schedule.id);
               toast.info('Scheduled playlist starting soon', {
@@ -1247,7 +1241,7 @@ export default function App() {
           schedule.type === 'datetime' &&
           schedule.status === 'pending' &&
           schedule.dateTime &&
-          schedule.dateTime <= nowIst
+          schedule.dateTime <= now
         );
 
         if (due.length === 0) {
@@ -1603,6 +1597,7 @@ export default function App() {
             onRemoveFromQueue={handleRemoveFromQueue}
             onReorderQueue={handleReorderQueue}
             timing={timing}
+            now={nowIst}
           />
           {scheduledPlaylists.length > 0 && (
             <div className="border-t border-border p-2 text-xs space-y-1 bg-muted/40">

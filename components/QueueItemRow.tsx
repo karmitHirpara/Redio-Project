@@ -35,7 +35,20 @@ export function QueueItemRow({
 }: QueueItemRowProps) {
   const formatClock = (d?: Date) => {
     if (!d) return '';
-    return d.toLocaleTimeString([], { hour12: true });
+    const raw = d.toLocaleTimeString('en-IN', {
+      timeZone: 'Asia/Kolkata',
+      hour: '2-digit',
+      minute: '2-digit',
+      second: '2-digit',
+      hour12: true,
+    });
+    const parts = raw.split(' ');
+    if (parts.length > 1) {
+      const suffix = parts.pop()!;
+      const time = parts.join(' ');
+      return `${time} ${suffix.toUpperCase()}`;
+    }
+    return raw;
   };
   return (
     <ContextMenu>
@@ -93,8 +106,8 @@ export function QueueItemRow({
               {formatDuration(item.track.duration)}
             </span>
             {startTime && endTime && (
-              <span className="text-[10px] text-muted-foreground">
-                {formatClock(startTime)} 
+              <span className="text-[10px] text-muted-foreground tabular-nums">
+                {formatClock(startTime)}
                 <span className="mx-0.5">→</span>
                 {formatClock(endTime)}
               </span>

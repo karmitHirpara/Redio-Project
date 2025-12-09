@@ -337,7 +337,7 @@ export function HistoryDialog({ open, onOpenChange }: HistoryDialogProps) {
                             className="inline-flex items-center gap-1 rounded-md border border-border/70 bg-background/80 px-2 py-1 text-[11px] text-muted-foreground hover:bg-accent/60 hover:text-foreground transition-colors"
                           >
                             <Download className="w-3 h-3" />
-                            <span>Excel</span>
+                            <span>Download</span>
                           </button>
                         </div>
                       </div>
