@@ -33,7 +33,6 @@ export default function App() {
   const [scheduleDialogOpen, setScheduleDialogOpen] = useState(false);
   const [historyOpen, setHistoryOpen] = useState(false);
   const [selectedPlaylistForSchedule, setSelectedPlaylistForSchedule] = useState<Playlist | null>(null);
-  const [wsConnected, setWsConnected] = useState(false);
   const [trackToRemove, setTrackToRemove] = useState<string | null>(null);
   const [duplicatePrompt, setDuplicatePrompt] = useState<{
     existingName: string;
@@ -152,9 +151,10 @@ export default function App() {
     socket.onmessage = (event) => {
       try {
         const data = JSON.parse(event.data);
-        if (data.type === 'queue-updated') {
-          console.log('Received queue-updated event', data.queue);
-          // In the future we can reconcile this with local queue state for multi-client setups
+        if (data.type === 'queue-updated' && Array.isArray(data.queue)) {
+          setQueue(data.queue);
+          // If nothing is currently selected, select the first track for playback context
+          setCurrentTrackId((prev) => prev ?? (data.queue[0]?.track?.id ?? null));
         }
       } catch (err) {
         console.error('Error parsing WebSocket message', err);
@@ -1314,8 +1314,9 @@ export default function App() {
   };
 
   useEffect(() => {
-    // Drive datetime schedules off the same 1s clock used for the top bar so
-    // they fire as soon as their configured time (to the second) is reached.
+    // Drive datetime schedules off the same 1s clock used for the top bar.
+    // The backend scheduler is responsible for actually firing the playlists;
+    // this effect only shows a 1-minute warning toast.
     if (!nowIst) return;
 
     const now = nowIst;
@@ -1338,102 +1339,9 @@ export default function App() {
         }
       });
 
-      const due = prev.filter((schedule) =>
-        schedule.type === 'datetime' &&
-        schedule.status === 'pending' &&
-        schedule.dateTime &&
-        schedule.dateTime <= now
-      );
-
-      if (due.length === 0) {
-        return prev;
-      }
-
-      // Sort due schedules for deterministic handling
-      const sortedDue = [...due].sort((a, b) => {
-        const aTime = a.dateTime?.getTime() ?? 0;
-        const bTime = b.dateTime?.getTime() ?? 0;
-        if (aTime !== bTime) return aTime - bTime;
-        return a.playlistName.localeCompare(b.playlistName);
-      });
-
-      // Build queue items for all due schedules in one shot so we can
-      // preempt the currently playing track and make the first scheduled
-      // track start immediately.
-      const scheduledItems: QueueItem[] = [];
-
-      sortedDue.forEach((schedule) => {
-        const playlist = playlists.find((p) => p.id === schedule.playlistId);
-        if (!playlist || playlist.tracks.length === 0) {
-          return;
-        }
-
-        const startOrder = scheduledItems.length;
-        const newItems: QueueItem[] = playlist.tracks.map((track, index) => ({
-          id: generateId(),
-          track,
-          fromPlaylist: playlist.name,
-          order: startOrder + index,
-        }));
-        scheduledItems.push(...newItems);
-      });
-
-      if (scheduledItems.length === 0) {
-        return prev;
-      }
-
-      // Preempt the current track (if any): log its partial listening time,
-      // drop it from the queue, then prepend the scheduled items so that when
-      // they finish, playback resumes with the remaining queue.
-      setQueue((prevQueue) => {
-        let baseQueue = [...prevQueue];
-
-        if (currentTrackId) {
-          const currentIndex = baseQueue.findIndex((item) => item.track.id === currentTrackId);
-          if (currentIndex >= 0) {
-            const finishedItem = baseQueue[currentIndex];
-            // Log partial history for the interrupted track
-            logPlaybackHistory(finishedItem.track, { completed: false, source: 'queue' });
-            baseQueue = baseQueue.filter((_, idx) => idx !== currentIndex);
-          }
-        }
-
-        const reindexedBase = baseQueue.map((item, idx) => ({
-          ...item,
-          order: scheduledItems.length + idx,
-        }));
-
-        const newQueue = [...scheduledItems, ...reindexedBase];
-
-        // Immediately jump playback to the first scheduled track
-        if (scheduledItems.length > 0) {
-          setCurrentTrackId(scheduledItems[0].track.id);
-          setIsPlaying(true);
-          setNowPlayingStart(now);
-        }
-
-        return newQueue;
-      });
-
-      // Mark each due schedule as completed in backend (fire-and-forget)
-      sortedDue.forEach((schedule) => {
-        fetch(`/api/schedules/${schedule.id}`, {
-          method: 'PUT',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ status: 'completed' }),
-        }).catch((error) => {
-          console.error('Failed to update schedule status', error);
-        });
-      });
-
-      // Update local status once
-      return prev.map((schedule) =>
-        due.some((d) => d.id === schedule.id)
-          ? { ...schedule, status: 'completed' as ScheduledPlaylist['status'] }
-          : schedule
-      );
+      return prev;
     });
-  }, [playlists, nowIst, currentTrackId, logPlaybackHistory]);
+  }, [nowIst]);
 
   const handleRemoveTrack = (trackId: string) => {
     setTrackToRemove(trackId);

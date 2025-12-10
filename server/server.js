@@ -6,6 +6,7 @@ import { dirname, join } from 'path';
 import fs from 'fs';
 import http from 'http';
 import { WebSocketServer } from 'ws';
+import { runSchedulerTick } from './services/scheduler.js';
 
 // Import routes
 import tracksRouter from './routes/tracks.js';
@@ -115,4 +116,13 @@ server.listen(PORT, () => {
   console.log(`🎵 Upload directory: ${uploadsDir}`);
   console.log(`🌐 CORS enabled for: ${process.env.CORS_ORIGIN}`);
   console.log(`🔌 WebSocket endpoint: ws://localhost:${PORT}/ws`);
+
+  // Lightweight backend scheduler for datetime playlists
+  const intervalMs = Number(process.env.SCHEDULER_INTERVAL_MS || 5000);
+  console.log(`⏱️  Scheduler running every ${intervalMs}ms`);
+  setInterval(() => {
+    runSchedulerTick(app).catch((err) => {
+      console.error('Scheduler tick error', err);
+    });
+  }, intervalMs);
 });

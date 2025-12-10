@@ -79,6 +79,9 @@ db.serialize(() => {
       trigger_position TEXT,
       status TEXT DEFAULT 'pending',
       created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      updated_at DATETIME,
+      fired_at DATETIME,
+      completed_at DATETIME,
       FOREIGN KEY (playlist_id) REFERENCES playlists(id) ON DELETE CASCADE
     )
   `);
@@ -94,8 +97,26 @@ db.serialize(() => {
       completed BOOLEAN NOT NULL,
       source TEXT NOT NULL,
       file_status TEXT NOT NULL,
+      session_id TEXT,
+      updated_at DATETIME,
       FOREIGN KEY (track_id) REFERENCES tracks(id) ON DELETE SET NULL
     )
+  `);
+
+  // Indexes for performance
+  db.run(`
+    CREATE INDEX IF NOT EXISTS idx_queue_order
+    ON queue (order_position)
+  `);
+
+  db.run(`
+    CREATE INDEX IF NOT EXISTS idx_schedules_status_date
+    ON schedules (status, date_time)
+  `);
+
+  db.run(`
+    CREATE INDEX IF NOT EXISTS idx_history_track_time
+    ON playback_history (track_id, played_at)
   `);
 
   // Insert demo data
