@@ -28,7 +28,10 @@ async function emitQueueUpdated(app) {
       order: item.order_position,
     }));
 
-    broadcastEvent({ type: 'queue-updated', queue: formatted });
+    // Tag scheduler-driven updates so the frontend can treat them as
+    // explicit preemptions even when the same track ID appears at the
+    // front of the queue.
+    broadcastEvent({ type: 'queue-updated', queue: formatted, reason: 'schedule-preempt' });
   } catch (error) {
     console.error('Failed to emit queue-updated event from scheduler', error);
   }
@@ -73,16 +76,38 @@ export async function fireScheduleAtomically(scheduleId, app) {
       return true;
     }
 
-    // Get current max order_position in queue
-    const maxPosRow = await get('SELECT MAX(order_position) AS max FROM queue');
-    let cursor = (maxPosRow?.max ?? -1) + 1;
+    // Preempt the current queue head so that the scheduled playlist plays
+    // immediately, and the interrupted track is removed rather than
+    // resuming.
+    const existingQueue = await query(
+      'SELECT id FROM queue ORDER BY order_position',
+    );
 
+    // Remove the first item (current track) if there is one.
+    let remainingIds = [];
+    if (existingQueue.length > 0) {
+      const head = existingQueue[0];
+      await run('DELETE FROM queue WHERE id = ?', [head.id]);
+      remainingIds = existingQueue.slice(1).map((row) => row.id);
+    }
+
+    // Insert scheduled tracks at the front
+    let cursor = 0;
     for (const track of tracks) {
       const queueId = crypto.randomUUID();
       await run(
         `INSERT INTO queue (id, track_id, from_playlist, order_position)
          VALUES (?, ?, ?, ?)`,
         [queueId, track.id, null, cursor],
+      );
+      cursor += 1;
+    }
+
+    // Reindex remaining queue items to follow the scheduled block
+    for (const id of remainingIds) {
+      await run(
+        'UPDATE queue SET order_position = ? WHERE id = ?',
+        [cursor, id],
       );
       cursor += 1;
     }

@@ -14,6 +14,7 @@ router.get('/', async (req, res) => {
       WHERE s.status = 'pending'
       ORDER BY s.created_at DESC
     `);
+
     res.json(schedules);
   } catch (error) {
     res.status(500).json({ error: error.message });

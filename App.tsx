@@ -38,9 +38,13 @@ export default function App() {
     existingName: string;
     fileName: string;
   } | null>(null);
-  const duplicateDecisionResolver = useRef<((choice: 'skip' | 'add') => void) | null>(null);
+  const [folderDuplicatePrompt, setFolderDuplicatePrompt] = useState<{
+    baseName: string;
+    fileName: string;
+  } | null>(null);
+  const duplicateDecisionResolver = useRef<((choice: 'skip' | 'cancel' | 'add' | 'addAll') => void) | null>(null);
+  const folderDuplicateDecisionResolver = useRef<((choice: 'skip' | 'cancel' | 'add' | 'addAll') => void) | null>(null);
   const [dismissedScheduleIds, setDismissedScheduleIds] = useState<string[]>([]);
-  const [historySessions, setHistorySessions] = useState<Record<string, { id: string; seconds: number }>>({});
   const [nowIst, setNowIst] = useState<Date | null>(null);
 
   const prevQueueLengthRef = useRef(0);
@@ -52,7 +56,10 @@ export default function App() {
     ? queue.find((item) => item.track.id === currentTrackId) || null
     : null;
   const currentTrack = currentQueueItem?.track || null;
+  const currentTrackRef = useRef<Track | null>(null);
+  const currentTrackIdRef = useRef<string | null>(null);
   const currentQueueItemId = currentQueueItem?.id || null;
+  const hasLiveQueueRef = useRef(false);
 
   // Determine the next track in the queue for crossfade/preview logic.
   const currentIndex = currentTrackId
@@ -137,24 +144,99 @@ export default function App() {
   }, []);
 
 
-  // WebSocket connection for real-time events (disabled unless VITE_WS_URL is set)
+  // Keep refs in sync with the latest current track so the WebSocket
+  // handlers can safely reason about preemption.
   useEffect(() => {
-    const wsUrl = import.meta.env.VITE_WS_URL as string | undefined;
-    if (!wsUrl) return;
+    currentTrackRef.current = currentTrack;
+    currentTrackIdRef.current = currentTrackId;
+  }, [currentTrack, currentTrackId]);
+
+  // WebSocket connection for real-time events.
+  // If VITE_WS_URL is not set, default to the local backend WS endpoint
+  // so that scheduler-driven queue updates still reach the frontend.
+  useEffect(() => {
+    const envUrl = import.meta.env.VITE_WS_URL as string | undefined;
+    const wsUrl = envUrl || 'ws://localhost:3001/ws';
 
     const socket = new WebSocket(wsUrl);
 
     socket.onopen = () => {
       console.log('WebSocket connected:', wsUrl);
+      hasLiveQueueRef.current = true;
     };
 
     socket.onmessage = (event) => {
       try {
         const data = JSON.parse(event.data);
         if (data.type === 'queue-updated' && Array.isArray(data.queue)) {
-          setQueue(data.queue);
-          // If nothing is currently selected, select the first track for playback context
-          setCurrentTrackId((prev) => prev ?? (data.queue[0]?.track?.id ?? null));
+          const newQueue: QueueItem[] = data.queue;
+
+          const previousCurrentId = currentTrackIdRef.current;
+          const wasCurrentStillPresent = previousCurrentId
+            ? newQueue.some((item) => item.track.id === previousCurrentId)
+            : false;
+
+          setQueue(newQueue);
+
+          const firstTrackId = newQueue[0]?.track?.id ?? null;
+
+          // Explicit scheduler preemption: when the backend marks a
+          // datetime schedule as fired it tags this event so we always
+          // jump to the new head, even if it happens to be the same
+          // track ID as the one that was already playing.
+          if (data.reason === 'schedule-preempt' && firstTrackId) {
+            const interruptedTrack = currentTrackRef.current;
+            if (interruptedTrack) {
+              logPlaybackHistory(interruptedTrack, { completed: false, source: 'queue' });
+            }
+
+            // Mark any due pending datetime schedules as completed and
+            // dismiss them from the Scheduled panel so the notification
+            // auto-closes once the schedule time is reached.
+            const now = new Date();
+            const completedIds: string[] = [];
+            setScheduledPlaylists((prev) =>
+              prev.map((s) => {
+                if (
+                  s.type === 'datetime' &&
+                  s.status === 'pending' &&
+                  s.dateTime &&
+                  s.dateTime.getTime() <= now.getTime()
+                ) {
+                  completedIds.push(s.id);
+                  return { ...s, status: 'completed' };
+                }
+                return s;
+              }),
+            );
+
+            if (completedIds.length > 0) {
+              setDismissedScheduleIds((prev) =>
+                Array.from(new Set([...prev, ...completedIds])),
+              );
+            }
+
+            setCurrentTrackId(firstTrackId);
+            setIsPlaying(true);
+            setNowPlayingStart(new Date());
+            return;
+          }
+
+          // Generic preemption detection: previously playing track has
+          // disappeared from the queue but there is still a head item.
+          if (previousCurrentId && !wasCurrentStillPresent && firstTrackId) {
+            const interruptedTrack = currentTrackRef.current;
+            if (interruptedTrack) {
+              logPlaybackHistory(interruptedTrack, { completed: false, source: 'queue' });
+            }
+            setCurrentTrackId(firstTrackId);
+            setIsPlaying(true);
+            setNowPlayingStart(new Date());
+          } else {
+            // If nothing is currently selected, select the first track for
+            // playback context (non-preemption updates).
+            setCurrentTrackId((prev) => prev ?? firstTrackId);
+          }
         }
       } catch (err) {
         console.error('Error parsing WebSocket message', err);
@@ -163,6 +245,7 @@ export default function App() {
 
     socket.onclose = () => {
       console.log('WebSocket disconnected');
+      hasLiveQueueRef.current = false;
     };
 
     socket.onerror = (err) => {
@@ -254,19 +337,57 @@ export default function App() {
     });
   };
 
-  const askDuplicateDecision = (existingName: string, fileName: string): Promise<'skip' | 'add'> => {
+  const askDuplicateDecision = (
+    existingName: string,
+    fileName: string,
+  ): Promise<'skip' | 'cancel' | 'add' | 'addAll'> => {
     return new Promise((resolve) => {
       duplicateDecisionResolver.current = resolve;
       setDuplicatePrompt({ existingName, fileName });
     });
   };
 
-  const handleDuplicateDecision = (choice: 'skip' | 'add') => {
+  const handleDuplicateDecision = (choice: 'skip' | 'cancel' | 'add' | 'addAll') => {
     if (duplicateDecisionResolver.current) {
       duplicateDecisionResolver.current(choice);
       duplicateDecisionResolver.current = null;
     }
     setDuplicatePrompt(null);
+  };
+
+  const askFolderDuplicateDecision = (
+    baseName: string,
+    fileName: string,
+  ): Promise<'skip' | 'cancel' | 'add' | 'addAll'> => {
+    return new Promise((resolve) => {
+      folderDuplicateDecisionResolver.current = resolve;
+      setFolderDuplicatePrompt({ baseName, fileName });
+    });
+  };
+
+  const handleFolderDuplicateDecision = (choice: 'skip' | 'cancel' | 'add' | 'addAll') => {
+    if (folderDuplicateDecisionResolver.current) {
+      folderDuplicateDecisionResolver.current(choice);
+      folderDuplicateDecisionResolver.current = null;
+    }
+    setFolderDuplicatePrompt(null);
+  };
+
+  const escapeRegExp = (value: string) => value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
+  const getNextSequentialName = (baseName: string, existingNames: string[]): string => {
+    const pattern = new RegExp(`^${escapeRegExp(baseName)}(?: \\((\\d+)\\))?$`);
+    let maxIndex = 0;
+    for (const name of existingNames) {
+      const match = name.match(pattern);
+      if (!match) continue;
+      const idx = match[1] ? parseInt(match[1], 10) : 0;
+      if (!Number.isNaN(idx)) {
+        maxIndex = Math.max(maxIndex, idx);
+      }
+    }
+    const nextIndex = maxIndex + 1;
+    return nextIndex === 0 ? baseName : `${baseName} (${nextIndex})`;
   };
 
   const handleDuplicatePlaylist = async (playlistId: string) => {
@@ -342,13 +463,6 @@ export default function App() {
   };
 
   const handleAddToQueue = async (track: Track) => {
-    // Prevent duplicate tracks in queue
-    const alreadyInQueue = queue.some(item => item.track.id === track.id);
-    if (alreadyInQueue) {
-      toast.error('Track already in queue');
-      return;
-    }
-
     try {
       const res = await fetch('/api/queue', {
         method: 'POST',
@@ -365,11 +479,16 @@ export default function App() {
 
       const wasEmpty = queue.length === 0;
 
-      setQueue(prev => [...prev, newItem]);
+      // If we do not have a live WebSocket connection, optimistically update
+      // the local queue. When WS is connected, the backend will broadcast the
+      // new queue state, so we avoid double-adding.
+      if (!hasLiveQueueRef.current) {
+        setQueue(prev => [...prev, newItem]);
 
-      // If this is the first item in the queue, reflect it immediately in the playback bar
-      if (wasEmpty && !currentTrackId) {
-        setCurrentTrackId(track.id);
+        // If this is the first item in the queue, reflect it immediately in the playback bar
+        if (wasEmpty && !currentTrackId) {
+          setCurrentTrackId(track.id);
+        }
       }
 
       toast.success(`Added "${track.name}" to queue`);
@@ -413,11 +532,69 @@ export default function App() {
     let imported = 0;
     let duplicates = 0;
     let failed = 0;
+    let folderDuplicateMode: 'ask' | 'addAll' = 'ask';
+    let libraryDuplicateMode: 'ask' | 'addAll' = 'ask';
+    let canceledImport = false;
+    let existingFolderNames: string[] = [];
+
+    if (folderId) {
+      try {
+        const res = await fetch(`/api/folders/${folderId}/tracks`);
+        if (res.ok) {
+          const raw = await res.json();
+          existingFolderNames = (raw || []).map((t: any) => String(t.name || '')).filter(Boolean);
+        }
+      } catch (err) {
+        console.error('Failed to load existing folder tracks for duplicate detection', err);
+      }
+    }
     const importedIds: string[] = [];
 
     for (const file of files) {
+      if (canceledImport) break;
       const detectedDuration = await getAudioDuration(file);
+
       const formData = new FormData();
+
+      // For folder imports, if a file with the same base name already exists
+      // in that folder, ask the operator whether to Skip (this file only),
+      // Cancel (stop the whole batch), Add (with a new numbered name), or
+      // Add All Copy for remaining duplicates.
+      if (folderId) {
+        const dotIndex = file.name.lastIndexOf('.');
+        const baseName = dotIndex > 0 ? file.name.slice(0, dotIndex) : file.name;
+
+        const hasSameBase = existingFolderNames.includes(baseName);
+        if (hasSameBase) {
+          let decision: 'skip' | 'cancel' | 'add' | 'addAll' = 'add';
+          if (folderDuplicateMode === 'addAll') {
+            decision = 'addAll';
+          } else {
+            decision = await askFolderDuplicateDecision(baseName, file.name);
+          }
+
+          if (decision === 'skip') {
+            duplicates += 1;
+            continue;
+          }
+
+          if (decision === 'cancel') {
+            canceledImport = true;
+            break;
+          }
+
+          const newName = getNextSequentialName(baseName, existingFolderNames);
+          existingFolderNames.push(newName);
+          formData.append('name', newName);
+
+          if (decision === 'addAll') {
+            folderDuplicateMode = 'addAll';
+          }
+        } else {
+          existingFolderNames.push(baseName);
+        }
+      }
+
       formData.append('file', file);
       if (detectedDuration > 0) {
         formData.append('duration', String(detectedDuration));
@@ -439,21 +616,30 @@ export default function App() {
             continue;
           }
 
-          // If we are importing into a specific folder, treat this as
-          // "use existing track in this folder" with no duplicate warning.
-          // Just remember its id so the folder association below links it.
-          if (folderId) {
-            importedIds.push(existingTrack.id);
-            imported += 1;
-            continue;
+          // When importing directly into a folder, avoid showing the global
+          // duplicate dialog. Instead, always create an alias copy and let
+          // the folder name dialog drive the user's decision.
+          let decision: 'skip' | 'cancel' | 'add' | 'addAll' = 'add';
+          if (!folderId) {
+            if (libraryDuplicateMode === 'addAll') {
+              decision = 'addAll';
+            } else {
+              decision = await askDuplicateDecision(existingTrack.name, file.name);
+            }
           }
-
-          // Otherwise (no folder), ask the user whether to skip or add a copy.
-          const decision = await askDuplicateDecision(existingTrack.name, file.name);
 
           if (decision === 'skip') {
             duplicates += 1;
             continue;
+          }
+
+          if (decision === 'cancel') {
+            canceledImport = true;
+            break;
+          }
+
+          if (decision === 'addAll') {
+            libraryDuplicateMode = 'addAll';
           }
 
           // Create an alias track that reuses the same file but with auto-renamed title
@@ -566,6 +752,14 @@ export default function App() {
       });
 
       if (!res.ok) {
+        // If the backend reports 404, the item is already gone on the server.
+        // Treat this as success and keep the item removed locally to avoid
+        // confusing the operator with a hard error.
+        if (res.status === 404) {
+          toast.info('Queue item was already removed');
+          return;
+        }
+
         const data = await res.json().catch(() => null);
         throw new Error(data?.error || `Failed to remove from queue (${res.status})`);
       }
@@ -925,18 +1119,10 @@ export default function App() {
 
     const wasEmpty = queue.length === 0;
     const createdItems: QueueItem[] = [];
-    let duplicates = 0;
 
     try {
-      // Only queue tracks that are not already in the queue
+      // Queue all tracks from the playlist, allowing duplicates in the queue
       for (const track of playlist.tracks) {
-        const inQueue = queue.some(item => item.track.id === track.id) ||
-          createdItems.some(item => item.track.id === track.id);
-        if (inQueue) {
-          duplicates += 1;
-          continue;
-        }
-
         const res = await fetch('/api/queue', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
@@ -953,18 +1139,20 @@ export default function App() {
       }
 
       if (createdItems.length > 0) {
-        setQueue(prev => [...prev, ...createdItems]);
-        if (wasEmpty && !currentTrackId) {
-          setCurrentTrackId(createdItems[0].track.id);
+        // Avoid double-adding when WebSocket is live; rely on backend
+        // queue-updated broadcast. Fall back to optimistic local update
+        // only when WS is not connected.
+        if (!hasLiveQueueRef.current) {
+          setQueue(prev => [...prev, ...createdItems]);
+          if (wasEmpty && !currentTrackId) {
+            setCurrentTrackId(createdItems[0].track.id);
+          }
         }
-        const desc = duplicates > 0
-          ? `${createdItems.length} added, ${duplicates} already in queue`
-          : undefined;
         toast.success(`Queued playlist "${playlist.name}"`, {
-          description: desc,
+          description: `${createdItems.length} tracks added to queue`,
         });
-      } else if (duplicates > 0) {
-        toast.error('All tracks from this playlist are already in queue');
+      } else {
+        toast.info('No tracks were added from this playlist');
       }
     } catch (error: any) {
       console.error('Failed to queue playlist', error);
@@ -973,6 +1161,7 @@ export default function App() {
   };
 
   const handleImportFilesToPlaylist = async (playlistId: string, files: File[]) => {
+    // ...
     const playlist = playlists.find(p => p.id === playlistId);
     if (!playlist) return;
     if (playlist.locked) {
@@ -1240,13 +1429,13 @@ export default function App() {
   };
 
   // Playback Controls
-  // Record real listening time for tracks by accumulating wall-clock seconds
-  // in a single history row per track (for this app session).
+  // Record real listening time for tracks by writing a separate history row
+  // for each play instance (including duplicates and scheduled plays).
   const logPlaybackHistory = (track: Track, options?: { completed?: boolean; source?: string }) => {
     const source = options?.source ?? 'queue';
     const completed = options?.completed ?? true;
 
-    // Derive how long this track has actually been playing based on nowPlayingStart
+    // Derive how long this track has actually been playing based on nowPlayingStart.
     const now = new Date();
     const baseStart = nowPlayingStart ?? now;
     const elapsedSeconds = Math.max(0, Math.round((now.getTime() - baseStart.getTime()) / 1000));
@@ -1254,63 +1443,31 @@ export default function App() {
       return;
     }
 
-    const existingSession = historySessions[track.id];
-    const newTotalSeconds = (existingSession?.seconds ?? 0) + elapsedSeconds;
+    const payload = {
+      trackId: track.id,
+      playedAt: baseStart.toISOString(),
+      positionStart: 0,
+      positionEnd: elapsedSeconds,
+      completed,
+      source,
+      fileStatus: 'ok',
+    };
 
-    if (existingSession) {
-      // Update existing history row with new cumulative listening time
-      fetch(`/api/history/${existingSession.id}`, {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          positionStart: 0,
-          positionEnd: newTotalSeconds,
-          completed,
-        }),
+    fetch('/api/history', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    })
+      .then(async (res) => {
+        if (!res.ok) {
+          const data = await res.json().catch(() => null);
+          throw new Error(data?.error || `Failed to create history entry (${res.status})`);
+        }
+        return res.json();
       })
-        .then(() => {
-          setHistorySessions((prev) => ({
-            ...prev,
-            [track.id]: { id: existingSession.id, seconds: newTotalSeconds },
-          }));
-        })
-        .catch((error) => {
-          console.error('Failed to update playback history', error);
-        });
-    } else {
-      const payload = {
-        trackId: track.id,
-        playedAt: baseStart.toISOString(),
-        positionStart: 0,
-        positionEnd: newTotalSeconds,
-        completed,
-        source,
-        fileStatus: 'ok',
-      };
-
-      fetch('/api/history', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload),
-      })
-        .then(async (res) => {
-          if (!res.ok) {
-            const data = await res.json().catch(() => null);
-            throw new Error(data?.error || `Failed to create history entry (${res.status})`);
-          }
-          return res.json();
-        })
-        .then((entry) => {
-          if (!entry || !entry.id) return;
-          setHistorySessions((prev) => ({
-            ...prev,
-            [track.id]: { id: String(entry.id), seconds: newTotalSeconds },
-          }));
-        })
-        .catch((error) => {
-          console.error('Failed to write playback history', error);
-        });
-    }
+      .catch((error) => {
+        console.error('Failed to write playback history', error);
+      });
   };
 
   useEffect(() => {
@@ -1444,6 +1601,23 @@ export default function App() {
     }
 
     setQueue(baseQueue);
+
+    // Also remove the finished queue item on the backend so that all
+    // connected clients (and future sessions) see a consistent queue
+    // state. Treat 404 as success because the scheduler or another
+    // client may already have removed it.
+    fetch(`/api/queue/${finishedItem.id}`, {
+      method: 'DELETE',
+    }).then((res) => {
+      if (!res.ok && res.status !== 404) {
+        return res.json().catch(() => null).then((data) => {
+          console.error('Failed to delete finished queue item on server', data);
+        });
+      }
+      return undefined;
+    }).catch((err) => {
+      console.error('Error calling DELETE /api/queue for finished item', err);
+    });
 
     if (baseQueue.length > 0) {
       setCurrentTrackId(baseQueue[0].track.id);
@@ -1621,7 +1795,7 @@ export default function App() {
                             </>
                           )}
                           <span>•</span>
-                          <span>{s.status}</span>
+                          <span>scheduled</span>
                         </div>
                       </div>
                       <button
@@ -1692,17 +1866,66 @@ export default function App() {
             </div>
             <div className="flex justify-end gap-2 mt-2">
               <Button
-                variant="outline"
                 size="sm"
+                variant="outline"
                 onClick={() => handleDuplicateDecision('skip')}
               >
                 Skip
               </Button>
               <Button
                 size="sm"
-                onClick={() => handleDuplicateDecision('add')}
+                variant="outline"
+                onClick={() => handleDuplicateDecision('cancel')}
               >
-                Add copy
+                Cancel
+              </Button>
+              <Button size="sm" onClick={() => handleDuplicateDecision('add')}>
+                Add Copy
+              </Button>
+              <Button size="sm" onClick={() => handleDuplicateDecision('addAll')}>
+                Add All
+              </Button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {folderDuplicatePrompt && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50">
+          <div className="bg-background border border-border rounded-md shadow-lg p-4 w-full max-w-sm">
+            <div className="mb-3">
+              <h2 className="text-sm font-semibold mb-1">File name already in folder</h2>
+              <p className="text-xs text-muted-foreground">
+                "{folderDuplicatePrompt.baseName}" already exists in this folder.
+              </p>
+              <p className="text-[11px] text-muted-foreground mt-1 break-all">
+                Importing file: <span className="font-mono">{folderDuplicatePrompt.fileName}</span>
+              </p>
+            </div>
+            <div className="flex justify-end gap-2 mt-2">
+              <Button
+                size="sm"
+                variant="outline"
+                onClick={() => handleFolderDuplicateDecision('skip')}
+              >
+                Skip
+              </Button>
+              <Button
+                size="sm"
+                variant="outline"
+                onClick={() => handleFolderDuplicateDecision('cancel')}
+              >
+                Cancel
+              </Button>
+              <Button
+                size="sm"
+                variant="outline"
+                onClick={() => handleFolderDuplicateDecision('add')}
+              >
+                Add
+              </Button>
+              <Button size="sm" onClick={() => handleFolderDuplicateDecision('addAll')}>
+                Add All Copy
               </Button>
             </div>
           </div>
