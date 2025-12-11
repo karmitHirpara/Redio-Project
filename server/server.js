@@ -117,8 +117,9 @@ server.listen(PORT, () => {
   console.log(`🌐 CORS enabled for: ${process.env.CORS_ORIGIN}`);
   console.log(`🔌 WebSocket endpoint: ws://localhost:${PORT}/ws`);
 
-  // Lightweight backend scheduler for datetime playlists
-  const intervalMs = Number(process.env.SCHEDULER_INTERVAL_MS || 5000);
+  // Lightweight backend scheduler for datetime playlists. Default to a
+  // 1s interval so fired schedules line up closely with the visible clock.
+  const intervalMs = Number(process.env.SCHEDULER_INTERVAL_MS || 1000);
   console.log(`⏱️  Scheduler running every ${intervalMs}ms`);
   setInterval(() => {
     runSchedulerTick(app).catch((err) => {

@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import { GripVertical, Radio } from 'lucide-react';
-import { QueueItem } from '../types';
+import { QueueItem, Playlist } from '../types';
 import { QueueItemRow } from './QueueItemRow';
 import { motion, AnimatePresence } from 'framer-motion';
 import { QueueTimingResult } from '../hooks/useQueueTiming';
@@ -13,6 +13,8 @@ interface QueuePanelProps {
   onReorderQueue: (items: QueueItem[]) => void;
   timing?: QueueTimingResult;
   now?: Date | null;
+  playlists: Playlist[];
+  onAddQueueItemToPlaylist: (item: QueueItem, playlistId: string) => void;
 }
 
 export function QueuePanel({
@@ -23,6 +25,8 @@ export function QueuePanel({
   onReorderQueue,
   timing,
   now,
+  playlists,
+  onAddQueueItemToPlaylist,
 }: QueuePanelProps) {
   const [dragIndex, setDragIndex] = useState<number | null>(null);
 
@@ -57,7 +61,7 @@ export function QueuePanel({
       </div>
 
       {/* Queue List */}
-      <div className="flex-1 overflow-y-auto p-2">
+      <div className="flex-1 overflow-y-auto p-2 scroll-thin">
         {queue.length === 0 ? (
           <div className="flex items-center justify-center h-32 text-muted-foreground">
             Queue is empty
@@ -103,6 +107,8 @@ export function QueuePanel({
                       onDragEnd={handleDragEnd}
                       startTime={startTime ?? undefined}
                       endTime={endTime ?? undefined}
+                      playlists={playlists}
+                      onAddToPlaylist={(playlistId) => onAddQueueItemToPlaylist(item, playlistId)}
                     />
                   );
                 })()}

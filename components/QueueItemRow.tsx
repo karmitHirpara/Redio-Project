@@ -1,5 +1,5 @@
 import { GripVertical, X, Play, Music } from 'lucide-react';
-import { QueueItem } from '../types';
+import { QueueItem, Playlist } from '../types';
 import { formatDuration, cn } from '../lib/utils';
 import {
   ContextMenu,
@@ -32,7 +32,9 @@ export function QueueItemRow({
   onDragEnd,
   startTime,
   endTime,
-}: QueueItemRowProps) {
+  playlists,
+  onAddToPlaylist,
+}: QueueItemRowProps & { playlists: Playlist[]; onAddToPlaylist: (playlistId: string) => void }) {
   const formatClock = (d?: Date) => {
     if (!d) return '';
     const raw = d.toLocaleTimeString('en-IN', {
@@ -129,6 +131,23 @@ export function QueueItemRow({
         <ContextMenuItem onClick={onRemove} className="text-destructive">
           Remove from Queue
         </ContextMenuItem>
+        {playlists.length > 0 && (
+          <>
+            <ContextMenuItem disabled className="opacity-60">
+              Add to Playlist
+            </ContextMenuItem>
+            {playlists.map((playlist) => (
+              <ContextMenuItem
+                key={playlist.id}
+                disabled={playlist.locked}
+                onClick={() => onAddToPlaylist(playlist.id)}
+              >
+                {playlist.name}
+                {playlist.locked && ' (Locked)'}
+              </ContextMenuItem>
+            ))}
+          </>
+        )}
       </ContextMenuContent>
     </ContextMenu>
   );

@@ -288,7 +288,7 @@ export function LibraryPanel({
 
     {/* Folder List (VS Code style) */}
     {folders.length > 0 && (
-      <div className="flex-1 overflow-y-auto px-2 py-2 space-y-1 border-t border-border">
+      <div className="flex-1 overflow-y-auto px-2 py-2 space-y-1 border-t border-border scroll-thin">
         {folders.map(folder => {
           const expanded = expandedFolderIds.includes(folder.id);
           const tracksInFolder = folderTracks[folder.id] || [];

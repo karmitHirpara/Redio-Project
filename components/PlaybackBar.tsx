@@ -43,7 +43,7 @@ export function PlaybackBar({
   onCrossfadeChange,
 }: PlaybackBarProps) {
   const [showPauseConfirm, setShowPauseConfirm] = useState(false);
-  const { audioRef, currentTime, duration, handleSeek } = useAudioEngine({
+  const { primaryAudioRef, secondaryAudioRef, currentTime, duration, handleSeek } = useAudioEngine({
     currentTrack,
     isPlaying,
     crossfadeSeconds,
@@ -60,7 +60,8 @@ export function PlaybackBar({
 
   return (
     <>
-      <audio ref={audioRef} className="hidden" />
+      <audio ref={primaryAudioRef} className="hidden" />
+      <audio ref={secondaryAudioRef} className="hidden" />
       <div className="h-20 bg-background border-t border-border flex items-center px-5 gap-5">
         {/* Current Track Info */}
         <div className="flex items-center gap-3 w-64 min-w-[12rem]">
@@ -123,9 +124,9 @@ export function PlaybackBar({
 
         {/* Additional Controls */}
         <div className="flex items-center gap-4">
-          {/* Crossfade */}
+          {/* Gap between songs */}
           <div className="flex items-center gap-2">
-            <span className="text-[11px] text-muted-foreground">Crossfade</span>
+            <span className="text-[11px] text-muted-foreground">Gap</span>
             <Slider
               value={[crossfadeSeconds]}
               max={12}

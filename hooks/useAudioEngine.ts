@@ -10,7 +10,8 @@ interface UseAudioEngineOptions {
 }
 
 interface UseAudioEngineResult {
-  audioRef: React.RefObject<HTMLAudioElement>;
+  primaryAudioRef: React.RefObject<HTMLAudioElement>;
+  secondaryAudioRef: React.RefObject<HTMLAudioElement>;
   currentTime: number;
   duration: number;
   handleSeek: (value: number[]) => void;
@@ -29,63 +30,85 @@ export function useAudioEngine({
   const [duration, setDuration] = useState(0);
 
   const primaryAudioRef = useRef<HTMLAudioElement>(null);
+  const secondaryAudioRef = useRef<HTMLAudioElement>(null);
   const lastTrackIdRef = useRef<string | null>(null);
 
-  // Simple fade state for single-audio playback
+  // Edge fade state: we use a small RAF loop to fade in the first 0.5s of a
+  // new track, and a time-based computation for the last 0.5s.
   const fadeRafRef = useRef<number | null>(null);
   const endDelayTimeoutRef = useRef<number | null>(null);
+  const autoAdvanceRef = useRef(false);
 
-  const getActiveAudio = () => primaryAudioRef.current;
+  const activeIndexRef = useRef<0 | 1>(0);
+
+  const getAudioByIndex = (index: 0 | 1) =>
+    index === 0 ? primaryAudioRef.current : secondaryAudioRef.current;
+
+  const getActiveAudio = () => getAudioByIndex(activeIndexRef.current);
+  const getInactiveAudio = () => getAudioByIndex(activeIndexRef.current === 0 ? 1 : 0);
 
   // Sync audio element with current track. Only reset position when the track
   // actually changes, so pausing and resuming continues from the same spot.
   useEffect(() => {
-    const audio = getActiveAudio();
-    if (!audio) return;
+    const activeAudio = getActiveAudio();
+    const inactiveAudio = getInactiveAudio();
 
-    if (currentTrack) {
-      const trackChanged = currentTrack.id !== lastTrackIdRef.current;
-      if (trackChanged) {
-        lastTrackIdRef.current = currentTrack.id;
-        audio.src = currentTrack.filePath;
-        audio.currentTime = 0;
-        setCurrentTime(0);
-        setDuration(currentTrack.duration || 0);
+    if (!primaryAudioRef.current || !secondaryAudioRef.current) return;
+
+    if (!currentTrack) {
+      if (fadeRafRef.current !== null) {
+        cancelAnimationFrame(fadeRafRef.current);
+        fadeRafRef.current = null;
       }
 
-      // Only run a fade-in if we are actively playing when a brand new track
-      // is loaded. Start from a small, audible volume so there is no "dead"
-      // first second.
-      if (trackChanged && isPlaying) {
-        audio.play().catch(() => {
+      [primaryAudioRef.current, secondaryAudioRef.current].forEach((audioEl) => {
+        if (!audioEl) return;
+        audioEl.pause();
+        audioEl.removeAttribute('src');
+        try {
+          audioEl.volume = 1;
+        } catch {}
+      });
+      setCurrentTime(0);
+      setDuration(0);
+      lastTrackIdRef.current = null;
+      return;
+    }
+
+    const trackChanged = currentTrack.id !== lastTrackIdRef.current;
+
+    // First track: just load it on the active element.
+    if (!lastTrackIdRef.current && currentTrack && activeAudio) {
+      lastTrackIdRef.current = currentTrack.id;
+      activeAudio.src = currentTrack.filePath;
+      activeAudio.currentTime = 0;
+      setCurrentTime(0);
+      setDuration(currentTrack.duration || 0);
+
+      try {
+        activeAudio.volume = 0;
+      } catch {}
+
+      if (isPlaying) {
+        activeAudio.play().catch(() => {
           // Playback might be blocked by browser autoplay policies
         });
 
+        // Fade in the first ~0.5s of the newly started track.
         if (fadeRafRef.current !== null) {
           cancelAnimationFrame(fadeRafRef.current);
         }
 
-        const minFadeSeconds = 0.4;
-        const maxFadeSeconds = 3;
-        const fadeSeconds = Math.min(
-          maxFadeSeconds,
-          Math.max(minFadeSeconds, (crossfadeSeconds || 1.5) / 2),
-        );
-        const fadeDurationMs = fadeSeconds * 1000;
+        const fadeDurationMs = 500;
         const start = performance.now();
-        const startVolume = 0.2; // immediately audible
-        const targetVolume = 1;
-        try {
-          audio.volume = startVolume;
-        } catch {}
 
         const step = () => {
           const now = performance.now();
           const ratio = Math.min(1, Math.max(0, (now - start) / fadeDurationMs));
           const eased = 1 - Math.cos((ratio * Math.PI) / 2);
-          const v = startVolume + (targetVolume - startVolume) * eased;
+
           try {
-            audio.volume = v;
+            activeAudio.volume = eased;
           } catch {}
 
           if (ratio < 1 && isPlaying) {
@@ -93,61 +116,132 @@ export function useAudioEngine({
           } else {
             fadeRafRef.current = null;
             try {
-              audio.volume = 1;
+              activeAudio.volume = 1;
             } catch {}
           }
         };
 
         fadeRafRef.current = requestAnimationFrame(step);
-      } else if (!isPlaying) {
-        // If we're not playing yet, keep the track at normal volume so the
-        // first play click feels instant.
-        try {
-          audio.volume = 1;
-        } catch {}
       }
-    } else {
-      audio.removeAttribute('src');
-      setCurrentTime(0);
-      lastTrackIdRef.current = null;
+      return;
     }
+
+    if (!trackChanged || !currentTrack || !activeAudio || !inactiveAudio) {
+      return;
+    }
+
+    // Any subsequent track change (auto-advance, preempt, manual Next):
+    // stop both, clear the inactive, and hard-switch the host element to the
+    // new track with full volume and a short fade-in.
+    autoAdvanceRef.current = false;
+
+    const host = activeAudio || inactiveAudio;
+    const other = host === activeAudio ? inactiveAudio : activeAudio;
+
+    if (other) {
+      other.pause();
+      other.removeAttribute('src');
+      try {
+        other.volume = 1;
+      } catch {}
+    }
+
+    if (host) {
+      host.pause();
+      host.src = currentTrack.filePath;
+      host.currentTime = 0;
+      try {
+        host.volume = 0;
+      } catch {}
+
+      if (isPlaying) {
+        host.play().catch(() => {
+          // Playback might be blocked by browser autoplay policies
+        });
+
+        // Fade in the first ~0.5s of the newly started track.
+        if (fadeRafRef.current !== null) {
+          cancelAnimationFrame(fadeRafRef.current);
+        }
+
+        const fadeDurationMs = 500;
+        const start = performance.now();
+
+        const step = () => {
+          const now = performance.now();
+          const ratio = Math.min(1, Math.max(0, (now - start) / fadeDurationMs));
+          const eased = 1 - Math.cos((ratio * Math.PI) / 2);
+
+          try {
+            host.volume = eased;
+          } catch {}
+
+          if (ratio < 1 && isPlaying) {
+            fadeRafRef.current = requestAnimationFrame(step);
+          } else {
+            fadeRafRef.current = null;
+            try {
+              host.volume = 1;
+            } catch {}
+          }
+        };
+
+        fadeRafRef.current = requestAnimationFrame(step);
+      }
+    }
+
+    activeIndexRef.current = host === primaryAudioRef.current ? 0 : 1;
+    lastTrackIdRef.current = currentTrack.id;
+    setCurrentTime(0);
+    setDuration(currentTrack.duration || 0);
   }, [currentTrack, isPlaying, crossfadeSeconds]);
 
   // Play / pause audio when isPlaying changes
   useEffect(() => {
-    const audio = getActiveAudio();
-    if (!audio) return;
-    if (!currentTrack) return;
+    const activeAudio = getActiveAudio();
+    const inactiveAudio = getInactiveAudio();
+    if (!activeAudio && !inactiveAudio) return;
+    if (!currentTrack) {
+      [activeAudio, inactiveAudio].forEach((audioEl) => {
+        if (!audioEl) return;
+        audioEl.pause();
+      });
+      return;
+    }
 
     if (isPlaying) {
       try {
-        // Ensure volume is at full when starting/resuming playback
-        audio.volume = 1;
+        if (activeAudio) {
+          // Do not override any in-progress fade; just resume playback.
+          activeAudio.play().catch(() => {
+            // Ignore play failures here; user interaction may be required
+          });
+        }
       } catch {
         // ignore volume set errors
       }
-
-      audio.play().catch(() => {
-        // Ignore play failures here; user interaction may be required
-      });
     } else {
-      audio.pause();
+      [activeAudio, inactiveAudio].forEach((audioEl) => {
+        if (!audioEl) return;
+        audioEl.pause();
+      });
     }
   }, [isPlaying, currentTrack]);
 
   // Attach timeupdate and ended listeners
   useEffect(() => {
-    const audio = getActiveAudio();
-    if (!audio) return;
+    const audioA = primaryAudioRef.current;
+    const audioB = secondaryAudioRef.current;
+    if (!audioA && !audioB) return;
 
-    const handleTimeUpdate = () => {
+    const handleTimeUpdate = (audio: HTMLAudioElement) => {
+      if (audio !== getActiveAudio()) return;
       setCurrentTime(audio.currentTime);
 
-      // Gentle fade-out near the end of the track. We use an eased curve so the
-      // tail sounds smooth rather than mechanical.
+      // Apply a gentle fade-out over the last ~0.5s of the track so tails
+      // sound smooth and avoid abrupt stops.
       const effectiveDuration = duration || audio.duration || 0;
-      const baseWindow = Math.min(5, Math.max(1, crossfadeSeconds || 2));
-      const fadeWindow = baseWindow; // seconds
+      const fadeWindow = 0.5; // seconds
 
       if (!isPlaying) return;
 
@@ -155,11 +249,12 @@ export function useAudioEngine({
         const remaining = effectiveDuration - audio.currentTime;
         if (remaining <= fadeWindow && remaining >= 0) {
           const linear = Math.max(0, Math.min(1, remaining / fadeWindow));
-          const eased = (Math.sin((linear * Math.PI) / 2)); // slow, smooth tail
+          const eased = Math.sin((linear * Math.PI) / 2);
           try {
             audio.volume = eased;
           } catch {}
-        } else {
+        } else if (fadeRafRef.current === null) {
+          // Only reset volume to 1 when no fade-in is in progress.
           try {
             audio.volume = 1;
           } catch {}
@@ -167,13 +262,16 @@ export function useAudioEngine({
       }
     };
 
-    const handleLoadedMetadata = () => {
+    const handleLoadedMetadata = (audio: HTMLAudioElement) => {
+      if (audio !== getActiveAudio()) return;
       if (!isNaN(audio.duration) && audio.duration > 0) {
         setDuration(audio.duration);
       }
     };
 
-    const handleEnded = () => {
+    const handleEnded = (audio: HTMLAudioElement) => {
+      if (audio !== getActiveAudio()) return;
+
       // Clear any existing end-delay timer
       if (endDelayTimeoutRef.current !== null) {
         window.clearTimeout(endDelayTimeoutRef.current);
@@ -182,21 +280,38 @@ export function useAudioEngine({
 
       setCurrentTime(0);
 
+      // Use crossfadeSeconds as a gap duration (in seconds) so there is
+      // configurable silence between songs before advancing to the next
+      // track.
       const delayMs = Math.max(0, (crossfadeSeconds ?? 0) * 1000);
       endDelayTimeoutRef.current = window.setTimeout(() => {
         endDelayTimeoutRef.current = null;
+        autoAdvanceRef.current = true;
         onNext();
       }, delayMs);
     };
 
-    audio.addEventListener('timeupdate', handleTimeUpdate);
-    audio.addEventListener('loadedmetadata', handleLoadedMetadata);
-    audio.addEventListener('ended', handleEnded);
+    const attach = (audio: HTMLAudioElement | null) => {
+      if (!audio) return;
+      const onTimeUpdate = () => handleTimeUpdate(audio);
+      const onLoadedMetadata = () => handleLoadedMetadata(audio);
+      const onEnded = () => handleEnded(audio);
+      audio.addEventListener('timeupdate', onTimeUpdate);
+      audio.addEventListener('loadedmetadata', onLoadedMetadata);
+      audio.addEventListener('ended', onEnded);
+      return () => {
+        audio.removeEventListener('timeupdate', onTimeUpdate);
+        audio.removeEventListener('loadedmetadata', onLoadedMetadata);
+        audio.removeEventListener('ended', onEnded);
+      };
+    };
+
+    const detachA = attach(audioA);
+    const detachB = attach(audioB);
 
     return () => {
-      audio.removeEventListener('timeupdate', handleTimeUpdate);
-      audio.removeEventListener('loadedmetadata', handleLoadedMetadata);
-      audio.removeEventListener('ended', handleEnded);
+      detachA?.();
+      detachB?.();
     };
   }, [onNext, duration, crossfadeSeconds, currentTrack, isPlaying]);
 
@@ -210,7 +325,8 @@ export function useAudioEngine({
   };
 
   return {
-    audioRef: primaryAudioRef,
+    primaryAudioRef,
+    secondaryAudioRef,
     currentTime,
     duration,
     handleSeek,

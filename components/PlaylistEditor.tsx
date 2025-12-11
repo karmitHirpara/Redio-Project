@@ -1,5 +1,6 @@
 import { useState, useRef } from 'react';
 import { X, Search, Plus, GripVertical } from 'lucide-react';
+import { motion } from 'framer-motion';
 import { Button } from './ui/button';
 import { Input } from './ui/input';
 import { Playlist, Track } from '../types';
@@ -34,6 +35,8 @@ export function PlaylistEditor({
   const [searchQuery, setSearchQuery] = useState('');
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const [dragIndex, setDragIndex] = useState<number | null>(null);
+  const [dragOverIndex, setDragOverIndex] = useState<number | null>(null);
+  const dragStartOrderRef = useRef<Track[] | null>(null);
 
   const filteredTracks = playlist.tracks.filter(track =>
     track.name.toLowerCase().includes(searchQuery.toLowerCase()) ||
@@ -45,35 +48,52 @@ export function PlaylistEditor({
   const handleDragStart = (index: number) => {
     if (!canReorder) return;
     setDragIndex(index);
+    setDragOverIndex(index);
+    dragStartOrderRef.current = [...filteredTracks];
   };
 
   const handleDragEnter = (index: number) => {
     if (!canReorder) return;
-    if (dragIndex === null || dragIndex === index) return;
-
-    const visible = [...filteredTracks];
-    const [moved] = visible.splice(dragIndex, 1);
-    visible.splice(index, 0, moved);
-
-    // Rebuild full playlist order preserving tracks that are not in the filtered view
-    const visibleById = new Map(visible.map(t => [t.id, t] as const));
-    const newTracks: Track[] = [];
-    let visiblePos = 0;
-
-    for (const t of playlist.tracks) {
-      if (visibleById.has(t.id)) {
-        newTracks.push(visible[visiblePos++]);
-      } else {
-        newTracks.push(t);
-      }
-    }
-
-    setDragIndex(index);
-    onReorderTracks(newTracks);
+    if (dragIndex === null || dragOverIndex === index) return;
+    setDragOverIndex(index);
   };
 
   const handleDragEnd = () => {
+    if (!canReorder || dragIndex === null || dragOverIndex === null || dragStartOrderRef.current === null) {
+      setDragIndex(null);
+      setDragOverIndex(null);
+      dragStartOrderRef.current = null;
+      return;
+    }
+
+    // Work from the original visible order captured at drag start
+    const visible = [...dragStartOrderRef.current];
+    const from = dragIndex;
+    const to = dragOverIndex;
+
+    if (from !== to && from >= 0 && from < visible.length && to >= 0 && to < visible.length) {
+      const [moved] = visible.splice(from, 1);
+      visible.splice(to, 0, moved);
+
+      // Rebuild full playlist order preserving tracks that are not in the filtered view
+      const visibleById = new Map(visible.map(t => [t.id, t] as const));
+      const newTracks: Track[] = [];
+      let visiblePos = 0;
+
+      for (const t of playlist.tracks) {
+        if (visibleById.has(t.id)) {
+          newTracks.push(visible[visiblePos++]);
+        } else {
+          newTracks.push(t);
+        }
+      }
+
+      onReorderTracks(newTracks);
+    }
+
     setDragIndex(null);
+    setDragOverIndex(null);
+    dragStartOrderRef.current = null;
   };
 
   // Precompute per-track start time labels when a scheduled start time is available
@@ -162,7 +182,7 @@ export function PlaylistEditor({
       </div>
 
       {/* Tracks List */}
-      <div className="flex-1 overflow-y-auto p-2">
+      <div className="flex-1 overflow-y-auto p-2 scroll-thin">
         {filteredTracks.length === 0 ? (
           <div className="flex items-center justify-center h-32 text-muted-foreground">
             {searchQuery ? 'No tracks found' : 'No tracks in playlist'}
@@ -170,12 +190,20 @@ export function PlaylistEditor({
         ) : (
           <div className="space-y-1">
             {filteredTracks.map((track, index) => (
-              <div
+              <motion.div
                 key={track.id}
-                className="flex items-center gap-2"
+                layout
+                transition={{ type: 'spring', stiffness: 420, damping: 32, mass: 0.6 }}
+                whileDrag={{ scale: 1.02 }}
+                className={`flex items-center gap-2 cursor-default select-none ${
+                  dragOverIndex === index && dragIndex !== null
+                    ? 'bg-accent/30'
+                    : ''
+                }`}
                 draggable={canReorder}
                 onDragStart={() => handleDragStart(index)}
                 onDragEnter={() => handleDragEnter(index)}
+                onDragOver={(e) => e.preventDefault()}
                 onDragEnd={handleDragEnd}
               >
                 <span className="w-6 text-[11px] text-muted-foreground text-right">
@@ -193,7 +221,7 @@ export function PlaylistEditor({
                     startTimeLabel={startTimeByTrackId[track.id]}
                   />
                 </div>
-              </div>
+              </motion.div>
             ))}
           </div>
         )}

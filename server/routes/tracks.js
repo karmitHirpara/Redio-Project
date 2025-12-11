@@ -59,6 +59,84 @@ router.get('/', async (req, res) => {
   }
 });
 
+// Create a real file copy of an existing track with special naming rules.
+// If the existing track name already ends with "(number)", append " copy".
+// Otherwise, generate an OS-style numbered name: "Name (1)", "Name (2)", ...
+router.post('/copy', async (req, res) => {
+  try {
+    const { sourceTrackId } = req.body;
+
+    if (!sourceTrackId) {
+      return res.status(400).json({ error: 'sourceTrackId is required' });
+    }
+
+    const existing = await get('SELECT * FROM tracks WHERE id = ?', [sourceTrackId]);
+    if (!existing) {
+      return res.status(404).json({ error: 'Source track not found' });
+    }
+
+    const originalName = existing.name || 'Track';
+
+    // If name already ends with "(number)", just append " copy".
+    let newName;
+    if (/\(\d+\)\s*$/.test(originalName)) {
+      newName = `${originalName} copy`;
+    } else {
+      const baseName = originalName;
+      const escapedBase = baseName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      const pattern = new RegExp(`^${escapedBase}(?: \\((\\d+)\\))?$`);
+
+      const rows = await query('SELECT name FROM tracks WHERE name LIKE ?', [`${baseName}%`]);
+      let maxIndex = 0;
+      for (const row of rows) {
+        const name = row.name || '';
+        const match = name.match(pattern);
+        if (!match) continue;
+        const idx = match[1] ? parseInt(match[1], 10) : 0;
+        if (!Number.isNaN(idx)) {
+          maxIndex = Math.max(maxIndex, idx);
+        }
+      }
+
+      const nextIndex = maxIndex + 1;
+      newName = `${baseName} (${nextIndex})`;
+    }
+
+    const srcPath = path.join(uploadsDir, path.basename(existing.file_path || ''));
+    if (!fs.existsSync(srcPath)) {
+      return res.status(404).json({ error: 'Source audio file not found on disk' });
+    }
+
+    const ext = path.extname(srcPath) || '.mp3';
+    const newFileName = `${uuidv4()}${ext}`;
+    const destPath = path.join(uploadsDir, newFileName);
+
+    fs.copyFileSync(srcPath, destPath);
+
+    const trackId = uuidv4();
+    const newRelativePath = `/uploads/${newFileName}`;
+
+    await run(
+      `INSERT INTO tracks (id, name, artist, duration, size, file_path, hash)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      [
+        trackId,
+        newName,
+        existing.artist,
+        existing.duration,
+        existing.size,
+        newRelativePath,
+        existing.hash,
+      ],
+    );
+
+    const track = await get('SELECT * FROM tracks WHERE id = ?', [trackId]);
+    res.status(201).json(track);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
 // Create an alias track that reuses the same audio file but with a new name
 router.post('/alias', async (req, res) => {
   try {
@@ -78,14 +156,21 @@ router.post('/alias', async (req, res) => {
     // Find all tracks that share the same audio (same hash)
     const sameHashTracks = await query('SELECT name FROM tracks WHERE hash = ?', [existing.hash]);
 
-    // Count how many existing names already use this base pattern ("Name", "Name 2", "Name 3", ...)
-    const count = sameHashTracks.filter((row) => {
+    // OS-style sequential naming: "Name", "Name (1)", "Name (2)", ...
+    const pattern = new RegExp(`^${baseName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?: \\((\\d+)\\))?$`);
+    let maxIndex = 0;
+    for (const row of sameHashTracks) {
       const name = row.name || '';
-      return name === baseName || name.startsWith(`${baseName} `);
-    }).length;
+      const match = name.match(pattern);
+      if (!match) continue;
+      const idx = match[1] ? parseInt(match[1], 10) : 0;
+      if (!Number.isNaN(idx)) {
+        maxIndex = Math.max(maxIndex, idx);
+      }
+    }
 
-    const aliasIndex = count + 1;
-    const newName = aliasIndex === 1 ? baseName : `${baseName} ${aliasIndex}`;
+    const nextIndex = maxIndex + 1;
+    const newName = maxIndex === 0 ? baseName : `${baseName} (${nextIndex})`;
 
     const trackId = uuidv4();
 
@@ -202,10 +287,19 @@ router.delete('/:id', async (req, res) => {
       return res.status(404).json({ error: 'Track not found' });
     }
 
-    // Delete file if it exists
-    const filePath = path.join(uploadsDir, path.basename(track.file_path));
-    if (fs.existsSync(filePath)) {
-      fs.unlinkSync(filePath);
+    // Only delete the underlying audio file if no other tracks reference
+    // the same file_path. This ensures duplicate/alias entries that share
+    // audio continue to work until the last reference is removed.
+    const filePath = path.join(uploadsDir, path.basename(track.file_path || ''));
+    if (track.file_path) {
+      const refRow = await get(
+        'SELECT COUNT(*) as count FROM tracks WHERE file_path = ?',
+        [track.file_path],
+      );
+      const refCount = refRow?.count ?? 0;
+      if (refCount <= 1 && fs.existsSync(filePath)) {
+        fs.unlinkSync(filePath);
+      }
     }
 
     // Delete from database (cascades to playlist_tracks and queue)

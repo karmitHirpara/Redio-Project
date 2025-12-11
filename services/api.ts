@@ -46,6 +46,12 @@ export const tracksAPI = {
     return response.json();
   },
   
+  copy: (sourceTrackId: string) =>
+    fetchAPI<Track>('/tracks/copy', {
+      method: 'POST',
+      body: JSON.stringify({ sourceTrackId }),
+    }),
+  
   delete: (id: string) => fetchAPI<{ message: string }>(`/tracks/${id}`, {
     method: 'DELETE',
   }),

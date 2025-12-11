@@ -807,12 +807,6 @@ export default function App() {
       return;
     }
 
-    const trackExists = playlist.tracks.some(t => t.id === track.id);
-    if (trackExists) {
-      toast.error('Track already in playlist');
-      return;
-    }
-
     try {
       const res = await fetch(`/api/playlists/${playlistId}/tracks`, {
         method: 'POST',
@@ -839,6 +833,75 @@ export default function App() {
     } catch (error: any) {
       console.error('Failed to add track to playlist', error);
       toast.error(error.message || 'Failed to add track to playlist');
+    }
+  };
+
+  // When adding a song from the live queue into a playlist, create a real
+  // file copy with special naming so edits to that playlist entry do not
+  // affect the original. This uses the backend /tracks/copy endpoint.
+  const handleAddQueueItemToPlaylist = async (item: QueueItem, playlistId: string) => {
+    const playlist = playlists.find((p) => p.id === playlistId);
+    if (!playlist) return;
+    if (playlist.locked) {
+      toast.error('Playlist is locked');
+      return;
+    }
+
+    try {
+      const copyRes = await fetch('/api/tracks/copy', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ sourceTrackId: item.track.id }),
+      });
+
+      if (!copyRes.ok) {
+        const data = await copyRes.json().catch(() => null);
+        throw new Error(data?.error || `Failed to copy track (${copyRes.status})`);
+      }
+
+      const t = await copyRes.json();
+      const newTrack: Track = {
+        id: t.id,
+        name: t.name,
+        artist: t.artist,
+        duration: t.duration,
+        size: t.size,
+        filePath: t.file_path,
+        hash: t.hash,
+        dateAdded: t.date_added ? new Date(t.date_added) : new Date(),
+      };
+
+      setTracks((prev) => [newTrack, ...prev]);
+
+      const attachRes = await fetch(`/api/playlists/${playlistId}/tracks`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ trackIds: [newTrack.id] }),
+      });
+
+      if (!attachRes.ok) {
+        const data = await attachRes.json().catch(() => null);
+        throw new Error(
+          data?.error || `Failed to add copied track to playlist (${attachRes.status})`,
+        );
+      }
+
+      setPlaylists((prev) =>
+        prev.map((p) => {
+          if (p.id !== playlistId) return p;
+          const newTracks = [...p.tracks, newTrack];
+          return {
+            ...p,
+            tracks: newTracks,
+            duration: newTracks.reduce((sum, t2) => sum + t2.duration, 0),
+          };
+        }),
+      );
+
+      toast.success(`Copied to "${playlist.name}" from queue`);
+    } catch (error: any) {
+      console.error('Failed to copy queue track to playlist', error);
+      toast.error(error.message || 'Failed to copy track to playlist');
     }
   };
 
@@ -1435,13 +1498,14 @@ export default function App() {
     const source = options?.source ?? 'queue';
     const completed = options?.completed ?? true;
 
-    // Derive how long this track has actually been playing based on nowPlayingStart.
+    // Derive how long this track has actually been playing based on
+    // nowPlayingStart and the current wall clock. Clamp to at least 1s so
+    // very short or immediately-preempted plays (e.g. when a schedule fires
+    // mid-track) are still logged.
     const now = new Date();
     const baseStart = nowPlayingStart ?? now;
-    const elapsedSeconds = Math.max(0, Math.round((now.getTime() - baseStart.getTime()) / 1000));
-    if (elapsedSeconds <= 0) {
-      return;
-    }
+    const elapsedMs = now.getTime() - baseStart.getTime();
+    const elapsedSeconds = Math.max(1, Math.round(elapsedMs / 1000));
 
     const payload = {
       trackId: track.id,
@@ -1630,7 +1694,7 @@ export default function App() {
 
   const handlePrevious = () => {
     if (queue.length > 0) {
-      const currentIndex = queue.findIndex(item => item.track.id === currentTrackId);
+      const currentIndex = queue.findIndex((item) => item.track.id === currentTrackId);
       if (currentIndex > 0) {
         setCurrentTrackId(queue[currentIndex - 1].track.id);
       }
@@ -1654,7 +1718,6 @@ export default function App() {
               second: '2-digit',
               hour12: true,
             });
-            // Force AM/PM to uppercase for a cleaner look
             const parts = raw.split(' ');
             if (parts.length > 1) {
               const suffix = parts.pop()!;
@@ -1729,8 +1792,8 @@ export default function App() {
 
         <ResizeHandle onMouseDown={rightPanel.handleMouseDown} isResizing={rightPanel.isResizing} />
 
-        {/* Right Panel - Queue + Schedules */}
-        <div style={{ width: rightPanel.width }} className="flex-shrink-0 flex flex-col border-l border-border">
+        {/* Right Panel - Queue */}
+        <div className="flex-shrink-0" style={{ width: rightPanel.width }}>
           <QueuePanel
             queue={queue}
             currentTrackId={currentTrackId}
@@ -1739,79 +1802,9 @@ export default function App() {
             onReorderQueue={handleReorderQueue}
             timing={timing}
             now={nowIst}
+            playlists={playlists}
+            onAddQueueItemToPlaylist={handleAddQueueItemToPlaylist}
           />
-          {scheduledPlaylists.some((s) => !dismissedScheduleIds.includes(s.id)) && (
-            <div className="border-t border-border p-2 text-xs space-y-1 bg-muted/40">
-              <div className="flex items-center justify-between">
-                <div className="text-foreground text-xs font-medium">Scheduled</div>
-                <span className="text-[10px] text-muted-foreground">
-                  {scheduledPlaylists.filter(s => s.status === 'pending').length} pending
-                </span>
-              </div>
-              <div className="max-h-40 overflow-auto space-y-1">
-                {scheduledPlaylists
-                  .filter((s) => !dismissedScheduleIds.includes(s.id))
-                  .map((s) => {
-                  const isPending = s.status === 'pending';
-                  const isDatetime = s.type === 'datetime';
-                  const playlistForSchedule = playlists.find(p => p.id === s.playlistId);
-                  const isLocked = playlistForSchedule?.locked;
-                  const playlistDurationSeconds = playlistForSchedule?.duration ?? (playlistForSchedule?.tracks.reduce((sum, t) => sum + (t.duration || 0), 0) || 0);
-                  const label = isDatetime && s.dateTime
-                    ? s.dateTime.toLocaleString(undefined, {
-                        year: 'numeric',
-                        month: 'short',
-                        day: '2-digit',
-                        hour: '2-digit',
-                        minute: '2-digit',
-                        second: '2-digit',
-                        hour12: true,
-                      })
-                    : s.queueSongId
-                      ? `${s.triggerPosition === 'after' ? 'after' : 'before'} song`
-                      : 'song-trigger';
-
-                  const handleDismiss = () => {
-                    setDismissedScheduleIds((prev) =>
-                      prev.includes(s.id) ? prev : [...prev, s.id]
-                    );
-                  };
-
-                  return (
-                    <div
-                      key={s.id}
-                      className="flex items-center justify-between gap-2 rounded px-1 py-0.5"
-                    >
-                      <div className="flex-1 min-w-0">
-                        <div className="flex items-center gap-1">
-                          <span className="truncate max-w-[120px] text-foreground">{s.playlistName}</span>
-                        </div>
-                        <div className="flex items-center gap-1 text-[10px] text-muted-foreground">
-                          <span>{label}</span>
-                          {playlistDurationSeconds > 0 && (
-                            <>
-                              <span>•</span>
-                              <span>{formatDuration(playlistDurationSeconds)}</span>
-                            </>
-                          )}
-                          <span>•</span>
-                          <span>scheduled</span>
-                        </div>
-                      </div>
-                      <button
-                        type="button"
-                        onClick={handleDismiss}
-                        className="text-[10px] px-1 py-0.5 rounded border border-border hover:bg-accent hover:text-foreground"
-                        title="Dismiss from list (schedule will still run)"
-                      >
-                        ✕
-                      </button>
-                    </div>
-                  );
-                })}
-              </div>
-            </div>
-          )}
         </div>
       </div>
 
