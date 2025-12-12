@@ -1972,11 +1972,11 @@ export default function App() {
   return (
     <div className="h-screen flex flex-col">
       {/* Top bar */}
-      <div className="flex items-center px-4 py-2 border-b border-border text-xs text-muted-foreground">
-        <div className="flex-none">
+      <div className="flex items-center px-4 py-2 border-b border-border text-[11px] text-muted-foreground">
+        <div className="flex-none font-medium text-foreground/80">
           {tracks.length} tracks · {playlists.length} playlists · {queue.length} in queue
         </div>
-        <div className="flex-1 text-center font-mono text-[11px] tracking-wide">
+        <div className="flex-1 text-center font-mono text-[11px] tracking-wide text-foreground/80">
           {formatIstTime(nowIst)}
         </div>
         <div className="flex items-center gap-2 flex-none">

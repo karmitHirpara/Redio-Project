@@ -86,11 +86,11 @@ export function QueuePanel({
     <div className="h-full flex flex-col bg-background">
       {/* Header */}
       <div className="p-4 border-b border-border">
-        <h2 className="text-foreground flex items-center gap-2">
+        <h2 className="flex items-center gap-2 text-sm font-semibold tracking-tight text-foreground">
           <Radio className="w-4 h-4" />
           Queue
         </h2>
-        <p className="text-xs text-muted-foreground mt-1">
+        <p className="text-[11px] text-muted-foreground mt-1">
           {queue.length} tracks
         </p>
       </div>

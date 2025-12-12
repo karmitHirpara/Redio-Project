@@ -61,11 +61,16 @@ export function QueueItemRow({
           draggable
           className={cn(
             "group flex items-center gap-1 px-2 py-0.5 rounded-md transition-colors cursor-pointer text-xs relative",
-            "hover:bg-accent/40",
+            "hover:bg-accent/25",
             isPlaying && "bg-primary/10 border border-primary/30 shadow-sm",
-            isNext && !isPlaying && "bg-accent/25",
-            dropIndex === index && "before:absolute before:left-0 before:right-0 before:top-0 before:h-px before:bg-accent",
-            dropIndex === index + 1 && "after:absolute after:left-0 after:right-0 after:bottom-0 after:h-px after:bg-accent"
+            isNext && !isPlaying && "bg-accent/20",
+            // Make the active drop target stand out more than simple hover
+            (dropIndex === index || dropIndex === index + 1) &&
+              "bg-accent/30 ring-1 ring-accent/60 shadow-sm",
+            dropIndex === index &&
+              "before:absolute before:left-0 before:right-0 before:top-0 before:h-px before:bg-accent",
+            dropIndex === index + 1 &&
+              "after:absolute after:left-0 before:right-0 after:bottom-0 after:h-px after:bg-accent"
           )}
           onDragStart={(e) => {
             // Make queue items a cross-area drag source by encoding the

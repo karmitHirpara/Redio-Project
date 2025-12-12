@@ -245,7 +245,7 @@ export function LibraryPanel({
       {/* Library Header */}
       <div className="p-4 border-b border-border space-y-3">
         <div className="flex items-center justify-between">
-          <h2 className="text-foreground">Library</h2>
+          <h2 className="text-sm font-semibold tracking-tight text-foreground">Library</h2>
           <div className="flex items-center gap-2">
             <Button
               size="sm"

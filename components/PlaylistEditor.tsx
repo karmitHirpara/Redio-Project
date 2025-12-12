@@ -139,7 +139,7 @@ export function PlaylistEditor({
       <div className="p-4 border-b border-border space-y-3">
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-3">
-            <h2 className="text-foreground font-semibold">{playlist.name}</h2>
+            <h2 className="text-sm font-semibold tracking-tight text-foreground">{playlist.name}</h2>
             <div className="flex items-center gap-3 text-xs text-muted-foreground">
               <span>{playlist.tracks.length} tracks</span>
               <span>{formatDuration(playlist.duration)}</span>
@@ -252,14 +252,22 @@ export function PlaylistEditor({
                 key={track.id}
                 layout
                 transition={{ type: 'spring', stiffness: 380, damping: 30, mass: 0.6 }}
-                whileDrag={{ scale: 1.02 }}
-                className={`flex items-center gap-2 cursor-default select-none relative ${
+                whileDrag={{
+                  scale: 1.03,
+                  boxShadow: '0 10px 25px rgba(0,0,0,0.35)',
+                  zIndex: 20,
+                }}
+                className={`flex items-center gap-2 cursor-default select-none relative hover:bg-accent/10 ${
+                  dropIndex === index || dropIndex === index + 1
+                    ? 'bg-accent/15 ring-1 ring-accent/60'
+                    : ''
+                } ${
                   dropIndex === index
                     ? 'before:absolute before:left-0 before:right-0 before:top-0 before:h-px before:bg-accent'
                     : ''
                 } ${
                   dropIndex === index + 1
-                    ? 'after:absolute after:left-0 after:right-0 after:bottom-0 after:h-px after:bg-accent'
+                    ? 'after:absolute after:left-0 before:right-0 after:bottom-0 after:h-px after:bg-accent'
                     : ''
                 }`}
                 draggable={canReorder}

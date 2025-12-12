@@ -1,80 +1,95 @@
 # Radio Automation System
 
-Broadcast-style radio automation with a modern React UI and a simple Node/SQLite backend.
+A broadcast-grade radio automation platform with a modern React UI and a lightweight Node + SQLite backend.
 
-## 🎯 Core Features
+## 🎯 Overview
 
-- **Library Management**  
-  Upload audio, detect duplicates by file hash, and auto-name extra copies (**Song**, **Song 2**, **Song 3**, …). Supports folders and duplicate-handling flows when importing many files.
+This system delivers complete radio-style automation: audio library management, playlists, a flexible play queue, real-time scheduling, seamless playback with crossfades, and detailed playback history. All clients stay synchronized via WebSockets.
 
-- **Playlist System**  
-  Create, lock/unlock, duplicate playlists. Edit tracks in a right-side editor with drag-and-drop reordering, track numbers, and total duration.
+## 🚀 Core Features
 
-- **Flexible Queue**  
-  Drag-and-drop queue that allows deliberate duplicates (the same song can appear multiple times), shows precise start/end clock times for each item, and supports clearing and reordering.
+### Library
 
-- **Scheduling Engine**  
-  Schedule playlists by **date/time** or as a **song-trigger** (before/after a specific queue item). Datetime schedules preempt the current song at the configured clock time, play the scheduled playlist first, then resume the remaining queue from the next full song. Includes 1‑minute warning toasts and automatic dismissal of past schedules.
+- Upload audio into folders
+- Duplicate detection via file hashing
+- Auto-named alias handling (e.g. `Song`, `Song (1)`, `Song (2)`)
+- Smart folder imports without overwriting existing tracks
 
-- **Playback**  
-  Single audio element playback bar with smooth fade‑in on new tracks, gentle fade‑out near the end (controlled by a crossfade slider), and basic transport controls.
+### Playlists
 
-- **Real-time Updates**  
-  Live connection from backend to frontend broadcasts queue changes, so all open clients stay in sync even when schedules fire or the queue is edited elsewhere.
+- Create, rename, lock/unlock, duplicate
+- Drag-to-reorder playlist editor with duration totals
+- Add tracks from Library, Queue, or by direct upload
 
-- **Playback History**  
-  Every play instance of a track (including scheduled plays and duplicates) is logged with start and end times that follow the on-screen clock, and can be browsed and downloaded from a dedicated history view.
+### Queue
 
-- **Theme Support**  
-  Toggle between *default* (dark) and *light* themes.
+- Drag-and-drop ordering
+- Allows intentional duplicates
+- Shows accurate estimated start/end clock times
+- Real-time synchronization across all clients
+
+### Scheduling
+
+- Datetime schedules interrupt playback at exact IST time, prepend playlist tracks, and resume remaining queue
+- Song-trigger schedules fire before/after a specific queue item
+- Automatic 1-minute warning toast before datetime schedules
+
+### Playback
+
+- Single-element audio engine
+- Fade-in and fade-out via adjustable crossfade slider
+- Play / Pause / Skip controls
+
+### Playback History
+
+- Logs every play instance (including duplicates and scheduled plays)
+- Tracks start/end times and completion status
+- Exportable history view
+
+### UI / Theme
+
+- Built with modern React components
+- Supports Dark (default) and Light themes
 
 ## 🛠️ Tech Stack
 
 ### Frontend
 
-- **React 18** + **TypeScript**
-- **Vite 5** dev server/bundler
-- **Tailwind CSS 3** for styling
-- **Framer Motion** for animations
-- **shadcn/ui** primitives (buttons, dialogs, etc.)
-- **Lucide React** icons
-- **Sonner** for toast notifications
+- React 18 + TypeScript
+- Vite 5
+- Tailwind CSS 3
+- Framer Motion
+- shadcn/ui
+- Lucide Icons
+- Sonner
 
 ### Backend
 
-- **Node.js** (Express)
-- **SQLite** via `sqlite3`
-- **Multer** for uploads
-- **ws** WebSocket server
-- **uuid** for IDs
-- **dotenv** for config
+- Node.js (Express)
+- SQLite (sqlite3)
+- Multer (uploads)
+- WebSockets (ws)
+- uuid
+- dotenv
 
 ## 📋 Prerequisites
 
-- **Node.js** v18+  
-- **npm** (comes with Node)
+- Node.js v18+
+- npm
 
-## 🚀 Installation & Setup (Local)
-
-> For a step‑by‑step quick start, see **SETUP.md**. Below is the summary.
+## ⚡ Installation
 
 ### 1. Install dependencies
 
-From the project root:
-
 ```bash
-# Frontend deps
 npm install
 
-# Backend deps
 cd server
 npm install
 cd ..
 ```
 
-### 2. Backend environment
-
-Create `server/.env` with:
+### 2. Create backend .env
 
 ```env
 PORT=3001
@@ -91,247 +106,121 @@ node scripts/init-db.js
 cd ..
 ```
 
-### 4. Run dev servers
+### 4. Start servers
 
-Backend (port 3001):
+Backend:
 
 ```bash
-cd server
+npm run dev --prefix server
+```
+
+Frontend:
+
+```bash
 npm run dev
 ```
 
-Frontend (port 5173):
+Vite automatically proxies `/api` and `/uploads`.
 
-```bash
-cd ..   # project root if needed
-npm run dev
-```
-
-Vite is configured to proxy `/api` and `/uploads` to `http://localhost:3001`.
-
-## 📁 Project Structure (simplified)
+## 📁 Project Structure
 
 ```text
-Redio Project/
-├── App.tsx                  # Main React app wiring panels & state
-├── components/              # React UI components
+/
+├── App.tsx
+├── components/
 │   ├── LibraryPanel.tsx
 │   ├── PlaylistManager.tsx
 │   ├── PlaylistEditor.tsx
 │   ├── QueuePanel.tsx
 │   ├── PlaybackBar.tsx
-│   ├── SchedulePlaylistDialog.tsx
-│   └── ui/                  # Button, Input, Slider, Dialog, etc.
-├── hooks/                   # Custom hooks (theme, resizable panels)
-├── lib/                     # Utilities (formatDuration, generateId, ...)
-├── types/                   # Shared TypeScript interfaces
-├── server/                  # Backend API
-│   ├── server.js            # Express + WebSocket server
-│   ├── config/database.js   # SQLite helpers
+│   └── SchedulePlaylistDialog.tsx
+├── hooks/
+├── lib/
+├── types/
+├── server/
+│   ├── server.js
 │   ├── routes/
-│   │   ├── tracks.js        # Uploads, duplicate detection, alias tracks
-│   │   ├── playlists.js     # Playlists + playlist_tracks
-│   │   ├── queue.js         # Queue + queue-updated events
-│   │   ├── schedules.js     # Scheduling
-│   │   └── history.js       # Playback history
+│   │   ├── tracks.js
+│   │   ├── playlists.js
+│   │   ├── queue.js
+│   │   ├── schedules.js
+│   │   └── history.js
 │   └── scripts/
-│       └── init-db.js       # Creates tables + demo data
-└── README.md, SETUP.md      # Docs
+│       └── init-db.js
+└── README.md
 ```
 
-## 🧠 High-level Architecture & Data Flow
+## 🧠 Architecture Summary
 
-- **Frontend (React/Vite)**
-  - `App.tsx` is the main orchestrator.
-    - Loads **tracks**, **playlists**, **queue**, and **schedules** from the backend on startup.
-    - Manages playback state: `currentTrackId`, `isPlaying`, `nowPlayingStart`, `crossfadeSeconds`.
-    - Wires three main panels and the playback bar:
-      - **LibraryPanel** – imports/organises tracks and folders.
-      - **PlaylistManager** – CRUD, locking, duplication, and scheduling.
-      - **QueuePanel** – live queue view with timing for each item.
-      - **PlaybackBar** – single `<audio>` element, crossfade-style fading, and transport controls.
-    - Uses `useQueueTiming` to estimate **start/end time for each queue item** based on wall‑clock and crossfade.
-    - Maintains a lightweight top‑center **clock** (`nowIst`) which is used both for display and to drive datetime schedules.
+### Frontend
 
-- **Backend (Express + SQLite)**
-  - `server.js` exposes `/api/*` routes and a `/ws` WebSocket endpoint.
-  - Routes encapsulate domain logic:
-    - `tracks.js` – upload, duplicate detection, alias creation.
-    - `playlists.js` – playlists and playlist_tracks.
-    - `queue.js` – queue CRUD + `queue-updated` events over WebSocket.
-    - `schedules.js` – create/list/update/delete schedules.
-    - `history.js` – playback history create/update/actions.
-  - All persistent state (tracks, playlists, queue, schedules, history) lives in SQLite; the React app is effectively a **thin client** on top.
+- Loads tracks, playlists, queue, and schedules on startup
+- Maintains playback state and 1-second IST clock
+- Auto-updates queue timing based on crossfade setting
+- Panels: Library, Playlist Manager, Queue, Playback Bar
 
-Typical flow:
+### Backend
 
-1. Tracks are uploaded → stored as `tracks` rows.
-2. Playlists reference tracks via `playlist_tracks`.
-3. Queue holds a sequence of `queue` rows, each pointing at a track.
-4. Playback runs from the queue; as tracks start and finish, `App.tsx` logs listening time to `playback_history`.
-5. Schedules, when due, manipulate the queue (prepending scheduled playlist tracks) and are marked `completed`.
+- Express API + WebSocket realtime sync
+- Persistent storage in SQLite
+- Handles uploads, duplicate detection, queue operations, schedule execution, and history logging
 
-## 🔌 Backend Responsibilities (high level)
+## ⏱ Timing & Scheduling
 
-### Tracks
+### Timezone
 
-- Stores uploaded audio files and their metadata (name, artist, duration, size, file path, hash).
-- Detects duplicate audio by file hash and supports creating *alias* tracks that point to the same file with auto‑renamed titles.
-- Deleting a track also cleans up related queue and playlist entries via database relations.
+- All times use IST (`Asia/Kolkata`).
 
-### Playlists
+### Datetime schedules
 
-- Manages creation, renaming, locking/unlocking, duplication, and deletion of playlists.
-- Keeps an ordered list of tracks per playlist and persists this order in the database.
-- Supports attaching/removing tracks and reordering them.
+- When triggered:
+  - Current song is interrupted
+  - Partial play logged to history
+  - Scheduled playlist tracks are prepended
+  - Playback jumps into scheduled playlist
+  - Schedule marked completed
 
-### Queue
+### Song-trigger schedules
 
-- Stores the current play queue as an ordered list of items referencing tracks.
-- Supports adding, removing, reordering, and clearing queue items.
-- Emits `queue-updated` events over WebSocket when the queue changes so connected clients can stay in sync.
+- Fire based on queue progression
+- Insert playlist before/after targeted queue row
 
-### Schedules
+## 📦 Database Schema
 
-- Persists playlist schedules, both **datetime** and **song-trigger** types, including their status (`pending`, `completed`).
-- Provides the data the frontend uses to show upcoming schedules and to decide when to start scheduled playlists.
+### tracks
 
-### Playback History
+- id, name, artist, duration, size, file_path, hash, date_added
 
-- Records how long each track has actually been listened to (start/end positions, completed flag, source, file status).
-- Allows existing history rows to be updated so multiple listens to the same track in one session can be accumulated.
+### playlists
 
-## 🎨 Usage Guide
+- id, name, locked, created_at
 
-### 1. Upload tracks (with smart duplicates)
+### playlist_tracks
 
-1. Go to **Library** (left panel).
-2. Click **Add Audio** and select one or more audio files.
-3. For each file:
-   - If it’s new → added to the library.
-   - If it’s a duplicate (same hash):
-     - You’ll see a dialog: **Skip** or **Add copy**.
-     - **Add copy** creates an alias entry with auto name (e.g. `Song 2`) pointing to the same file.
+- playlist_id, track_id, position
 
-### 2. Manage playlists
+### queue
 
-1. Use the **Playlist Manager** (center).
-2. Create playlists, rename, lock/unlock, duplicate.
-3. Add songs:
-   - From Library (context menu / add button) – now persisted to backend.
-   - By importing files directly in the playlist editor; those tracks are also saved to the library.
-4. Open a playlist → right editor panel:
-   - Drag the grip icon to reorder tracks.
-   - See track numbers and total duration.
+- id, track_id, from_playlist, order_position, added_at
 
-### 3. Build and control the queue
+### schedules
 
-1. Add tracks from Library or from playlists.
-2. The same song can be added multiple times (duplicates are allowed) so you can build rotations or repeat a favorite track.
-3. Drag to reorder the queue; all connected clients stay in sync.
-4. Optional **Repeat** behavior can be configured via the playback controls.
+- id, playlist_id, type, date_time, queue_song_id, trigger_position, status
 
-### 4. Schedule playlists
+### playback_history
 
-1. Schedule a playlist (via Playlist Manager UI):
-   - **Datetime** – start at a specific time.
-   - **Song-trigger** – start before/after a specific queue song.
-2. You’ll see:
-   - A **1‑minute warning** toast for upcoming datetime schedules.
-   - A toast when a schedule actually starts (both datetime and song-trigger).
-
-### 5. Playback controls
-
-1. Use the bottom **Playback Bar** to play/pause/skip.
-2. Crossfade slider controls the fade window (~2–3s max) used for fade-in at the start and fade-out at the end of tracks.
-3. The `LIVE` badge indicates live mode; pausing shows a confirmation dialog.
-
-## ⏱ Time & Scheduling Semantics
-
-- **Display timezone**
-  - All user‑visible times (clock, queue, schedules, history) are formatted in **IST** (`Asia/Kolkata`) with uppercase `AM/PM`.
-
-- **Top bar clock**
-  - `App.tsx` maintains `nowIst` with a 1‑second interval.
-  - This same clock drives both the visual clock and datetime schedule evaluation, so operators see what the scheduler sees.
-
-- **Datetime schedules**
-  - Created via the **Schedule Playlist** dialog, using the same wall‑clock as the top‑center timer.
-  - The backend scheduler runs on a fixed interval and looks for due schedules.
-  - The frontend keeps a list of upcoming schedules and:
-    - Shows a **1‑minute warning toast** when a pending datetime schedule is within 60 seconds.
-    - Auto-dismisses schedule badges once they have fired.
-  - When a datetime schedule fires:
-    - The currently playing queue song is cleanly interrupted and removed from the queue.
-    - Its listened time so far is logged as a **partial history** row (`completed: false`).
-    - All scheduled playlist items are **prepended** to the queue.
-    - Playback immediately jumps to the first scheduled track and starts playing with a short fade‑in.
-    - The schedule is marked as completed.
-  - When the scheduled playlist finishes, playback continues with the remaining queue items. The interrupted song is **not** resumed; the next full song in the queue plays instead.
-
-- **Song‑trigger schedules**
-  - When `handleNext` moves off a queue item, any `song-trigger` schedules tied to that queue row are detected.
-  - The scheduled playlist tracks are inserted before/after the remaining queue according to `triggerPosition`, and the schedule status is updated.
-
-## 📜 Playback History Semantics
-
-- When leaving a track (user skip, natural end, or schedule preemption), `App.tsx` logs a **new history entry**:
-  - Computes **elapsed wall‑clock time** since `nowPlayingStart`.
-  - Writes a row with:
-    - Start time (`played_at`) based on the same clock as the top bar.
-    - `positionStart = 0`, `positionEnd = elapsedSeconds`.
-    - `completed = true` for normal finishes, `completed = false` for interruptions.
-- Every play instance is recorded separately, so:
-  - The same song played multiple times appears multiple times in history.
-  - Songs coming from scheduled playlists are logged the same way as normal queue songs.
-
-History UI:
-
-- The History dialog periodically refreshes recent entries while open and shows:
-  - Song name.
-  - Start and end clock times (derived from `played_at` and duration).
-  - Grouped by local calendar date, with an option to download a CSV export.
-
-## 🔧 Configuration
-
-### Theme
-
-Use the theme toggle in the top-right to switch between **default** (dark) and **light**.
-
-## 📈 Reliability & Operational Notes
-
-- **Scheduler lifetime**
-  - Datetime schedule evaluation is driven by a lightweight backend scheduler that checks for due schedules on a fixed interval.
-  - The frontend is responsible for operator feedback (warnings, badges) but schedules will still fire as long as the backend service is running.
-
-- **Queue & timing robustness**
-  - `useQueueTiming` computes queue timings against wall‑clock and `nowPlayingStart` using `crossfadeSeconds` so that the queue panel shows realistic “will play at” times.
-  - If `crossfadeSeconds` is changed, future items’ estimated times adjust automatically.
-
-  - `crossfadeSeconds` defaults to **2s**, which is a good compromise between smooth transitions and timing accuracy.
-
-- **Error handling**
-  - Most network operations show a toast on failure and log to the console for diagnostics.
-  - Playback history writes are best‑effort; failures do **not** stop playback but may result in missing history rows.
-
-- **Auto-cleanup of scheduled UI**
-  - The “Scheduled” panel in the right column auto‑hides ~3 seconds after there are no pending schedules left, to avoid UI clutter.
+- played_at, positionStart, positionEnd, completed, source, ...
 
 ## 🐛 Troubleshooting
 
-### Backend won't start
+### Port 3001 in use
+
 ```bash
-# Check if port 3001 is available
-# On Mac/Linux:
-lsof -i :3001
-
-# On Windows:
-netstat -ano | findstr :3001
-
-# Kill the process or change PORT in .env
+lsof -i :3001        # mac/linux
+netstat -ano | findstr :3001   # windows
 ```
 
-### Database errors
+### Reset database
 
 ```bash
 cd server
@@ -339,100 +228,44 @@ rm database.sqlite
 node scripts/init-db.js
 ```
 
-### File upload fails
+### Upload errors
 
 ```bash
-cd server
-mkdir -p uploads
-chmod 755 uploads
+mkdir -p server/uploads
+chmod 755 server/uploads
 ```
 
-### CORS errors
+### CORS issues
 
-- Check `CORS_ORIGIN` in `server/.env`.
-- Ensure it matches your frontend URL (e.g. `http://localhost:5173`).
-
-## 📦 Database Schema
-
-### tracks
-- id (TEXT PRIMARY KEY)
-- name (TEXT)
-- artist (TEXT)
-- duration (INTEGER)
-- size (INTEGER)
-- file_path (TEXT)
-- hash (TEXT)
-- date_added (DATETIME)
-
-### playlists
-- id (TEXT PRIMARY KEY)
-- name (TEXT UNIQUE)
-- locked (BOOLEAN)
-- created_at (DATETIME)
-
-### playlist_tracks
-- playlist_id (TEXT)
-- track_id (TEXT)
-- position (INTEGER)
-
-### queue
-- id (TEXT PRIMARY KEY)
-- track_id (TEXT)
-- from_playlist (TEXT)
-- order_position (INTEGER)
-- added_at (DATETIME)
-
-### schedules
-- id (TEXT PRIMARY KEY)
-- playlist_id (TEXT)
-- type (TEXT)
-- date_time (DATETIME)
-- queue_song_id (TEXT)
-- trigger_position (TEXT)
-- status (TEXT)
+- Check that `CORS_ORIGIN` matches frontend URL.
 
 ## 🚢 Deployment
 
-### Backend Deployment (Railway, Render, etc.)
+### Backend
 
-1. Set environment variables from your local `.env`.
-2. Mount or provision a persistent volume for the SQLite DB and `uploads/`, or switch to another DB.
-3. Expose the Express server and (optionally) WebSocket endpoint.
+- Provide `.env` variables
+- Use persistent volume for SQLite + uploads
+- Expose Express + WebSocket endpoints
 
-### Frontend Deployment (Vercel, Netlify, etc.)
+### Frontend
 
-1. Build: `npm run build` from the project root.
-2. Deploy the `dist/` folder.
-3. Configure an environment variable or proxy so `/api` points at your deployed backend.
+```bash
+npm run build
+```
 
-## 🤝 Contributing
+- Deploy the `dist/` folder (Vercel, Netlify, etc.).
+- Point `/api` to backend.
 
-This is a production-ready system. Contributions are welcome:
-1. Fork the repository
-2. Create a feature branch
-3. Commit your changes
-4. Push and create a Pull Request
-
-## 📄 License
-
-MIT License - Free for personal and commercial use
-
-## 🆘 Support
-
-For issues or questions:
-- Check the troubleshooting section
-- Review API documentation
-- Check console logs for errors
 
 ## 🎯 Roadmap
 
-- [ ] User authentication
-- [ ] Multi-station support
-- [ ] Advanced audio processing
-- [ ] Mobile app
-- [ ] Cloud storage integration
-- [ ] Analytics dashboard
+- User authentication
+- Multi-station support
+- Advanced audio processing
+- Mobile app
+- Cloud storage
+- Analytics dashboard
 
 ---
 
-**Built with ❤️ for radio professionals**
+Built with ❤️ for radio professionals.
