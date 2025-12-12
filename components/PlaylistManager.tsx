@@ -18,10 +18,13 @@ interface PlaylistManagerProps {
   onPlayPlaylistNow: (playlistId: string) => void;
   onQueuePlaylist: (playlistId: string) => void;
   queue: QueueItem[];
-  onImportFilesToPlaylist: (playlistId: string, files: File[]) => void;
+  onImportFilesToPlaylist: (playlistId: string, files: File[], insertIndex?: number, suppressDuplicateDialog?: boolean) => void;
   onQueueTrackFromPlaylist: (track: Track) => void;
   scheduledPlaylists: ScheduledPlaylist[];
   onDeleteSchedule: (scheduleId: string) => void | Promise<void>;
+  onDropTrackOnPlaylistHeader: (playlistId: string, trackId: string) => void;
+  onDropFilesOnPlaylistHeader: (playlistId: string, files: File[], suppressDuplicateDialog?: boolean) => void;
+  onDropTrackOnPlaylistPanel: (playlistId: string, trackId: string, insertIndex: number) => void;
 }
 
 export function PlaylistManager({
@@ -42,6 +45,9 @@ export function PlaylistManager({
   onQueueTrackFromPlaylist,
   scheduledPlaylists,
   onDeleteSchedule,
+  onDropTrackOnPlaylistHeader,
+  onDropFilesOnPlaylistHeader,
+  onDropTrackOnPlaylistPanel,
 }: PlaylistManagerProps) {
   const [selectedPlaylist, setSelectedPlaylist] = useState<Playlist | null>(null);
   const [isEditorOpen, setIsEditorOpen] = useState(false);
@@ -110,6 +116,8 @@ export function PlaylistManager({
             onSchedulePlaylist={onSchedulePlaylist}
             scheduledPlaylists={scheduledPlaylists}
             onDeleteSchedule={onDeleteSchedule}
+            onDropTrackOnPlaylistHeader={onDropTrackOnPlaylistHeader}
+            onDropFilesOnPlaylistHeader={onDropFilesOnPlaylistHeader}
           />
         </div>
       </div>
@@ -134,6 +142,8 @@ export function PlaylistManager({
           onSchedulePlaylist={onSchedulePlaylist}
           scheduledPlaylists={scheduledPlaylists}
           onDeleteSchedule={onDeleteSchedule}
+          onDropTrackOnPlaylistHeader={onDropTrackOnPlaylistHeader}
+          onDropFilesOnPlaylistHeader={onDropFilesOnPlaylistHeader}
         />
       </div>
 
@@ -155,9 +165,14 @@ export function PlaylistManager({
               onAddSongs={(tracks) => onAddSongsToPlaylist(selectedPlaylist.id, tracks)}
               onRemoveTrack={(trackId) => onRemoveTrackFromPlaylist(selectedPlaylist.id, trackId)}
               onReorderTracks={(tracks) => onReorderPlaylistTracks(selectedPlaylist.id, tracks)}
-              onImportFiles={(files) => onImportFilesToPlaylist(selectedPlaylist.id, files)}
+              onImportFiles={(files, insertIndex, suppressDuplicateDialog) =>
+                onImportFilesToPlaylist(selectedPlaylist.id, files, insertIndex, suppressDuplicateDialog)
+              }
               onQueueTrack={onQueueTrackFromPlaylist}
               scheduledStartTime={selectedPlaylistStartTime}
+              onDropTrackOnPlaylistPanel={(trackId, insertIndex) =>
+                onDropTrackOnPlaylistPanel(selectedPlaylist.id, trackId, insertIndex)
+              }
             />
           </motion.div>
         )}

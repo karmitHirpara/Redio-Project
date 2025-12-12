@@ -15,10 +15,11 @@ interface QueueItemRowProps {
   onRemove: () => void;
   index: number;
   onDragStart: (index: number) => void;
-  onDragEnter: (index: number) => void;
+  onDragOverRow: (event: React.DragEvent<HTMLDivElement>, index: number) => void;
   onDragEnd: () => void;
   startTime?: Date;
   endTime?: Date;
+  dropIndex: number | null;
 }
 
 export function QueueItemRow({
@@ -28,10 +29,11 @@ export function QueueItemRow({
   onRemove,
   index,
   onDragStart,
-  onDragEnter,
+  onDragOverRow,
   onDragEnd,
   startTime,
   endTime,
+  dropIndex,
   playlists,
   onAddToPlaylist,
 }: QueueItemRowProps & { playlists: Playlist[]; onAddToPlaylist: (playlistId: string) => void }) {
@@ -58,14 +60,25 @@ export function QueueItemRow({
         <div
           draggable
           className={cn(
-            "group flex items-center gap-1 px-2 py-0.5 rounded-md transition-colors cursor-pointer text-xs",
+            "group flex items-center gap-1 px-2 py-0.5 rounded-md transition-colors cursor-pointer text-xs relative",
             "hover:bg-accent/40",
             isPlaying && "bg-primary/10 border border-primary/30 shadow-sm",
-            isNext && !isPlaying && "bg-accent/25"
+            isNext && !isPlaying && "bg-accent/25",
+            dropIndex === index && "before:absolute before:left-0 before:right-0 before:top-0 before:h-px before:bg-accent",
+            dropIndex === index + 1 && "after:absolute after:left-0 after:right-0 after:bottom-0 after:h-px after:bg-accent"
           )}
-          onDragStart={() => onDragStart(index)}
-          onDragEnter={() => onDragEnter(index)}
-          onDragOver={(e) => e.preventDefault()}
+          onDragStart={(e) => {
+            // Make queue items a cross-area drag source by encoding the
+            // underlying track id, so they can be dropped onto playlists
+            // just like Library tracks.
+            try {
+              e.dataTransfer.setData('application/x-track-id', item.track.id);
+            } catch {
+              // ignore if dataTransfer is not available
+            }
+            onDragStart(index);
+          }}
+          onDragOver={(e) => onDragOverRow(e, index)}
           onDragEnd={onDragEnd}
         >
           <div className="w-5 text-[10px] text-foreground/70 text-center flex-shrink-0">

@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useState, useRef } from 'react';
 import { GripVertical, Radio } from 'lucide-react';
 import { QueueItem, Playlist } from '../types';
 import { QueueItemRow } from './QueueItemRow';
@@ -29,22 +29,57 @@ export function QueuePanel({
   onAddQueueItemToPlaylist,
 }: QueuePanelProps) {
   const [dragIndex, setDragIndex] = useState<number | null>(null);
+  const [dropIndex, setDropIndex] = useState<number | null>(null);
+  const dragStartOrderRef = useRef<QueueItem[] | null>(null);
 
   const handleDragStart = (index: number) => {
     setDragIndex(index);
+    setDropIndex(index);
+    // Capture the original queue order at drag start
+    dragStartOrderRef.current = [...queue];
   };
 
-  const handleDragEnter = (index: number) => {
-    if (dragIndex === null || dragIndex === index) return;
-    const updated = [...queue];
-    const [moved] = updated.splice(dragIndex, 1);
-    updated.splice(index, 0, moved);
-    setDragIndex(index);
-    onReorderQueue(updated);
+  const handleDragOverRow = (event: React.DragEvent<HTMLDivElement>, index: number) => {
+    if (dragIndex === null) return;
+    event.preventDefault();
+
+    const rect = event.currentTarget.getBoundingClientRect();
+    const offsetY = event.clientY - rect.top;
+    const halfway = rect.height / 2;
+
+    if (offsetY < halfway) {
+      setDropIndex(index);
+    } else {
+      setDropIndex(index + 1);
+    }
   };
 
   const handleDragEnd = () => {
+    const original = dragStartOrderRef.current;
+    if (dragIndex === null || dropIndex === null || !original) {
+      setDragIndex(null);
+      setDropIndex(null);
+      dragStartOrderRef.current = null;
+      return;
+    }
+
+    const visible = [...original];
+    const from = dragIndex;
+    let to = dropIndex;
+
+    if (to < 0) to = 0;
+    if (to > visible.length) to = visible.length;
+
+    if (from !== to && from >= 0 && from < visible.length && to >= 0 && to <= visible.length) {
+      const [moved] = visible.splice(from, 1);
+      const insertAt = to > from ? to - 1 : to;
+      visible.splice(insertAt, 0, moved);
+      onReorderQueue(visible);
+    }
+
     setDragIndex(null);
+    setDropIndex(null);
+    dragStartOrderRef.current = null;
   };
 
   return (
@@ -103,8 +138,9 @@ export function QueuePanel({
                       onRemove={() => onRemoveFromQueue(item.id)}
                       index={index}
                       onDragStart={handleDragStart}
-                      onDragEnter={handleDragEnter}
+                      onDragOverRow={handleDragOverRow}
                       onDragEnd={handleDragEnd}
+                      dropIndex={dropIndex}
                       startTime={startTime ?? undefined}
                       endTime={endTime ?? undefined}
                       playlists={playlists}

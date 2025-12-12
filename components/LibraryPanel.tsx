@@ -229,6 +229,17 @@ export function LibraryPanel({
     }
   };
 
+  const isAudioFile = (file: File) => {
+    const lower = file.name.toLowerCase();
+    return (
+      lower.endsWith('.mp3') ||
+      lower.endsWith('.wav') ||
+      lower.endsWith('.ogg') ||
+      lower.endsWith('.m4a') ||
+      lower.endsWith('.flac')
+    );
+  };
+
   return (
     <div className="h-full flex flex-col bg-background border-r border-border">
       {/* Library Header */}
@@ -255,30 +266,37 @@ export function LibraryPanel({
                 if (files.length > 0) {
                   const targetFolderId = pendingFolderForUpload || selectedFolderId;
                   setPendingFolderForUpload(null);
-                  await onImportTracks(files, targetFolderId || undefined);
 
-                  // If files were added to or for a folder, refresh its contents
-                  if (targetFolderId) {
-                    try {
-                      const res = await fetch(`/api/folders/${targetFolderId}/tracks`);
-                      if (res.ok) {
-                        const raw = await res.json();
-                        const normalized: Track[] = (raw || []).map((t: any) => ({
-                          id: t.id,
-                          name: t.name,
-                          artist: t.artist,
-                          duration: t.duration || 0,
-                          size: t.size || 0,
-                          filePath: t.file_path,
-                          hash: t.hash,
-                          dateAdded: t.date_added ? new Date(t.date_added) : new Date(),
-                        }));
-                        normalized.sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true }));
-                        setFolderTracks(prev => ({ ...prev, [targetFolderId]: normalized }));
-                      }
-                    } catch (err) {
-                      console.error('Failed to refresh folder tracks after upload', err);
+                  // Enforce: audio files cannot be added to the Library root.
+                  // A folder must be selected or chosen via context menu first.
+                  if (!targetFolderId) {
+                    alert('Select a folder first, then add files into that folder.');
+                    e.target.value = '';
+                    return;
+                  }
+
+                  await onImportTracks(files, targetFolderId);
+
+                  // Refresh this folder's contents after upload
+                  try {
+                    const res = await fetch(`/api/folders/${targetFolderId}/tracks`);
+                    if (res.ok) {
+                      const raw = await res.json();
+                      const normalized: Track[] = (raw || []).map((t: any) => ({
+                        id: t.id,
+                        name: t.name,
+                        artist: t.artist,
+                        duration: t.duration || 0,
+                        size: t.size || 0,
+                        filePath: t.file_path,
+                        hash: t.hash,
+                        dateAdded: t.date_added ? new Date(t.date_added) : new Date(),
+                      }));
+                      normalized.sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true }));
+                      setFolderTracks(prev => ({ ...prev, [targetFolderId]: normalized }));
                     }
+                  } catch (err) {
+                    console.error('Failed to refresh folder tracks after upload', err);
                   }
                 }
                 // allow re-selecting the same files

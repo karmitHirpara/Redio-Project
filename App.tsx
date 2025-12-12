@@ -47,6 +47,19 @@ export default function App() {
   const [dismissedScheduleIds, setDismissedScheduleIds] = useState<string[]>([]);
   const [nowIst, setNowIst] = useState<Date | null>(null);
 
+  const formatIstTime = (date: Date | null) => {
+    if (!date) return '--:--:-- --';
+    return date
+      .toLocaleTimeString('en-IN', {
+        timeZone: 'Asia/Kolkata',
+        hour: '2-digit',
+        minute: '2-digit',
+        second: '2-digit',
+        hour12: true,
+      })
+      .toUpperCase();
+  };
+
   const prevQueueLengthRef = useRef(0);
 
   const leftPanel = useResizable({ initialWidth: 320, minWidth: 250, maxWidth: 500 });
@@ -81,6 +94,12 @@ export default function App() {
     nowPlayingStart,
     crossfadeSeconds,
   });
+
+  const handleDropTrackOnPlaylistHeader = async (playlistId: string, trackId: string) => {
+    const track = tracks.find((t) => t.id === trackId);
+    if (!track) return;
+    await handleAddToPlaylist(track, playlistId);
+  };
 
   // Keep a lightweight clock for display in the top bar
   useEffect(() => {
@@ -634,32 +653,6 @@ export default function App() {
             continue;
           }
 
-          // When importing directly into a folder, avoid showing the global
-          // duplicate dialog. Instead, always create an alias copy and let
-          // the folder name dialog (and folder naming rules) drive the name.
-          let decision: 'skip' | 'cancel' | 'add' | 'addAll' = 'add';
-          if (!folderId) {
-            if (libraryDuplicateMode === 'addAll') {
-              decision = 'addAll';
-            } else {
-              decision = await askDuplicateDecision(existingTrack.name, file.name);
-            }
-          }
-
-          if (decision === 'skip') {
-            duplicates += 1;
-            continue;
-          }
-
-          if (decision === 'cancel') {
-            canceledImport = true;
-            break;
-          }
-
-          if (decision === 'addAll') {
-            libraryDuplicateMode = 'addAll';
-          }
-
           // For folder imports, generate a folder-level OS-style name so
           // duplicates show as Sahiba, Sahiba (1), Sahiba (2) inside that
           // folder, and persist that name via aliasName on the backend.
@@ -670,6 +663,16 @@ export default function App() {
             aliasName = getNextSequentialName(baseName, existingFolderNames);
             // We will push the final alias name into existingFolderNames only
             // after the alias has been created successfully.
+          } else {
+            // Library-level duplicate: do not show a dialog. Always create
+            // an alias using OS-style gap-filling naming across the entire
+            // library so repeated imports of the same file produce
+            // Sahiba, Sahiba (1), Sahiba (2), ...
+            const allNames: string[] = tracks
+              .map(t => String(t.name || ''))
+              .filter(Boolean);
+            const baseName = String(existingTrack.name || '').replace(/ \((\d+)\)$/, '');
+            aliasName = getNextSequentialName(baseName, allNames);
           }
 
           // Create an alias track that reuses the same file but with an
@@ -912,6 +915,119 @@ export default function App() {
       toast.success(`Added to "${playlist.name}"`);
     } catch (error: any) {
       console.error('Failed to add track to playlist', error);
+      toast.error(error.message || 'Failed to add track to playlist');
+    }
+  };
+
+  const handleDropTrackOnPlaylistPanel = async (
+    playlistId: string,
+    trackId: string,
+    insertIndex: number,
+  ) => {
+    const playlist = playlists.find((p) => p.id === playlistId);
+    if (!playlist) return;
+    if (playlist.locked) {
+      toast.error('Playlist is locked');
+      return;
+    }
+
+    const track = tracks.find((t) => t.id === trackId);
+    if (!track) return;
+
+    try {
+      const existingNames: string[] = (playlist.tracks || [])
+        .map((t) => String(t.name || ''))
+        .filter(Boolean);
+
+      const baseName = track.name.replace(/ \((\d+)\)$/,'');
+      const desiredName = getNextSequentialName(baseName, existingNames);
+
+      const namePattern = new RegExp(`^${escapeRegExp(baseName)}(?: \\((\\d+)\\))?$`);
+      const hasSameBase = existingNames.some((name) => namePattern.test(name));
+
+      let trackToAttach: Track = track;
+
+      if (hasSameBase) {
+        const aliasRes = await fetch('/api/tracks/alias', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ baseTrackId: track.id, aliasName: desiredName }),
+        });
+
+        if (!aliasRes.ok) {
+          const data = await aliasRes.json().catch(() => null);
+          throw new Error(
+            data?.error ||
+              data?.message ||
+              `Failed to create alias for playlist duplicate (${aliasRes.status})`,
+          );
+        }
+
+        const t = await aliasRes.json();
+        const aliasTrack: Track = {
+          id: t.id,
+          name: t.name,
+          artist: t.artist,
+          duration: t.duration && t.duration > 0 ? t.duration : track.duration,
+          size: t.size,
+          filePath: t.file_path,
+          hash: t.hash,
+          dateAdded: t.date_added ? new Date(t.date_added) : new Date(),
+        };
+
+        setTracks((prev) => [aliasTrack, ...prev]);
+        trackToAttach = aliasTrack;
+      }
+
+      const attachRes = await fetch(`/api/playlists/${playlistId}/tracks`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ trackIds: [trackToAttach.id] }),
+      });
+
+      if (!attachRes.ok) {
+        const data = await attachRes.json().catch(() => null);
+        throw new Error(data?.error || `Failed to add track to playlist (${attachRes.status})`);
+      }
+
+      // Compute the new in-memory order with the item inserted at insertIndex
+      let newTracks: Track[] = [];
+      setPlaylists((prev) =>
+        prev.map((p) => {
+          if (p.id !== playlistId) return p;
+
+          const clampedIndex = Math.min(Math.max(insertIndex, 0), p.tracks.length);
+          const before = p.tracks.slice(0, clampedIndex);
+          const after = p.tracks.slice(clampedIndex);
+          newTracks = [...before, trackToAttach, ...after];
+
+          return {
+            ...p,
+            tracks: newTracks,
+            duration: newTracks.reduce((sum, t2) => sum + t2.duration, 0),
+          };
+        }),
+      );
+
+      // Persist the new order so the DB matches the visual insertion position
+      if (newTracks.length > 0) {
+        const trackIds = newTracks.map((t) => t.id);
+        const reorderRes = await fetch(`/api/playlists/${playlistId}/reorder`, {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ trackIds }),
+        });
+
+        if (!reorderRes.ok) {
+          const data = await reorderRes.json().catch(() => null);
+          console.error('Failed to persist playlist reorder', data);
+          // Do not throw hard error here to avoid confusing the operator; UI already updated.
+        }
+      }
+
+      toast.success(`Added to "${playlist.name}"`);
+    } catch (error: any) {
+      console.error('Failed to add track to playlist at position', error);
       toast.error(error.message || 'Failed to add track to playlist');
     }
   };
@@ -1303,7 +1419,12 @@ export default function App() {
     }
   };
 
-  const handleImportFilesToPlaylist = async (playlistId: string, files: File[]) => {
+  const handleImportFilesToPlaylist = async (
+    playlistId: string,
+    files: File[],
+    insertIndex?: number,
+    suppressDuplicateDialog?: boolean,
+  ) => {
     // ...
     const playlist = playlists.find(p => p.id === playlistId);
     if (!playlist) return;
@@ -1347,7 +1468,9 @@ export default function App() {
         });
 
         if (res.status === 409) {
-          // Duplicate audio file; ask user whether to add a copy into library/playlist via in-app dialog
+          // Duplicate audio file. For OS drag-and-drop into playlists we
+          // suppress the interactive dialog and always behave like "Add
+          // Copy", so large drops remain smooth.
           const data = await res.json().catch(() => null);
           const existingTrack = data?.existingTrack;
 
@@ -1356,7 +1479,12 @@ export default function App() {
             continue;
           }
 
-          const decision = await askDuplicateDecision(existingTrack.name, file.name);
+          let decision: 'skip' | 'cancel' | 'add' | 'addAll';
+          if (suppressDuplicateDialog) {
+            decision = 'add';
+          } else {
+            decision = await askDuplicateDecision(existingTrack.name, file.name);
+          }
 
           if (decision === 'skip') {
             duplicates += 1;
@@ -1441,16 +1569,44 @@ export default function App() {
         throw new Error(data?.error || `Failed to add tracks to playlist (${res.status})`);
       }
 
-      // Update playlists state: merge importedTracks into the selected playlist's tracks
+      // Update playlists state: merge importedTracks into the selected playlist's tracks,
+      // either appended or inserted at a specific index when provided.
+      let newTracksForReorder: Track[] = [];
       setPlaylists(prev => prev.map(p => {
         if (p.id !== playlistId) return p;
-        const combined = [...p.tracks, ...importedTracks];
+
+        const current = p.tracks || [];
+        const baseLen = current.length;
+        const targetIndex =
+          insertIndex != null ? Math.min(Math.max(insertIndex, 0), baseLen) : baseLen;
+        const before = current.slice(0, targetIndex);
+        const after = current.slice(targetIndex);
+        const combined = [...before, ...importedTracks, ...after];
+
+        newTracksForReorder = combined;
+
         return {
           ...p,
           tracks: combined,
           duration: combined.reduce((sum, t) => sum + t.duration, 0),
         };
       }));
+
+      // If we inserted at a specific position, persist the new order so the
+      // backend playlist positions match the UI.
+      if (insertIndex != null && newTracksForReorder.length > 0) {
+        const trackIdsForReorder = newTracksForReorder.map(t => t.id);
+        const reorderRes = await fetch(`/api/playlists/${playlistId}/reorder`, {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ trackIds: trackIdsForReorder }),
+        });
+
+        if (!reorderRes.ok) {
+          const data = await reorderRes.json().catch(() => null);
+          console.error('Failed to persist playlist reorder after import', data);
+        }
+      }
 
       // Reflect the newly imported audio in the queue/playback bar: enqueue first imported track
       if (importedTracks.length > 0) {
@@ -1464,6 +1620,17 @@ export default function App() {
       console.error('Failed to attach tracks to playlist', error);
       toast.error(error.message || 'Failed to update playlist');
     }
+  };
+
+  // For OS drag-and-drop onto playlist headers we always suppress the
+  // duplicate dialog and let the playlist-level OS-style naming logic
+  // create copies as needed. Inserts always append at the end.
+  const handleOsDropFilesOnPlaylistHeader = (
+    playlistId: string,
+    files: File[],
+    _suppressDuplicateDialog?: boolean,
+  ): void => {
+    void handleImportFilesToPlaylist(playlistId, files, undefined, true);
   };
 
   const handleSchedulePlaylist = (playlistId: string) => {
@@ -1803,37 +1970,16 @@ export default function App() {
   };
 
   return (
-    <div className="h-screen flex flex-col bg-background text-foreground transition-colors duration-200">
-      {/* Top Bar */}
-      <div className="h-12 bg-background border-b border-border flex items-center px-4">
-        <div className="flex items-center gap-2 flex-1 min-w-0">
-          <h1 className="text-foreground whitespace-nowrap">Radio Automation</h1>
+    <div className="h-screen flex flex-col">
+      {/* Top bar */}
+      <div className="flex items-center px-4 py-2 border-b border-border text-xs text-muted-foreground">
+        <div className="flex-none">
+          {tracks.length} tracks · {playlists.length} playlists · {queue.length} in queue
         </div>
-
-        <div className="flex-1 flex items-center justify-center text-xs text-muted-foreground tabular-nums">
-          {nowIst && (() => {
-            const raw = nowIst.toLocaleTimeString('en-IN', {
-              timeZone: 'Asia/Kolkata',
-              hour: '2-digit',
-              minute: '2-digit',
-              second: '2-digit',
-              hour12: true,
-            });
-            const parts = raw.split(' ');
-            if (parts.length > 1) {
-              const suffix = parts.pop()!;
-              const time = parts.join(' ');
-              return (
-                <span>
-                  {time} {suffix.toUpperCase()}
-                </span>
-              );
-            }
-            return <span>{raw}</span>;
-          })()}
+        <div className="flex-1 text-center font-mono text-[11px] tracking-wide">
+          {formatIstTime(nowIst)}
         </div>
-
-        <div className="flex items-center gap-2 flex-1 justify-end">
+        <div className="flex items-center gap-2 flex-none">
           <Button
             variant="ghost"
             size="sm"
@@ -1848,16 +1994,16 @@ export default function App() {
         </div>
       </div>
 
-      {/* Main Content */}
-      <div className="flex-1 flex overflow-hidden">
-        {/* Left Panel - Library */}
-        <div style={{ width: leftPanel.width }} className="flex-shrink-0">
+      {/* Main three-panel layout: Library | Playlists | Queue */}
+      <div className="flex flex-1 min-h-0">
+        {/* Library (left) */}
+        <div className="flex-shrink-0 h-full" style={{ width: leftPanel.width }}>
           <LibraryPanel
             tracks={tracks}
             playlists={playlists}
             onAddToQueue={handleAddToQueue}
             onAddToPlaylist={handleAddToPlaylist}
-            onSelectPlaylist={(playlist) => toast.info(`Selected "${playlist.name}"`)}
+            onSelectPlaylist={() => {}}
             onCreatePlaylist={handleCreatePlaylist}
             onRenamePlaylist={handleRenamePlaylist}
             onDeletePlaylist={handleDeletePlaylist}
@@ -1866,13 +2012,17 @@ export default function App() {
             onImportTracks={handleImportTracks}
           />
         </div>
-        <ResizeHandle onMouseDown={leftPanel.handleMouseDown} isResizing={leftPanel.isResizing} />
 
-        {/* Center Panel - Playlist Manager */}
-        <div className="flex-1 min-w-0">
+        {/* Resize handle between Library and Playlists */}
+        <ResizeHandle
+          onMouseDown={leftPanel.handleMouseDown}
+          isResizing={leftPanel.isResizing}
+        />
+
+        {/* Playlists (center) */}
+        <div className="flex-1 min-w-0 h-full">
           <PlaylistManager
             playlists={playlists}
-            scheduledPlaylists={scheduledPlaylists}
             onCreatePlaylist={handleCreatePlaylist}
             onRenamePlaylist={handleRenamePlaylist}
             onDeletePlaylist={handleDeletePlaylist}
@@ -1887,14 +2037,22 @@ export default function App() {
             queue={queue}
             onImportFilesToPlaylist={handleImportFilesToPlaylist}
             onQueueTrackFromPlaylist={handleAddToQueue}
+            scheduledPlaylists={scheduledPlaylists}
             onDeleteSchedule={handleDeleteSchedule}
+            onDropTrackOnPlaylistHeader={handleDropTrackOnPlaylistHeader}
+            onDropFilesOnPlaylistHeader={handleOsDropFilesOnPlaylistHeader}
+            onDropTrackOnPlaylistPanel={handleDropTrackOnPlaylistPanel}
           />
         </div>
 
-        <ResizeHandle onMouseDown={rightPanel.handleMouseDown} isResizing={rightPanel.isResizing} />
+        {/* Resize handle between Playlists and Queue */}
+        <ResizeHandle
+          onMouseDown={rightPanel.handleMouseDown}
+          isResizing={rightPanel.isResizing}
+        />
 
-        {/* Right Panel - Queue */}
-        <div className="flex-shrink-0" style={{ width: rightPanel.width }}>
+        {/* Queue (right) */}
+        <div className="flex-shrink-0 h-full" style={{ width: rightPanel.width }}>
           <QueuePanel
             queue={queue}
             currentTrackId={currentTrackId}

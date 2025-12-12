@@ -15,9 +15,10 @@ interface PlaylistEditorProps {
   onAddSongs: (tracks: Track[]) => void;
   onRemoveTrack: (trackId: string) => void;
   onReorderTracks: (tracks: Track[]) => void;
-  onImportFiles: (files: File[]) => void;
+  onImportFiles: (files: File[], insertIndex?: number, suppressDuplicateDialog?: boolean) => void;
   onQueueTrack: (track: Track) => void;
   scheduledStartTime?: Date | null;
+  onDropTrackOnPlaylistPanel?: (trackId: string, insertIndex: number) => void;
 }
 
 export function PlaylistEditor({
@@ -31,11 +32,12 @@ export function PlaylistEditor({
   onImportFiles,
   onQueueTrack,
   scheduledStartTime,
+  onDropTrackOnPlaylistPanel,
 }: PlaylistEditorProps) {
   const [searchQuery, setSearchQuery] = useState('');
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const [dragIndex, setDragIndex] = useState<number | null>(null);
-  const [dragOverIndex, setDragOverIndex] = useState<number | null>(null);
+  const [dropIndex, setDropIndex] = useState<number | null>(null);
   const dragStartOrderRef = useRef<Track[] | null>(null);
 
   const filteredTracks = playlist.tracks.filter(track =>
@@ -48,20 +50,32 @@ export function PlaylistEditor({
   const handleDragStart = (index: number) => {
     if (!canReorder) return;
     setDragIndex(index);
-    setDragOverIndex(index);
+    setDropIndex(index);
     dragStartOrderRef.current = [...filteredTracks];
   };
 
-  const handleDragEnter = (index: number) => {
+  const handleDragOverRow = (event: React.DragEvent<HTMLDivElement>, index: number) => {
     if (!canReorder) return;
-    if (dragIndex === null || dragOverIndex === index) return;
-    setDragOverIndex(index);
+    event.preventDefault();
+
+    const rect = event.currentTarget.getBoundingClientRect();
+    const offsetY = event.clientY - rect.top;
+    const halfway = rect.height / 2;
+
+    // If cursor is in the top half of the row, drop before this index;
+    // if in the bottom half, drop after it (index + 1). This mimics the
+    // insertion bar behavior in native file managers.
+    if (offsetY < halfway) {
+      setDropIndex(index);
+    } else {
+      setDropIndex(index + 1);
+    }
   };
 
   const handleDragEnd = () => {
-    if (!canReorder || dragIndex === null || dragOverIndex === null || dragStartOrderRef.current === null) {
+    if (!canReorder || dragIndex === null || dropIndex === null || dragStartOrderRef.current === null) {
       setDragIndex(null);
-      setDragOverIndex(null);
+      setDropIndex(null);
       dragStartOrderRef.current = null;
       return;
     }
@@ -69,11 +83,17 @@ export function PlaylistEditor({
     // Work from the original visible order captured at drag start
     const visible = [...dragStartOrderRef.current];
     const from = dragIndex;
-    const to = dragOverIndex;
+    let to = dropIndex;
 
-    if (from !== to && from >= 0 && from < visible.length && to >= 0 && to < visible.length) {
+    // Clamp target into [0, visible.length]
+    if (to < 0) to = 0;
+    if (to > visible.length) to = visible.length;
+
+    if (from !== to && from >= 0 && from < visible.length && to >= 0 && to <= visible.length) {
       const [moved] = visible.splice(from, 1);
-      visible.splice(to, 0, moved);
+      // If we removed an item before the drop position, adjust the index.
+      const insertAt = to > from ? to - 1 : to;
+      visible.splice(insertAt, 0, moved);
 
       // Rebuild full playlist order preserving tracks that are not in the filtered view
       const visibleById = new Map(visible.map(t => [t.id, t] as const));
@@ -92,7 +112,7 @@ export function PlaylistEditor({
     }
 
     setDragIndex(null);
-    setDragOverIndex(null);
+    setDropIndex(null);
     dragStartOrderRef.current = null;
   };
 
@@ -168,7 +188,8 @@ export function PlaylistEditor({
             onChange={(e) => {
               const files = e.target.files ? Array.from(e.target.files) : [];
               if (files.length > 0) {
-                onImportFiles(files);
+                const insertAt = dropIndex !== null ? dropIndex : undefined;
+                onImportFiles(files, insertAt, false);
               }
               e.target.value = '';
             }}
@@ -182,7 +203,44 @@ export function PlaylistEditor({
       </div>
 
       {/* Tracks List */}
-      <div className="flex-1 overflow-y-auto p-2 scroll-thin">
+      <div
+        className="flex-1 overflow-y-auto p-2 scroll-thin"
+        onDragOver={(e) => {
+          const types = Array.from(e.dataTransfer.types);
+          const hasTrackId = types.includes('application/x-track-id');
+          const hasFiles = types.includes('Files');
+          if ((hasTrackId && onDropTrackOnPlaylistPanel) || hasFiles) {
+            e.preventDefault();
+          }
+        }}
+        onDrop={(e) => {
+          const types = Array.from(e.dataTransfer.types);
+          const hasTrackId = types.includes('application/x-track-id');
+          const hasFiles = types.includes('Files');
+          e.preventDefault();
+          e.stopPropagation();
+
+          if (hasTrackId && onDropTrackOnPlaylistPanel) {
+            const trackId = e.dataTransfer.getData('application/x-track-id');
+            if (!trackId) return;
+            const insertAt = dropIndex !== null ? dropIndex : filteredTracks.length;
+            onDropTrackOnPlaylistPanel(trackId, insertAt);
+            setDropIndex(null);
+            return;
+          }
+
+          if (hasFiles && onImportFiles) {
+            const files = e.dataTransfer.files ? Array.from(e.dataTransfer.files) : [];
+            if (files.length === 0) return;
+            const insertAt = dropIndex !== null ? dropIndex : filteredTracks.length;
+            // OS drag-and-drop into playlist: suppress duplicate dialog for a
+            // smoother flow, always treating duplicates as "Add Copy".
+            onImportFiles(files, insertAt, true);
+            setDropIndex(null);
+            return;
+          }
+        }}
+      >
         {filteredTracks.length === 0 ? (
           <div className="flex items-center justify-center h-32 text-muted-foreground">
             {searchQuery ? 'No tracks found' : 'No tracks in playlist'}
@@ -193,17 +251,20 @@ export function PlaylistEditor({
               <motion.div
                 key={track.id}
                 layout
-                transition={{ type: 'spring', stiffness: 420, damping: 32, mass: 0.6 }}
+                transition={{ type: 'spring', stiffness: 380, damping: 30, mass: 0.6 }}
                 whileDrag={{ scale: 1.02 }}
-                className={`flex items-center gap-2 cursor-default select-none ${
-                  dragOverIndex === index && dragIndex !== null
-                    ? 'bg-accent/30'
+                className={`flex items-center gap-2 cursor-default select-none relative ${
+                  dropIndex === index
+                    ? 'before:absolute before:left-0 before:right-0 before:top-0 before:h-px before:bg-accent'
+                    : ''
+                } ${
+                  dropIndex === index + 1
+                    ? 'after:absolute after:left-0 after:right-0 after:bottom-0 after:h-px after:bg-accent'
                     : ''
                 }`}
                 draggable={canReorder}
                 onDragStart={() => handleDragStart(index)}
-                onDragEnter={() => handleDragEnter(index)}
-                onDragOver={(e) => e.preventDefault()}
+                onDragOver={(e) => handleDragOverRow(e, index)}
                 onDragEnd={handleDragEnd}
               >
                 <span className="w-6 text-[11px] text-muted-foreground text-right">

@@ -19,6 +19,8 @@ interface PlaylistNavigatorProps {
   onSchedulePlaylist: (playlistId: string) => void;
   scheduledPlaylists: ScheduledPlaylist[];
   onDeleteSchedule: (scheduleId: string) => void | Promise<void>;
+  onDropTrackOnPlaylistHeader?: (playlistId: string, trackId: string) => void;
+  onDropFilesOnPlaylistHeader?: (playlistId: string, files: File[]) => void;
 }
 
 export function PlaylistNavigator({
@@ -33,6 +35,8 @@ export function PlaylistNavigator({
   onSchedulePlaylist,
   scheduledPlaylists,
   onDeleteSchedule,
+  onDropTrackOnPlaylistHeader,
+  onDropFilesOnPlaylistHeader,
 }: PlaylistNavigatorProps) {
   const [searchQuery, setSearchQuery] = useState('');
   const [showScheduledOnly, setShowScheduledOnly] = useState(false);
@@ -136,7 +140,39 @@ export function PlaylistNavigator({
             : undefined;
 
           return (
-            <div key={playlist.id}>
+            <div
+              key={playlist.id}
+              onDragOver={(e) => {
+                const types = Array.from(e.dataTransfer.types);
+                const hasTrackId = types.includes('application/x-track-id');
+                const hasFiles = types.includes('Files');
+                if ((hasTrackId && onDropTrackOnPlaylistHeader) || (hasFiles && onDropFilesOnPlaylistHeader)) {
+                  e.preventDefault();
+                }
+              }}
+              onDrop={(e) => {
+                const types = Array.from(e.dataTransfer.types);
+                const hasTrackId = types.includes('application/x-track-id');
+                const hasFiles = types.includes('Files');
+
+                if (hasTrackId && onDropTrackOnPlaylistHeader) {
+                  const trackId = e.dataTransfer.getData('application/x-track-id');
+                  if (!trackId) return;
+                  e.preventDefault();
+                  e.stopPropagation();
+                  onDropTrackOnPlaylistHeader(playlist.id, trackId);
+                  return;
+                }
+
+                if (hasFiles && onDropFilesOnPlaylistHeader) {
+                  e.preventDefault();
+                  e.stopPropagation();
+                  const files = Array.from(e.dataTransfer.files || []);
+                  if (files.length === 0) return;
+                  onDropFilesOnPlaylistHeader(playlist.id, files);
+                }
+              }}
+            >
               <PlaylistFolder
                 playlist={playlist}
                 onClick={() => onSelectPlaylist(playlist)}

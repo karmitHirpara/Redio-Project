@@ -67,6 +67,16 @@ export function TrackRow({
           aria-selected={isSelected}
           tabIndex={0} // focusable
           className={rowClasses}
+          draggable={isLibrary}
+          onDragStart={(e) => {
+            if (!isLibrary) return;
+            try {
+              e.dataTransfer.setData('application/x-track-id', track.id);
+              e.dataTransfer.effectAllowed = 'copyMove';
+            } catch {
+              // dataTransfer may not be available in some environments; ignore.
+            }
+          }}
           onClick={() => {
             if (onSelect) onSelect();
           }}
