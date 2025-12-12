@@ -64,6 +64,13 @@ export function PlaylistManager({
   })();
 
   const handleSelectPlaylist = (playlist: Playlist) => {
+    // If the user clicks the currently selected playlist while the editor
+    // is open, treat it as a toggle to close the editor and let the list
+    // expand to full width. Otherwise, open the editor for that playlist.
+    if (selectedPlaylist && selectedPlaylist.id === playlist.id && isEditorOpen) {
+      setIsEditorOpen(false);
+      return;
+    }
     setSelectedPlaylist(playlist);
     setIsEditorOpen(true);
   };
@@ -73,6 +80,11 @@ export function PlaylistManager({
     if (!selectedPlaylist) return;
     const updated = playlists.find(p => p.id === selectedPlaylist.id) || null;
     setSelectedPlaylist(updated);
+    // If the selected playlist was deleted or is otherwise missing,
+    // also close the editor so the navigator can reclaim the space.
+    if (!updated) {
+      setIsEditorOpen(false);
+    }
   }, [playlists, selectedPlaylist?.id]);
 
   const handleCloseEditor = () => {
@@ -80,10 +92,36 @@ export function PlaylistManager({
     setSelectedPlaylist(null);
   };
 
+  // When the editor is closed (or there is no selected playlist), show only
+  // the navigator taking the full width so there is no empty panel.
+  if (!isEditorOpen || !selectedPlaylist) {
+    return (
+      <div className="h-full flex bg-background">
+        <div className="flex-1 border-r border-border">
+          <PlaylistNavigator
+            playlists={playlists}
+            selectedPlaylist={selectedPlaylist}
+            onSelectPlaylist={handleSelectPlaylist}
+            onCreatePlaylist={onCreatePlaylist}
+            onRenamePlaylist={onRenamePlaylist}
+            onDeletePlaylist={onDeletePlaylist}
+            onToggleLockPlaylist={onToggleLockPlaylist}
+            onDuplicatePlaylist={onDuplicatePlaylist}
+            onSchedulePlaylist={onSchedulePlaylist}
+            scheduledPlaylists={scheduledPlaylists}
+            onDeleteSchedule={onDeleteSchedule}
+          />
+        </div>
+      </div>
+    );
+  }
+
+  // When the editor is open, show a split view with navigator on the left
+  // and the playlist editor sliding in from the right.
   return (
     <div className="h-full flex bg-background">
       {/* Left Subpanel - Playlist Navigator */}
-      <div className={`${isEditorOpen ? 'w-72' : 'flex-1'} transition-all duration-300 border-r border-border`}>
+      <div className="w-72 transition-all duration-300 border-r border-border">
         <PlaylistNavigator
           playlists={playlists}
           selectedPlaylist={selectedPlaylist}

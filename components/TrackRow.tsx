@@ -80,10 +80,10 @@ export function TrackRow({
 
           <div className="flex-1 min-w-0 grid grid-cols-[minmax(0,1fr)_56px_80px] items-center gap-1.5 select-text">
             <div className="truncate text-foreground text-xs">{track.name}</div>
-            <div className="text-[10px] text-muted-foreground text-right tabular-nums">
+            <div className="text-[10px] text-foreground text-right tabular-nums">
               {formatDuration(track.duration)}
             </div>
-            <div className="text-[10px] text-muted-foreground text-right tabular-nums opacity-60">
+            <div className="text-[10px] text-foreground text-right tabular-nums opacity-80">
               {startTimeLabel ? startTimeLabel : formatFileSize(track.size)}
             </div>
           </div>

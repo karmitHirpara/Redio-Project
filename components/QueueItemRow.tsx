@@ -58,7 +58,7 @@ export function QueueItemRow({
         <div
           draggable
           className={cn(
-            "group flex items-center gap-1.5 px-2 py-1 rounded-md transition-colors cursor-pointer",
+            "group flex items-center gap-1 px-2 py-0.5 rounded-md transition-colors cursor-pointer text-xs",
             "hover:bg-accent/40",
             isPlaying && "bg-primary/10 border border-primary/30 shadow-sm",
             isNext && !isPlaying && "bg-accent/25"
@@ -68,52 +68,39 @@ export function QueueItemRow({
           onDragOver={(e) => e.preventDefault()}
           onDragEnd={onDragEnd}
         >
-          <div className="w-5 text-[10px] text-muted-foreground text-center flex-shrink-0">
+          <div className="w-5 text-[10px] text-foreground/70 text-center flex-shrink-0">
             {index + 1}
           </div>
-          
+
           <GripVertical className="w-3.5 h-3.5 text-muted-foreground cursor-grab opacity-0 group-hover:opacity-100 transition-opacity" />
-          
+
           {isPlaying ? (
             <Play className="w-3.5 h-3.5 text-primary animate-pulse flex-shrink-0" />
           ) : (
             <Music className="w-3.5 h-3.5 text-muted-foreground flex-shrink-0" />
           )}
 
-          <div className="flex-1 min-w-0">
+          <div className="flex-1 min-w-0 flex items-center justify-between gap-2">
             <div
               className={cn(
-                "text-xs truncate",
+                "truncate",
                 isPlaying ? "text-foreground font-semibold" : "text-foreground"
               )}
             >
               {item.track.name}
             </div>
-            <div className="flex items-center gap-1.5 text-[11px] text-muted-foreground">
-              <span className="truncate">{item.track.artist}</span>
-              {item.fromPlaylist && (
-                <span className="text-primary text-[10px] px-1.5 py-0.5 bg-primary/10 rounded">
-                  {item.fromPlaylist}
-                </span>
+
+            <div className="flex items-center gap-1.5 text-[10px] text-foreground tabular-nums flex-shrink-0">
+              {startTime && endTime && (
+                <>
+                  <span>{formatClock(startTime)}</span>
+                  <span className="mx-0.5">→</span>
+                  <span>{formatClock(endTime)}</span>
+                  <span className="mx-0.5">•</span>
+                </>
               )}
-              {isNext && !isPlaying && (
-                <span className="text-[10px] px-1.5 py-0.5 bg-accent rounded text-foreground">
-                  Next
-                </span>
-              )}
+              <span>{formatDuration(item.track.duration)}</span>
             </div>
-          </div>
-          <div className="flex flex-col items-end gap-0.5 min-w-[68px]">
-            <span className="text-[11px] text-muted-foreground">
-              {formatDuration(item.track.duration)}
-            </span>
-            {startTime && endTime && (
-              <span className="text-[10px] text-muted-foreground tabular-nums">
-                {formatClock(startTime)}
-                <span className="mx-0.5">→</span>
-                {formatClock(endTime)}
-              </span>
-            )}
           </div>
 
           <button

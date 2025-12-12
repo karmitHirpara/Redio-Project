@@ -375,19 +375,39 @@ export default function App() {
 
   const escapeRegExp = (value: string) => value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 
+  // Given a base name and the list of existing names in a folder, return the
+  // next OS-style name. Rules: use the plain baseName if it is free; otherwise
+  // use the smallest positive integer suffix not yet taken.
+  // Examples for baseName="Sahiba":
+  //  []                                  -> "Sahiba"
+  //  ["Sahiba"]                         -> "Sahiba (1)"
+  //  ["Sahiba", "Sahiba (1)"]         -> "Sahiba (2)"
+  //  ["Sahiba", "Sahiba (2)"]         -> "Sahiba (1)"  (fill the gap)
+  //  ["Sahiba (1)", "Sahiba (2)"]     -> "Sahiba"      (base is free again)
   const getNextSequentialName = (baseName: string, existingNames: string[]): string => {
     const pattern = new RegExp(`^${escapeRegExp(baseName)}(?: \\((\\d+)\\))?$`);
-    let maxIndex = 0;
+    const used = new Set<number>();
+
     for (const name of existingNames) {
       const match = name.match(pattern);
       if (!match) continue;
-      const idx = match[1] ? parseInt(match[1], 10) : 0;
+      const idx = match[1] ? parseInt(match[1], 10) : 0; // 0 = plain baseName
       if (!Number.isNaN(idx)) {
-        maxIndex = Math.max(maxIndex, idx);
+        used.add(idx);
       }
     }
-    const nextIndex = maxIndex + 1;
-    return nextIndex === 0 ? baseName : `${baseName} (${nextIndex})`;
+
+    // If the plain name is not taken, use it.
+    if (!used.has(0)) {
+      return baseName;
+    }
+
+    // Otherwise, find the smallest positive integer not in the set.
+    let suffix = 1;
+    while (used.has(suffix)) {
+      suffix += 1;
+    }
+    return `${baseName} (${suffix})`;
   };
 
   const handleDuplicatePlaylist = async (playlistId: string) => {
@@ -590,8 +610,6 @@ export default function App() {
           if (decision === 'addAll') {
             folderDuplicateMode = 'addAll';
           }
-        } else {
-          existingFolderNames.push(baseName);
         }
       }
 
@@ -618,7 +636,7 @@ export default function App() {
 
           // When importing directly into a folder, avoid showing the global
           // duplicate dialog. Instead, always create an alias copy and let
-          // the folder name dialog drive the user's decision.
+          // the folder name dialog (and folder naming rules) drive the name.
           let decision: 'skip' | 'cancel' | 'add' | 'addAll' = 'add';
           if (!folderId) {
             if (libraryDuplicateMode === 'addAll') {
@@ -642,11 +660,24 @@ export default function App() {
             libraryDuplicateMode = 'addAll';
           }
 
-          // Create an alias track that reuses the same file but with auto-renamed title
+          // For folder imports, generate a folder-level OS-style name so
+          // duplicates show as Sahiba, Sahiba (1), Sahiba (2) inside that
+          // folder, and persist that name via aliasName on the backend.
+          let aliasName: string | undefined;
+          if (folderId) {
+            const dotIndex = file.name.lastIndexOf('.');
+            const baseName = dotIndex > 0 ? file.name.slice(0, dotIndex) : file.name;
+            aliasName = getNextSequentialName(baseName, existingFolderNames);
+            // We will push the final alias name into existingFolderNames only
+            // after the alias has been created successfully.
+          }
+
+          // Create an alias track that reuses the same file but with an
+          // auto-renamed title (either global OS-style or folder-specific).
           const aliasRes = await fetch('/api/tracks/alias', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ baseTrackId: existingTrack.id }),
+            body: JSON.stringify({ baseTrackId: existingTrack.id, aliasName }),
           });
 
           if (!aliasRes.ok) {
@@ -670,6 +701,9 @@ export default function App() {
           };
           setTracks(prev => [mapped, ...prev]);
           importedIds.push(mapped.id);
+          if (folderId) {
+            existingFolderNames.push(mapped.name);
+          }
           if ((!t.duration || t.duration === 0) && mapped.filePath) {
             hydrateTrackDurationInLibrary(mapped.id, mapped.filePath);
           }
@@ -695,6 +729,9 @@ export default function App() {
         };
         setTracks(prev => [mapped, ...prev]);
         importedIds.push(mapped.id);
+        if (folderId) {
+          existingFolderNames.push(mapped.name);
+        }
         if ((!t.duration || t.duration === 0) && mapped.filePath) {
           hydrateTrackDurationInLibrary(mapped.id, mapped.filePath);
         }
@@ -808,10 +845,53 @@ export default function App() {
     }
 
     try {
+      const existingNames: string[] = (playlist.tracks || [])
+        .map(t => String(t.name || ''))
+        .filter(Boolean);
+
+      const baseName = track.name.replace(/ \((\d+)\)$/, '');
+      const desiredName = getNextSequentialName(baseName, existingNames);
+
+      // If the desired name is exactly the same as the current track name
+      // and there is no conflicting base in this playlist, we can safely
+      // reuse the existing track without creating an alias.
+      const namePattern = new RegExp(`^${escapeRegExp(baseName)}(?: \\((\\d+)\\))?$`);
+      const hasSameBase = existingNames.some(name => namePattern.test(name));
+
+      let trackToAttach: Track = track;
+
+      if (hasSameBase) {
+        const aliasRes = await fetch('/api/tracks/alias', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ baseTrackId: track.id, aliasName: desiredName }),
+        });
+
+        if (!aliasRes.ok) {
+          const data = await aliasRes.json().catch(() => null);
+          throw new Error(data?.error || data?.message || `Failed to create alias for playlist duplicate (${aliasRes.status})`);
+        }
+
+        const t = await aliasRes.json();
+        const aliasTrack: Track = {
+          id: t.id,
+          name: t.name,
+          artist: t.artist,
+          duration: t.duration && t.duration > 0 ? t.duration : track.duration,
+          size: t.size,
+          filePath: t.file_path,
+          hash: t.hash,
+          dateAdded: t.date_added ? new Date(t.date_added) : new Date(),
+        };
+
+        setTracks(prev => [aliasTrack, ...prev]);
+        trackToAttach = aliasTrack;
+      }
+
       const res = await fetch(`/api/playlists/${playlistId}/tracks`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ trackIds: [track.id] })
+        body: JSON.stringify({ trackIds: [trackToAttach.id] })
       });
 
       if (!res.ok) {
@@ -821,7 +901,7 @@ export default function App() {
 
       setPlaylists(prev => prev.map(p => {
         if (p.id !== playlistId) return p;
-        const newTracks = [...p.tracks, track];
+        const newTracks = [...p.tracks, trackToAttach];
         return {
           ...p,
           tracks: newTracks,
@@ -1236,10 +1316,26 @@ export default function App() {
     let duplicates = 0;
     let failed = 0;
 
+    // Track existing names in this playlist so we can apply OS-style,
+    // gap-filling naming (Name, Name (1), Name (2), reusing gaps) when
+    // importing files directly into the playlist.
+    let existingNames: string[] = (playlist.tracks || [])
+      .map(t => String(t.name || ''))
+      .filter(Boolean);
+
     for (const file of files) {
       const detectedDuration = await getAudioDuration(file);
       const formData = new FormData();
       formData.append('file', file);
+
+      // Derive a base name from the file name and apply playlist-level
+      // OS-style naming so duplicates inside this playlist follow
+      // Name, Name (1), Name (2) and fill gaps after deletions.
+      const dotIndex = file.name.lastIndexOf('.');
+      const baseName = dotIndex > 0 ? file.name.slice(0, dotIndex) : file.name;
+      const desiredName = getNextSequentialName(baseName, existingNames);
+      formData.append('name', desiredName);
+
       if (detectedDuration > 0) {
         formData.append('duration', String(detectedDuration));
       }
@@ -1267,10 +1363,13 @@ export default function App() {
             continue;
           }
 
+          // For duplicate-audio cases, create an alias that also respects the
+          // playlist-level OS-style naming. Use desiredName so the alias name
+          // in the library matches what we show inside this playlist.
           const aliasRes = await fetch('/api/tracks/alias', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ baseTrackId: existingTrack.id }),
+            body: JSON.stringify({ baseTrackId: existingTrack.id, aliasName: desiredName }),
           });
 
           if (!aliasRes.ok) {
@@ -1290,6 +1389,7 @@ export default function App() {
             dateAdded: t.date_added ? new Date(t.date_added) : new Date(),
           };
           importedTracks.push(mapped);
+          existingNames.push(mapped.name);
           if ((!t.duration || t.duration === 0) && mapped.filePath) {
             hydrateTrackDurationInLibrary(mapped.id, mapped.filePath);
           }
@@ -1313,6 +1413,7 @@ export default function App() {
           dateAdded: t.date_added ? new Date(t.date_added) : new Date(),
         };
         importedTracks.push(mapped);
+        existingNames.push(mapped.name);
         if ((!t.duration || t.duration === 0) && mapped.filePath) {
           hydrateTrackDurationInLibrary(mapped.id, mapped.filePath);
         }

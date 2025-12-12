@@ -140,7 +140,7 @@ router.post('/copy', async (req, res) => {
 // Create an alias track that reuses the same audio file but with a new name
 router.post('/alias', async (req, res) => {
   try {
-    const { baseTrackId } = req.body;
+    const { baseTrackId, aliasName } = req.body;
 
     if (!baseTrackId) {
       return res.status(400).json({ error: 'baseTrackId is required' });
@@ -151,26 +151,44 @@ router.post('/alias', async (req, res) => {
       return res.status(404).json({ error: 'Base track not found' });
     }
 
-    const baseName = existing.name || 'Track';
+    // If the caller provided an explicit aliasName (used for folder-level
+    // duplicate handling), trust it and skip OS-style numbering logic here.
+    let newName;
+    if (aliasName && typeof aliasName === 'string' && aliasName.trim()) {
+      newName = aliasName.trim();
+    } else {
+      const originalName = existing.name || 'Track';
 
-    // Find all tracks that share the same audio (same hash)
-    const sameHashTracks = await query('SELECT name FROM tracks WHERE hash = ?', [existing.hash]);
+      // If the current name already ends with "(number)", follow your rule and
+      // append " copy" instead of bumping the number. This matches /tracks/copy
+      // so duplicates look like the OS (e.g. "Tum Prem Ho (4) copy").
+      if (/\(\d+\)\s*$/.test(originalName)) {
+        newName = `${originalName} copy`;
+      } else {
+        const baseName = originalName;
 
-    // OS-style sequential naming: "Name", "Name (1)", "Name (2)", ...
-    const pattern = new RegExp(`^${baseName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?: \\((\\d+)\\))?$`);
-    let maxIndex = 0;
-    for (const row of sameHashTracks) {
-      const name = row.name || '';
-      const match = name.match(pattern);
-      if (!match) continue;
-      const idx = match[1] ? parseInt(match[1], 10) : 0;
-      if (!Number.isNaN(idx)) {
-        maxIndex = Math.max(maxIndex, idx);
+        // Find all tracks that share the same audio (same hash) so aliases for
+        // this file use OS-style sequential names: "Name", "Name (1)", ...
+        const sameHashTracks = await query('SELECT name FROM tracks WHERE hash = ?', [existing.hash]);
+
+        // Escape special characters in baseName for use in the regex.
+        const escapedBase = baseName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+        const pattern = new RegExp(`^${escapedBase}(?: \\((\\d+)\\))?$`);
+        let maxIndex = 0;
+        for (const row of sameHashTracks) {
+          const name = row.name || '';
+          const match = name.match(pattern);
+          if (!match) continue;
+          const idx = match[1] ? parseInt(match[1], 10) : 0;
+          if (!Number.isNaN(idx)) {
+            maxIndex = Math.max(maxIndex, idx);
+          }
+        }
+
+        const nextIndex = maxIndex + 1;
+        newName = maxIndex === 0 ? baseName : `${baseName} (${nextIndex})`;
       }
     }
-
-    const nextIndex = maxIndex + 1;
-    const newName = maxIndex === 0 ? baseName : `${baseName} (${nextIndex})`;
 
     const trackId = uuidv4();
 
@@ -184,8 +202,8 @@ router.post('/alias', async (req, res) => {
         existing.duration,
         existing.size,
         existing.file_path,
-        existing.hash
-      ]
+        existing.hash,
+      ],
     );
 
     const track = await get('SELECT * FROM tracks WHERE id = ?', [trackId]);

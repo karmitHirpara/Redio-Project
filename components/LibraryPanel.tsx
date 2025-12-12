@@ -99,6 +99,9 @@ export function LibraryPanel({
             hash: t.hash,
             dateAdded: t.date_added ? new Date(t.date_added) : new Date(),
           }));
+          // Sort by name so OS-style duplicates (Name, Name (1), Name (2))
+          // appear together and in order in the folder view.
+          normalized.sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true }));
           setFolderTracks(prev => ({ ...prev, [folderId]: normalized }));
         }
       } catch (err) {
@@ -218,6 +221,7 @@ export function LibraryPanel({
           hash: t.hash,
           dateAdded: t.date_added ? new Date(t.date_added) : new Date(),
         }));
+        normalized.sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true }));
         setFolderTracks(prev => ({ ...prev, [folderId]: normalized }));
       } catch (err) {
         console.error('Failed to load folder tracks', err);
@@ -269,6 +273,7 @@ export function LibraryPanel({
                           hash: t.hash,
                           dateAdded: t.date_added ? new Date(t.date_added) : new Date(),
                         }));
+                        normalized.sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true }));
                         setFolderTracks(prev => ({ ...prev, [targetFolderId]: normalized }));
                       }
                     } catch (err) {
