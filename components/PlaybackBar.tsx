@@ -1,18 +1,10 @@
-import { useEffect, useState } from 'react';
+import { useState } from 'react';
 import { Play, Pause, SkipForward, SkipBack, Radio } from 'lucide-react';
 import { Button } from './ui/button';
 import { Slider } from './ui/slider';
 import { Track } from '../types';
 import { formatDuration } from '../lib/utils';
 import { useAudioEngine } from '../hooks/useAudioEngine';
-import { useAudioDevices } from '../hooks/useAudioDevices';
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from './ui/select';
 import {
   AlertDialog,
   AlertDialogAction,
@@ -57,22 +49,6 @@ export function PlaybackBar({
     crossfadeSeconds,
     onNext,
   });
-
-  const {
-    devices,
-    selectedDeviceId,
-    setSelectedDeviceId,
-    supportsOutputSelection,
-    applyToAudioElements,
-    fallbackToDefault,
-  } = useAudioDevices();
-
-  useEffect(() => {
-    const a = primaryAudioRef.current;
-    const b = secondaryAudioRef.current;
-    if (!a && !b) return;
-    applyToAudioElements([a, b]);
-  }, [applyToAudioElements, primaryAudioRef, secondaryAudioRef, selectedDeviceId]);
 
   const handlePlayPause = () => {
     if (isLive && isPlaying) {
@@ -160,35 +136,6 @@ export function PlaybackBar({
             />
             <span className="text-[11px] text-muted-foreground w-6 text-right tabular-nums">{crossfadeSeconds}s</span>
           </div>
-
-          {supportsOutputSelection && (
-            <div className="flex flex-col gap-1 min-w-[10rem]">
-              <div className="flex items-center gap-2">
-                <span className="text-[11px] text-muted-foreground">Output</span>
-                <Select
-                  value={selectedDeviceId}
-                  onValueChange={(value) => setSelectedDeviceId(value)}
-                >
-                  <SelectTrigger size="sm" className="w-40 text-[11px]">
-                    <SelectValue placeholder="System default" />
-                  </SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value="default">System default (OS)</SelectItem>
-                    {devices.map((d) => (
-                      <SelectItem key={d.deviceId} value={d.deviceId}>
-                        {d.label || 'Audio output'}
-                      </SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
-              </div>
-              {fallbackToDefault && (
-                <span className="text-[10px] text-muted-foreground">
-                  Selected device is no longer available. Using System default (OS).
-                </span>
-              )}
-            </div>
-          )}
         </div>
       </div>
 

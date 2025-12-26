@@ -13,6 +13,14 @@ import { Button } from './components/ui/button';
 import { useTheme } from './hooks/useTheme';
 import { useResizable } from './hooks/useResizable';
 import { useQueueTiming } from './hooks/useQueueTiming';
+import { useAudioDevices } from './hooks/useAudioDevices';
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from './components/ui/select';
 import { Track, Playlist, QueueItem, ScheduledPlaylist } from './types';
 import { formatDuration, generateId } from './lib/utils';
 import { toast, Toaster } from 'sonner';
@@ -46,6 +54,13 @@ export default function App() {
   const folderDuplicateDecisionResolver = useRef<((choice: 'skip' | 'cancel' | 'add' | 'addAll') => void) | null>(null);
   const [dismissedScheduleIds, setDismissedScheduleIds] = useState<string[]>([]);
   const [nowIst, setNowIst] = useState<Date | null>(null);
+
+  const {
+    devices: headerOutputDevices,
+    selectedDeviceId: headerSelectedDeviceId,
+    setSelectedDeviceId: setHeaderSelectedDeviceId,
+    supportsOutputSelection: headerSupportsOutputSelection,
+  } = useAudioDevices();
 
   const formatIstTime = (date: Date | null) => {
     if (!date) return '--:--:-- --';
@@ -1980,6 +1995,30 @@ export default function App() {
           {formatIstTime(nowIst)}
         </div>
         <div className="flex items-center gap-2 flex-none">
+          {headerSupportsOutputSelection && (
+            <div className="hidden sm:flex items-center gap-1 max-w-[9rem]">
+              <span className="text-[11px] text-muted-foreground whitespace-nowrap">Output</span>
+              <Select
+                value={headerSelectedDeviceId}
+                onValueChange={(value) => setHeaderSelectedDeviceId(value)}
+              >
+                <SelectTrigger
+                  size="sm"
+                  className="h-7 w-[6.5rem] text-[11px] truncate"
+                >
+                  <SelectValue placeholder="Default" />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="default">System default (OS)</SelectItem>
+                  {headerOutputDevices.map((d) => (
+                    <SelectItem key={d.deviceId} value={d.deviceId}>
+                      {d.label || 'Audio output'}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+          )}
           <Button
             variant="ghost"
             size="sm"
