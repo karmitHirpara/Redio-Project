@@ -1,10 +1,12 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { Play, Pause, SkipForward, SkipBack, Radio } from 'lucide-react';
 import { Button } from './ui/button';
 import { Slider } from './ui/slider';
 import { Track } from '../types';
 import { formatDuration } from '../lib/utils';
 import { useAudioEngine } from '../hooks/useAudioEngine';
+import type { UseAudioDevicesResult } from '../hooks/useAudioDevices';
+import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from './ui/tooltip';
 import {
   AlertDialog,
   AlertDialogAction,
@@ -29,6 +31,7 @@ interface PlaybackBarProps {
   isLive: boolean;
   crossfadeSeconds: number;
   onCrossfadeChange: (value: number) => void;
+  audioDevices: UseAudioDevicesResult;
 }
 
 export function PlaybackBar({
@@ -41,6 +44,7 @@ export function PlaybackBar({
   isLive,
   crossfadeSeconds,
   onCrossfadeChange,
+  audioDevices,
 }: PlaybackBarProps) {
   const [showPauseConfirm, setShowPauseConfirm] = useState(false);
   const { primaryAudioRef, secondaryAudioRef, currentTime, duration, handleSeek } = useAudioEngine({
@@ -49,6 +53,18 @@ export function PlaybackBar({
     crossfadeSeconds,
     onNext,
   });
+
+  // Wire the global Audio Guard selection (from the header Output control)
+  // into the actual audio elements used for playback. This keeps the
+  // playback bar visually simple while still honoring device choices.
+  const { selectedDeviceId, applyToAudioElements } = audioDevices;
+
+  useEffect(() => {
+    const a = primaryAudioRef.current;
+    const b = secondaryAudioRef.current;
+    if (!a && !b) return;
+    applyToAudioElements([a, b]);
+  }, [applyToAudioElements, primaryAudioRef, secondaryAudioRef, selectedDeviceId]);
 
   const handlePlayPause = () => {
     if (isLive && isPlaying) {
@@ -71,7 +87,18 @@ export function PlaybackBar({
                 <Radio className="w-6 h-6 text-primary" />
               </div>
               <div className="flex-1 min-w-0">
-                <div className="text-sm text-foreground truncate">{currentTrack.name}</div>
+                <TooltipProvider delayDuration={300}>
+                  <Tooltip>
+                    <TooltipTrigger asChild>
+                      <div className="text-sm text-foreground truncate cursor-default">
+                        {currentTrack.name}
+                      </div>
+                    </TooltipTrigger>
+                    <TooltipContent side="top" className="max-w-xs text-xs leading-snug">
+                      {currentTrack.name}
+                    </TooltipContent>
+                  </Tooltip>
+                </TooltipProvider>
                 <div className="text-xs text-muted-foreground truncate">{currentTrack.artist}</div>
               </div>
             </>

@@ -5,7 +5,7 @@ interface AudioOutputDevice {
   label: string;
 }
 
-interface UseAudioDevicesResult {
+export interface UseAudioDevicesResult {
   devices: AudioOutputDevice[];
   selectedDeviceId: string;
   setSelectedDeviceId: (id: string) => void;

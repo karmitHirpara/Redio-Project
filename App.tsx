@@ -55,12 +55,15 @@ export default function App() {
   const [dismissedScheduleIds, setDismissedScheduleIds] = useState<string[]>([]);
   const [nowIst, setNowIst] = useState<Date | null>(null);
 
+  // Single shared Audio Guard state for the entire app: header Output control
+  // and the playback engine both use this instance.
+  const audioDevices = useAudioDevices();
   const {
     devices: headerOutputDevices,
     selectedDeviceId: headerSelectedDeviceId,
     setSelectedDeviceId: setHeaderSelectedDeviceId,
     supportsOutputSelection: headerSupportsOutputSelection,
-  } = useAudioDevices();
+  } = audioDevices;
 
   const formatIstTime = (date: Date | null) => {
     if (!date) return '--:--:-- --';
@@ -2117,6 +2120,7 @@ export default function App() {
         isLive={isLive}
         crossfadeSeconds={crossfadeSeconds}
         onCrossfadeChange={setCrossfadeSeconds}
+        audioDevices={audioDevices}
       />
 
       <Toaster position="bottom-right" />
