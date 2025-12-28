@@ -116,20 +116,11 @@ export function QueuePanel({
               >
                 {(() => {
                   const entry = timing?.queueTimings.find((t) => t.item.id === item.id);
-                  const np =
-                    !entry && item.track.id === currentTrackId ? timing?.nowPlaying : undefined;
-                  let startTime = entry?.start ?? np?.start ?? null;
-                  let endTime = entry?.end ?? np?.end ?? null;
+                  const isCurrent = item.track.id === currentTrackId;
+                  const np = isCurrent ? timing?.nowPlaying : undefined;
 
-                  // For the first currently-playing item, align the displayed
-                  // start time with the current clock so the UI feels
-                  // consistent with the top-center timer. We only affect the
-                  // display here, not the underlying timing logic.
-                  if (index === 0 && item.id === currentQueueItemId && now) {
-                    startTime = now;
-                    const durationSec = item.track.duration || 0;
-                    endTime = new Date(now.getTime() + durationSec * 1000);
-                  }
+                  const startTime = (isCurrent ? np?.start : entry?.start) ?? null;
+                  const endTime = (isCurrent ? np?.end : entry?.end) ?? null;
                   return (
                     <QueueItemRow
                       item={item}

@@ -60,13 +60,12 @@ export function useQueueTiming({
     let nowEnd: Date | null = null;
 
     if (currentTrack && currentTrackId) {
-      // When paused, anchor the displayed start time to the current
-      // wall-clock so the queue view updates continuously while the
-      // operator is stopped. When playing, respect the actual
-      // nowPlayingStart so schedules align with real playback.
-      const baseStart = isPlaying
-        ? (nowPlayingStart ?? now)
-        : now;
+      // Always derive timing from nowPlayingStart when available so that
+      // seeking within the track immediately re-anchors both the current
+      // song and all subsequent queue items, regardless of play/pause
+      // state. Fall back to the current wall-clock only if we do not yet
+      // have a stable nowPlayingStart.
+      const baseStart = nowPlayingStart ?? now;
       const adj = adjustedDurationSeconds(currentTrack, crossfadeSeconds);
       nowStart = baseStart;
       nowEnd = new Date(baseStart.getTime() + adj * 1000);

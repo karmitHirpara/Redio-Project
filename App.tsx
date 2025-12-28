@@ -80,6 +80,14 @@ export default function App() {
 
   const prevQueueLengthRef = useRef(0);
 
+  const handleSeekWithTiming = (seconds: number) => {
+    if (!currentTrack) return;
+
+    const now = new Date();
+    const newStart = new Date(now.getTime() - seconds * 1000);
+    setNowPlayingStart(newStart);
+  };
+
   const leftPanel = useResizable({ initialWidth: 320, minWidth: 250, maxWidth: 500 });
   const rightPanel = useResizable({ initialWidth: 320, minWidth: 250, maxWidth: 500 });
 
@@ -564,12 +572,14 @@ export default function App() {
     prevQueueLengthRef.current = queue.length;
   }, [queue, currentTrackId]);
 
-  // Track when the current track actually starts (wall-clock)
+  // Track when the current track actually starts (wall-clock). Only reset
+  // when the current track changes so seek-based adjustments to
+  // nowPlayingStart are preserved.
   useEffect(() => {
-    if (currentTrackId && isPlaying) {
+    if (currentTrackId) {
       setNowPlayingStart(new Date());
     }
-  }, [currentTrackId, isPlaying]);
+  }, [currentTrackId]);
 
   // Adjust start time when pausing/resuming so future timings stay accurate
   useEffect(() => {
@@ -2121,6 +2131,7 @@ export default function App() {
         crossfadeSeconds={crossfadeSeconds}
         onCrossfadeChange={setCrossfadeSeconds}
         audioDevices={audioDevices}
+        onSeek={handleSeekWithTiming}
       />
 
       <Toaster position="bottom-right" />
