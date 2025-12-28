@@ -54,7 +54,6 @@ export function PlaybackBar({
     isPlaying,
     crossfadeSeconds,
     onNext,
-    onSeek,
   });
 
   // Wire the global Audio Guard selection (from the header Output control)
@@ -143,6 +142,12 @@ export function PlaybackBar({
                 max={duration || currentTrack.duration || 0}
                 step={1}
                 onValueChange={handleSeek}
+                onValueCommit={(vals) => {
+                  const seconds = vals[0] ?? 0;
+                  if (onSeek) {
+                    onSeek(seconds);
+                  }
+                }}
                 className="flex-1 h-1.5"
               />
               <span className="text-[11px] text-muted-foreground w-12 text-left tabular-nums">

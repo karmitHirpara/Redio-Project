@@ -26,6 +26,7 @@ This system delivers complete radio-style automation: audio library management, 
 - Drag-and-drop ordering
 - Allows intentional duplicates
 - Shows accurate estimated start/end clock times
+- Live "smart seek": dragging the playback bar instantly reflows current and upcoming track timings
 - Real-time synchronization across all clients
 
 ### Scheduling

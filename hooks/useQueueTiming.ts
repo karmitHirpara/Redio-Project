@@ -8,6 +8,7 @@ interface UseQueueTimingInput {
   isPlaying: boolean;
   nowPlayingStart: Date | null;
   crossfadeSeconds: number;
+  seekPositionSeconds?: number | null;
 }
 
 export interface NowPlayingTiming {
@@ -42,6 +43,7 @@ export function useQueueTiming({
   isPlaying,
   nowPlayingStart,
   crossfadeSeconds,
+  seekPositionSeconds,
 }: UseQueueTimingInput): QueueTimingResult {
   const [tick, setTick] = useState(0);
 
@@ -60,15 +62,33 @@ export function useQueueTiming({
     let nowEnd: Date | null = null;
 
     if (currentTrack && currentTrackId) {
-      // Always derive timing from nowPlayingStart when available so that
-      // seeking within the track immediately re-anchors both the current
-      // song and all subsequent queue items, regardless of play/pause
-      // state. Fall back to the current wall-clock only if we do not yet
-      // have a stable nowPlayingStart.
+      // Anchor the start time to the original nowPlayingStart so the
+      // operator sees when the song began. Seeking should only adjust
+      // the expected end time (and therefore the timing of subsequent
+      // queue items), not rewrite the displayed start.
       const baseStart = nowPlayingStart ?? now;
-      const adj = adjustedDurationSeconds(currentTrack, crossfadeSeconds);
+      const total = adjustedDurationSeconds(currentTrack, crossfadeSeconds);
+      const effectiveTotal = Math.max(0, total);
+
+      let remaining: number;
+
+      if (seekPositionSeconds == null) {
+        // No active seek override: derive remaining time from how long the
+        // track has actually been playing according to wall-clock.
+        const elapsedMs = Math.max(0, now.getTime() - baseStart.getTime());
+        const elapsedSec = Math.min(effectiveTotal, Math.floor(elapsedMs / 1000));
+        remaining = Math.max(0, effectiveTotal - elapsedSec);
+      } else {
+        // Seek override: treat seekPositionSeconds as the absolute playhead
+        // position within the effective track window. Moving the seek bar
+        // forward shortens remaining time; moving it backward extends it.
+        const rawSeek = seekPositionSeconds;
+        const clampedSeek = Math.max(0, Math.min(rawSeek, effectiveTotal));
+        remaining = effectiveTotal > 0 ? effectiveTotal - clampedSeek : 0;
+      }
+
       nowStart = baseStart;
-      nowEnd = new Date(baseStart.getTime() + adj * 1000);
+      nowEnd = new Date(now.getTime() + remaining * 1000);
     }
 
     const np: NowPlayingTiming = {
@@ -99,6 +119,7 @@ export function useQueueTiming({
     isPlaying,
     nowPlayingStart,
     crossfadeSeconds,
+    seekPositionSeconds,
     tick,
   ]);
 

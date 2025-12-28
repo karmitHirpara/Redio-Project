@@ -7,7 +7,6 @@ interface UseAudioEngineOptions {
   isPlaying: boolean;
   crossfadeSeconds: number;
   onNext: () => void;
-  onSeek?: (seconds: number) => void;
 }
 
 interface UseAudioEngineResult {
@@ -26,7 +25,6 @@ export function useAudioEngine({
   isPlaying,
   crossfadeSeconds,
   onNext,
-  onSeek,
 }: UseAudioEngineOptions): UseAudioEngineResult {
   const [currentTime, setCurrentTime] = useState(0);
   const [duration, setDuration] = useState(0);
@@ -323,10 +321,6 @@ export function useAudioEngine({
     const audio = getActiveAudio();
     if (audio && currentTrack) {
       audio.currentTime = newTime;
-    }
-
-    if (onSeek) {
-      onSeek(newTime);
     }
   };
 

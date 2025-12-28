@@ -36,6 +36,7 @@ export default function App() {
   const [scheduledPlaylists, setScheduledPlaylists] = useState<ScheduledPlaylist[]>([]);
   const [crossfadeSeconds, setCrossfadeSeconds] = useState(2);
   const [nowPlayingStart, setNowPlayingStart] = useState<Date | null>(null);
+  const [seekPositionSeconds, setSeekPositionSeconds] = useState<number | null>(null);
   const pauseStartedAtRef = useRef<Date | null>(null);
   const datetimeWarnedRef = useRef<Set<string>>(new Set());
   const [scheduleDialogOpen, setScheduleDialogOpen] = useState(false);
@@ -82,10 +83,7 @@ export default function App() {
 
   const handleSeekWithTiming = (seconds: number) => {
     if (!currentTrack) return;
-
-    const now = new Date();
-    const newStart = new Date(now.getTime() - seconds * 1000);
-    setNowPlayingStart(newStart);
+    setSeekPositionSeconds(seconds);
   };
 
   const leftPanel = useResizable({ initialWidth: 320, minWidth: 250, maxWidth: 500 });
@@ -119,6 +117,7 @@ export default function App() {
     isPlaying,
     nowPlayingStart,
     crossfadeSeconds,
+    seekPositionSeconds,
   });
 
   const handleDropTrackOnPlaylistHeader = async (playlistId: string, trackId: string) => {
