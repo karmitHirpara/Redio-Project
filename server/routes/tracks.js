@@ -24,28 +24,101 @@ if (!fs.existsSync(uploadsDir)) {
   fs.mkdirSync(uploadsDir, { recursive: true });
 }
 
+const MAX_UPLOAD_BYTES = 50 * 1024 * 1024;
+
+const ALLOWED_EXTENSIONS = new Set(['.mp3', '.wav', '.ogg', '.m4a', '.flac']);
+
+// Note: browsers sometimes report M4A as video/mp4.
+const ALLOWED_MIME_TYPES = new Set([
+  'audio/mpeg',
+  'audio/mp3',
+  'audio/wav',
+  'audio/x-wav',
+  'audio/ogg',
+  'audio/flac',
+  'audio/x-flac',
+  'audio/mp4',
+  'audio/aac',
+  'video/mp4',
+  'application/ogg',
+]);
+
+const isAllowedMime = (mime) => {
+  if (!mime || typeof mime !== 'string') return false;
+  if (mime.startsWith('audio/')) return true;
+  return ALLOWED_MIME_TYPES.has(mime);
+};
+
+const normalizeExt = (originalName, mimeType) => {
+  const raw = path.extname(String(originalName || '')).toLowerCase();
+  if (raw) {
+    return ALLOWED_EXTENSIONS.has(raw) ? raw : '';
+  }
+
+  // Fallback mapping based on MIME type when extension is missing/unknown.
+  switch (String(mimeType || '').toLowerCase()) {
+    case 'audio/mpeg':
+    case 'audio/mp3':
+      return '.mp3';
+    case 'audio/wav':
+    case 'audio/x-wav':
+      return '.wav';
+    case 'audio/ogg':
+    case 'application/ogg':
+      return '.ogg';
+    case 'audio/flac':
+    case 'audio/x-flac':
+      return '.flac';
+    case 'audio/mp4':
+    case 'video/mp4':
+    case 'audio/aac':
+      return '.m4a';
+    default:
+      return '';
+  }
+};
+
+const resolveUploadPath = (filePathOrName) => {
+  const base = path.basename(String(filePathOrName || ''));
+  const resolved = path.resolve(uploadsDir, base);
+  const root = path.resolve(uploadsDir) + path.sep;
+  if (!resolved.startsWith(root)) {
+    throw new Error('Invalid upload path');
+  }
+  return resolved;
+};
+
+const sha256File = (absolutePath) =>
+  new Promise((resolve, reject) => {
+    const hash = crypto.createHash('sha256');
+    const stream = fs.createReadStream(absolutePath);
+    stream.on('error', reject);
+    stream.on('data', (chunk) => hash.update(chunk));
+    stream.on('end', () => resolve(hash.digest('hex')));
+  });
+
 // Configure multer for file uploads
 const storage = multer.diskStorage({
   destination: (req, file, cb) => {
     cb(null, uploadsDir);
   },
   filename: (req, file, cb) => {
-    const uniqueName = `${uuidv4()}${path.extname(file.originalname)}`;
+    const safeExt = normalizeExt(file.originalname, file.mimetype);
+    const uniqueName = `${uuidv4()}${safeExt}`;
     cb(null, uniqueName);
   }
 });
 
 const upload = multer({
   storage,
-  limits: { fileSize: 50 * 1024 * 1024 }, // 50MB limit
+  limits: { fileSize: MAX_UPLOAD_BYTES },
   fileFilter: (req, file, cb) => {
-    const allowedTypes = ['.mp3', '.wav', '.ogg', '.m4a', '.flac'];
-    const ext = path.extname(file.originalname).toLowerCase();
-    if (allowedTypes.includes(ext)) {
-      cb(null, true);
-    } else {
+    const ext = normalizeExt(file.originalname, file.mimetype);
+    if (!ext || !ALLOWED_EXTENSIONS.has(ext) || !isAllowedMime(file.mimetype)) {
       cb(new Error('Invalid file type. Only audio files are allowed.'));
+      return;
     }
+    cb(null, true);
   }
 });
 
@@ -102,14 +175,14 @@ router.post('/copy', async (req, res) => {
       newName = `${baseName} (${nextIndex})`;
     }
 
-    const srcPath = path.join(uploadsDir, path.basename(existing.file_path || ''));
+    const srcPath = resolveUploadPath(existing.file_path || '');
     if (!fs.existsSync(srcPath)) {
       return res.status(404).json({ error: 'Source audio file not found on disk' });
     }
 
     const ext = path.extname(srcPath) || '.mp3';
     const newFileName = `${uuidv4()}${ext}`;
-    const destPath = path.join(uploadsDir, newFileName);
+    const destPath = resolveUploadPath(newFileName);
 
     fs.copyFileSync(srcPath, destPath);
 
@@ -227,15 +300,26 @@ router.get('/:id', async (req, res) => {
 });
 
 // Upload track
-router.post('/upload', upload.single('file'), async (req, res) => {
+router.post('/upload', (req, res, next) => {
+  upload.single('file')(req, res, (err) => {
+    if (!err) return next();
+
+    if (err?.code === 'LIMIT_FILE_SIZE') {
+      return res.status(413).json({ error: 'File too large' });
+    }
+
+    return res.status(400).json({ error: err?.message || 'Upload failed' });
+  });
+}, async (req, res) => {
   try {
     if (!req.file) {
       return res.status(400).json({ error: 'No file uploaded' });
     }
 
-    // Calculate file hash
-    const fileBuffer = fs.readFileSync(req.file.path);
-    const hash = crypto.createHash('sha256').update(fileBuffer).digest('hex');
+    const uploadedPath = resolveUploadPath(req.file.filename);
+
+    // Calculate file hash without loading the entire file into memory.
+    const hash = await sha256File(uploadedPath);
 
     // Check if file already exists
     const existing = await get('SELECT * FROM tracks WHERE hash = ?', [hash]);
@@ -243,10 +327,7 @@ router.post('/upload', upload.single('file'), async (req, res) => {
       // If the DB says we already have this audio but the underlying file
       // is missing on disk, treat this upload as a repair: keep the new
       // file, update file_path for the existing track, and return it.
-      const existingFilePath = path.join(
-        uploadsDir,
-        path.basename(existing.file_path || '')
-      );
+      const existingFilePath = resolveUploadPath(existing.file_path || '');
 
       if (!fs.existsSync(existingFilePath)) {
         const newRelativePath = `/uploads/${path.basename(req.file.filename)}`;
@@ -262,7 +343,7 @@ router.post('/upload', upload.single('file'), async (req, res) => {
 
       // True duplicate: underlying file exists already. Remove the freshly
       // uploaded file and signal a duplicate to the caller.
-      fs.unlinkSync(req.file.path);
+      fs.unlinkSync(uploadedPath);
       return res.status(409).json({
         error: 'Duplicate file',
         existingTrack: existing,
@@ -291,7 +372,12 @@ router.post('/upload', upload.single('file'), async (req, res) => {
   } catch (error) {
     // Clean up uploaded file on error
     if (req.file) {
-      fs.unlinkSync(req.file.path);
+      try {
+        const uploadedPath = resolveUploadPath(req.file.filename);
+        if (fs.existsSync(uploadedPath)) fs.unlinkSync(uploadedPath);
+      } catch {
+        // ignore cleanup errors
+      }
     }
     res.status(500).json({ error: error.message });
   }
@@ -308,7 +394,7 @@ router.delete('/:id', async (req, res) => {
     // Only delete the underlying audio file if no other tracks reference
     // the same file_path. This ensures duplicate/alias entries that share
     // audio continue to work until the last reference is removed.
-    const filePath = path.join(uploadsDir, path.basename(track.file_path || ''));
+    const filePath = resolveUploadPath(track.file_path || '');
     if (track.file_path) {
       const refRow = await get(
         'SELECT COUNT(*) as count FROM tracks WHERE file_path = ?',

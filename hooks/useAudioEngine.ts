@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import type React from 'react';
 import type { Track } from '../types';
+import { resolveUploadsUrl } from '../services/api';
 
 interface UseAudioEngineOptions {
   currentTrack: Track | null;
@@ -80,7 +81,7 @@ export function useAudioEngine({
     // First track: just load it on the active element.
     if (!lastTrackIdRef.current && currentTrack && activeAudio) {
       lastTrackIdRef.current = currentTrack.id;
-      activeAudio.src = currentTrack.filePath;
+      activeAudio.src = resolveUploadsUrl(currentTrack.filePath);
       activeAudio.currentTime = 0;
       setCurrentTime(0);
       setDuration(currentTrack.duration || 0);
@@ -148,7 +149,7 @@ export function useAudioEngine({
 
     if (host) {
       host.pause();
-      host.src = currentTrack.filePath;
+      host.src = resolveUploadsUrl(currentTrack.filePath);
       host.currentTime = 0;
       try {
         host.volume = 0;

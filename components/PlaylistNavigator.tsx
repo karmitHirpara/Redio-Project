@@ -6,6 +6,7 @@ import { Playlist, ScheduledPlaylist } from '../types';
 import { PlaylistFolder } from './PlaylistFolder';
 import { formatDuration } from '../lib/utils';
 import { cn } from '../lib/utils';
+import { AnimatePresence, motion, useReducedMotion } from 'framer-motion';
 
 interface PlaylistNavigatorProps {
   playlists: Playlist[];
@@ -40,6 +41,8 @@ export function PlaylistNavigator({
 }: PlaylistNavigatorProps) {
   const [searchQuery, setSearchQuery] = useState('');
   const [showScheduledOnly, setShowScheduledOnly] = useState(false);
+  const reduceMotion = useReducedMotion() ?? false;
+  const [dragOverPlaylistId, setDragOverPlaylistId] = useState<string | null>(null);
 
   const nextScheduleByPlaylist = useMemo(() => {
     const map: Record<string, ScheduledPlaylist | undefined> = {};
@@ -125,67 +128,106 @@ export function PlaylistNavigator({
 
       {/* Playlists List */}
       <div className="flex-1 overflow-y-auto p-2 space-y-1">
-        {filteredPlaylists.map((playlist) => {
-          const nextSchedule = nextScheduleByPlaylist[playlist.id];
-          const scheduleLabel = nextSchedule?.dateTime
-            ? nextSchedule.dateTime.toLocaleString('en-IN', {
-                timeZone: 'Asia/Kolkata',
-                month: 'short',
-                day: '2-digit',
-                hour: '2-digit',
-                minute: '2-digit',
-                second: '2-digit',
-                hour12: true,
-              })
-            : undefined;
+        <AnimatePresence mode="popLayout">
+          {filteredPlaylists.map((playlist) => {
+            const nextSchedule = nextScheduleByPlaylist[playlist.id];
+            const scheduleLabel = nextSchedule?.dateTime
+              ? nextSchedule.dateTime.toLocaleString('en-IN', {
+                  timeZone: 'Asia/Kolkata',
+                  month: 'short',
+                  day: '2-digit',
+                  hour: '2-digit',
+                  minute: '2-digit',
+                  second: '2-digit',
+                  hour12: true,
+                })
+              : undefined;
 
-          return (
-            <div
-              key={playlist.id}
-              onDragOver={(e) => {
-                const types = Array.from(e.dataTransfer.types);
-                const hasTrackId = types.includes('application/x-track-id');
-                const hasFiles = types.includes('Files');
-                if ((hasTrackId && onDropTrackOnPlaylistHeader) || (hasFiles && onDropFilesOnPlaylistHeader)) {
-                  e.preventDefault();
+            return (
+              <motion.div
+                key={playlist.id}
+                layout
+                initial={reduceMotion ? false : { opacity: 0, y: -6 }}
+                animate={reduceMotion ? undefined : { opacity: 1, y: 0 }}
+                exit={reduceMotion ? undefined : { opacity: 0, y: 6 }}
+                transition={
+                  reduceMotion
+                    ? undefined
+                    : {
+                        duration: 0.16,
+                        ease: 'easeOut',
+                      }
                 }
-              }}
-              onDrop={(e) => {
-                const types = Array.from(e.dataTransfer.types);
-                const hasTrackId = types.includes('application/x-track-id');
-                const hasFiles = types.includes('Files');
+                className={cn(
+                  'relative rounded-md',
+                  dragOverPlaylistId === playlist.id && 'ring-2 ring-primary/60 bg-primary/10'
+                )}
+                onDragOver={(e) => {
+                  const types = Array.from(e.dataTransfer.types);
+                  const hasTrackId = types.includes('application/x-track-id');
+                  const hasFiles = types.includes('Files');
+                  if ((hasTrackId && onDropTrackOnPlaylistHeader) || (hasFiles && onDropFilesOnPlaylistHeader)) {
+                    e.preventDefault();
+                    if (dragOverPlaylistId !== playlist.id) {
+                      setDragOverPlaylistId(playlist.id);
+                    }
+                  }
+                }}
+                onDragLeave={() => {
+                  if (dragOverPlaylistId === playlist.id) {
+                    setDragOverPlaylistId(null);
+                  }
+                }}
+                onDrop={(e) => {
+                  const types = Array.from(e.dataTransfer.types);
+                  const hasTrackId = types.includes('application/x-track-id');
+                  const hasFiles = types.includes('Files');
 
-                if (hasTrackId && onDropTrackOnPlaylistHeader) {
-                  const trackId = e.dataTransfer.getData('application/x-track-id');
-                  if (!trackId) return;
-                  e.preventDefault();
-                  e.stopPropagation();
-                  onDropTrackOnPlaylistHeader(playlist.id, trackId);
-                  return;
-                }
+                  if (hasTrackId && onDropTrackOnPlaylistHeader) {
+                    const trackId = e.dataTransfer.getData('application/x-track-id');
+                    if (!trackId) return;
+                    e.preventDefault();
+                    e.stopPropagation();
+                    setDragOverPlaylistId(null);
+                    onDropTrackOnPlaylistHeader(playlist.id, trackId);
+                    return;
+                  }
 
-                if (hasFiles && onDropFilesOnPlaylistHeader) {
-                  e.preventDefault();
-                  e.stopPropagation();
-                  const files = Array.from(e.dataTransfer.files || []);
-                  if (files.length === 0) return;
-                  onDropFilesOnPlaylistHeader(playlist.id, files);
-                }
-              }}
-            >
-              <PlaylistFolder
-                playlist={playlist}
-                onClick={() => onSelectPlaylist(playlist)}
-                onRename={() => onRenamePlaylist(playlist.id)}
-                onDelete={() => onDeletePlaylist(playlist.id)}
-                onToggleLock={() => onToggleLockPlaylist(playlist.id)}
-                onDuplicate={() => onDuplicatePlaylist(playlist.id)}
-                onSchedule={() => onSchedulePlaylist(playlist.id)}
-                scheduleLabel={scheduleLabel}
-              />
-            </div>
-          );
-        })}
+                  if (hasFiles && onDropFilesOnPlaylistHeader) {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    const files = Array.from(e.dataTransfer.files || []);
+                    if (files.length === 0) return;
+                    setDragOverPlaylistId(null);
+                    onDropFilesOnPlaylistHeader(playlist.id, files);
+                  }
+                }}
+              >
+                <AnimatePresence>
+                  {dragOverPlaylistId === playlist.id && !reduceMotion && (
+                    <motion.div
+                      className="pointer-events-none absolute inset-0 rounded-md"
+                      initial={{ opacity: 0 }}
+                      animate={{ opacity: 1 }}
+                      exit={{ opacity: 0 }}
+                      transition={{ duration: 0.12, ease: 'easeOut' }}
+                    />
+                  )}
+                </AnimatePresence>
+                <PlaylistFolder
+                  playlist={playlist}
+                  onClick={() => onSelectPlaylist(playlist)}
+                  onRename={() => onRenamePlaylist(playlist.id)}
+                  onDelete={() => onDeletePlaylist(playlist.id)}
+                  onToggleLock={() => onToggleLockPlaylist(playlist.id)}
+                  onDuplicate={() => onDuplicatePlaylist(playlist.id)}
+                  onSchedule={() => onSchedulePlaylist(playlist.id)}
+                  scheduleLabel={scheduleLabel}
+                />
+              </motion.div>
+            );
+          })}
+        </AnimatePresence>
       </div>
 
       {/* Metadata Summary */}

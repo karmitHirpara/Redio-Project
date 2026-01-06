@@ -6,6 +6,7 @@ import { motion, AnimatePresence } from 'framer-motion';
 
 interface PlaylistManagerProps {
   playlists: Playlist[];
+  recentPlaylistAdd?: { playlistId: string; trackId: string; createdAt: number } | null;
   onCreatePlaylist: () => void;
   onRenamePlaylist: (playlistId: string) => void;
   onDeletePlaylist: (playlistId: string) => void;
@@ -29,6 +30,7 @@ interface PlaylistManagerProps {
 
 export function PlaylistManager({
   playlists,
+  recentPlaylistAdd,
   onCreatePlaylist,
   onRenamePlaylist,
   onDeletePlaylist,
@@ -159,6 +161,11 @@ export function PlaylistManager({
           >
             <PlaylistEditor
               playlist={selectedPlaylist}
+              highlightTrackId={
+                recentPlaylistAdd && recentPlaylistAdd.playlistId === selectedPlaylist.id
+                  ? recentPlaylistAdd.trackId
+                  : null
+              }
               onClose={handleCloseEditor}
               onPlayPlaylistNow={() => onPlayPlaylistNow(selectedPlaylist.id)}
               onQueuePlaylist={() => onQueuePlaylist(selectedPlaylist.id)}

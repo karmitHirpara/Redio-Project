@@ -96,6 +96,7 @@ cd ..
 PORT=3001
 DATABASE_PATH=./database.sqlite
 UPLOAD_PATH=./uploads
+# Optional (comma-separated). Defaults allow localhost + Origin: null (Electron file://).
 CORS_ORIGIN=http://localhost:5173
 ```
 
@@ -122,6 +123,51 @@ npm run dev
 ```
 
 Vite automatically proxies `/api` and `/uploads`.
+
+### Desktop (Electron)
+
+The desktop app runs the backend embedded inside Electron.
+
+```bash
+npm run dev:desktop
+```
+
+To build a packaged desktop app:
+
+```bash
+npm run build:desktop
+```
+
+If native modules (sqlite3) fail to load after dependency changes:
+
+```bash
+npm run rebuild:electron
+```
+
+## 🔐 Security Notes (Desktop)
+
+### Electron hardening
+
+- `contextIsolation: true`
+- `sandbox: true`
+- `nodeIntegration: false`
+- Navigation is restricted (no remote content). External `https:` links open in the OS browser.
+- DevTools are disabled in packaged builds.
+
+### Local server hardening
+
+- The backend binds to loopback only: `127.0.0.1`.
+- WebSocket connections are restricted to loopback clients.
+- For non-GET requests to `/api`, the backend requires the header:
+  - `X-Redio-Client: redio-desktop`
+  - The frontend sends this automatically.
+
+### Upload constraints
+
+- Max size: **50MB**
+- Allowed extensions: `.mp3`, `.wav`, `.ogg`, `.m4a`, `.flac`
+- Duplicate detection uses **SHA-256 hashing**.
+- All filesystem access is guarded against path traversal.
 
 ## 📁 Project Structure
 
@@ -251,7 +297,7 @@ chmod 755 server/uploads
 ### Frontend
 
 ```bash
-npm run build
+npm run build:web
 ```
 
 - Deploy the `dist/` folder (Vercel, Netlify, etc.).

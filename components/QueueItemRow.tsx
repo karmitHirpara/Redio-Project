@@ -1,6 +1,8 @@
+import { memo } from 'react';
 import { GripVertical, X, Play, Music } from 'lucide-react';
 import { QueueItem, Playlist } from '../types';
 import { formatDuration, cn } from '../lib/utils';
+import { motion } from 'framer-motion';
 import {
   ContextMenu,
   ContextMenuContent,
@@ -12,7 +14,7 @@ interface QueueItemRowProps {
   item: QueueItem;
   isPlaying: boolean;
   isNext: boolean;
-  onRemove: () => void;
+  onRemoveFromQueue: (id: string) => void;
   index: number;
   onDragStart: (index: number) => void;
   onDragOverRow: (event: React.DragEvent<HTMLDivElement>, index: number) => void;
@@ -20,13 +22,16 @@ interface QueueItemRowProps {
   startTime?: Date;
   endTime?: Date;
   dropIndex: number | null;
+  reduceMotion: boolean;
+  playlists: Playlist[];
+  onAddToPlaylist: (item: QueueItem, playlistId: string) => void;
 }
 
-export function QueueItemRow({
+export const QueueItemRow = memo(function QueueItemRow({
   item,
   isPlaying,
   isNext,
-  onRemove,
+  onRemoveFromQueue,
   index,
   onDragStart,
   onDragOverRow,
@@ -34,9 +39,8 @@ export function QueueItemRow({
   startTime,
   endTime,
   dropIndex,
-  playlists,
-  onAddToPlaylist,
-}: QueueItemRowProps & { playlists: Playlist[]; onAddToPlaylist: (playlistId: string) => void }) {
+  reduceMotion,
+}: QueueItemRowProps) {
   const formatClock = (d?: Date) => {
     if (!d) return '';
     const raw = d.toLocaleTimeString('en-IN', {
@@ -57,8 +61,14 @@ export function QueueItemRow({
   return (
     <ContextMenu>
       <ContextMenuTrigger>
-        <div
-          draggable
+        <motion.div
+          layout
+          initial={reduceMotion ? false : { opacity: 0, y: -6 }}
+          animate={reduceMotion ? undefined : { opacity: 1, y: 0 }}
+          exit={reduceMotion ? undefined : { opacity: 0, y: -6 }}
+          transition={reduceMotion ? undefined : { duration: 0.18, ease: 'easeOut' }}
+          whileTap={reduceMotion ? undefined : { scale: 0.99 }}
+          draggable={!isPlaying}
           className={cn(
             "group flex items-center gap-1 px-2 py-0.5 rounded-md transition-colors cursor-pointer text-xs relative",
             "hover:bg-accent/25",
@@ -72,19 +82,24 @@ export function QueueItemRow({
             dropIndex === index + 1 &&
               "after:absolute after:left-0 before:right-0 after:bottom-0 after:h-px after:bg-accent"
           )}
-          onDragStart={(e) => {
+          onDragStartCapture={(e: React.DragEvent<HTMLDivElement>) => {
+            if (isPlaying) {
+              e.preventDefault();
+              return;
+            }
             // Make queue items a cross-area drag source by encoding the
             // underlying track id, so they can be dropped onto playlists
             // just like Library tracks.
             try {
-              e.dataTransfer.setData('application/x-track-id', item.track.id);
+              const dt = (e as unknown as React.DragEvent<HTMLDivElement>).dataTransfer;
+              dt?.setData('application/x-track-id', item.track.id);
             } catch {
               // ignore if dataTransfer is not available
             }
             onDragStart(index);
           }}
-          onDragOver={(e) => onDragOverRow(e, index)}
-          onDragEnd={onDragEnd}
+          onDragOverCapture={(e: React.DragEvent<HTMLDivElement>) => onDragOverRow(e, index)}
+          onDragEndCapture={onDragEnd}
         >
           <div className="w-5 text-[10px] text-foreground/70 text-center flex-shrink-0">
             {index + 1}
@@ -124,36 +139,19 @@ export function QueueItemRow({
           <button
             onClick={(e) => {
               e.stopPropagation();
-              onRemove();
+              onRemoveFromQueue(item.id);
             }}
             className="opacity-0 group-hover:opacity-100 transition-opacity p-1 hover:bg-destructive/10 hover:text-destructive rounded"
           >
             <X className="w-4 h-4" />
           </button>
-        </div>
+        </motion.div>
       </ContextMenuTrigger>
       <ContextMenuContent>
-        <ContextMenuItem onClick={onRemove} className="text-destructive">
+        <ContextMenuItem onClick={() => onRemoveFromQueue(item.id)} className="text-destructive">
           Remove from Queue
         </ContextMenuItem>
-        {playlists.length > 0 && (
-          <>
-            <ContextMenuItem disabled className="opacity-60">
-              Add to Playlist
-            </ContextMenuItem>
-            {playlists.map((playlist) => (
-              <ContextMenuItem
-                key={playlist.id}
-                disabled={playlist.locked}
-                onClick={() => onAddToPlaylist(playlist.id)}
-              >
-                {playlist.name}
-                {playlist.locked && ' (Locked)'}
-              </ContextMenuItem>
-            ))}
-          </>
-        )}
       </ContextMenuContent>
     </ContextMenu>
   );
-}
+});

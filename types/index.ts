@@ -33,6 +33,7 @@ export interface ScheduledPlaylist {
   dateTime?: Date;
   queueSongId?: string;
   triggerPosition?: 'before' | 'after';
+  lockPlaylist?: boolean;
   status: 'pending' | 'active' | 'completed';
 }
 

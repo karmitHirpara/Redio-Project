@@ -1,30 +1,220 @@
 import { Track, Playlist, QueueItem, ScheduledPlaylist } from '../types';
 
-const API_BASE_URL = import.meta.env.VITE_API_URL || '/api';
+// Determine the correct API base URL depending on environment.
+// - In the browser / dev server: use VITE_API_URL or "/api" (proxied by Vite).
+// - In the Electron desktop app: talk directly to the embedded backend on
+//   http://localhost:3001.
+//
+// The most reliable check for packaged Electron is that the UI is loaded from
+// file:// (app.asar/dist/index.html). When running in a normal browser/dev
+// server, this will not be file://.
+const isFileProtocol =
+  typeof window !== 'undefined' && window.location?.protocol === 'file:';
 
-// Generic fetch wrapper
-async function fetchAPI<T>(endpoint: string, options?: RequestInit): Promise<T> {
-  const response = await fetch(`${API_BASE_URL}${endpoint}`, {
-    ...options,
-    headers: {
-      'Content-Type': 'application/json',
-      ...options?.headers,
-    },
-  });
+const API_BASE_URL = isFileProtocol
+  ? 'http://localhost:3001/api'
+  : import.meta.env.VITE_API_URL || '/api';
 
-  if (!response.ok) {
-    const error = await response.json().catch(() => ({ error: response.statusText }));
-    throw new Error(error.error || 'API request failed');
+export class ApiError extends Error {
+  status: number | null;
+  url: string;
+  method: string;
+  details: any;
+
+  constructor(message: string, init: { status: number | null; url: string; method: string; details?: any }) {
+    super(message);
+    this.name = 'ApiError';
+    this.status = init.status;
+    this.url = init.url;
+    this.method = init.method;
+    this.details = init.details;
+  }
+}
+
+export const getBackendOrigin = (): string => {
+  if (isFileProtocol) return 'http://localhost:3001';
+  if (typeof window !== 'undefined' && window.location?.origin) {
+    return window.location.origin;
+  }
+  return 'http://localhost:3001';
+};
+
+export const resolveUploadsUrl = (maybePath: string): string => {
+  if (!maybePath || typeof maybePath !== 'string') return maybePath as any;
+  if (/^(https?:|blob:|data:)/i.test(maybePath)) return maybePath;
+  if (maybePath.startsWith('/uploads/')) {
+    return `${getBackendOrigin()}${maybePath}`;
+  }
+  return maybePath;
+};
+
+type ApiResponseType = 'json' | 'text' | 'none';
+
+export interface ApiRequestOptions extends Omit<RequestInit, 'body'> {
+  body?: BodyInit | null;
+  json?: any;
+  timeoutMs?: number;
+  retries?: number;
+  retryDelayMs?: number;
+  responseType?: ApiResponseType;
+  allowedStatuses?: number[];
+}
+
+const DEFAULT_TIMEOUT_MS = 15000;
+const DEFAULT_RETRIES = 2;
+const DEFAULT_RETRY_DELAY_MS = 350;
+
+const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
+const isIdempotentMethod = (method: string) => {
+  const m = method.toUpperCase();
+  return m === 'GET' || m === 'HEAD';
+};
+
+const shouldRetryResponse = (res: Response) => {
+  if (res.status === 408 || res.status === 429) return true;
+  if (res.status >= 500 && res.status <= 599) return true;
+  return false;
+};
+
+const readErrorPayload = async (res: Response) => {
+  const contentType = res.headers.get('content-type') || '';
+  if (contentType.includes('application/json')) {
+    return res.json().catch(() => null);
+  }
+  return res.text().catch(() => null);
+};
+
+const normalizeErrorMessage = (payload: any, fallback: string) => {
+  if (!payload) return fallback;
+  if (typeof payload === 'string') return payload;
+  if (typeof payload?.error === 'string') return payload.error;
+  if (typeof payload?.message === 'string') return payload.message;
+  return fallback;
+};
+
+const buildUrl = (endpoint: string) => {
+  if (/^https?:/i.test(endpoint)) return endpoint;
+  return `${API_BASE_URL}${endpoint.startsWith('/') ? endpoint : `/${endpoint}`}`;
+};
+
+async function request<T>(endpoint: string, options: ApiRequestOptions = {}): Promise<T> {
+  const url = buildUrl(endpoint);
+  const method = (options.method || 'GET').toUpperCase();
+  const responseType: ApiResponseType = options.responseType || 'json';
+  const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+  const allowedStatuses = options.allowedStatuses || [];
+
+  const headers = new Headers(options.headers);
+  if (!headers.has('Accept')) {
+    headers.set('Accept', 'application/json');
   }
 
-  return response.json();
+  // Desktop security: the embedded local server requires a custom header for
+  // non-idempotent requests to mitigate CSRF-style attacks from other origins.
+  if (method !== 'GET' && method !== 'HEAD' && method !== 'OPTIONS') {
+    if (!headers.has('X-Redio-Client')) {
+      headers.set('X-Redio-Client', 'redio-desktop');
+    }
+  }
+
+  const isFormData = typeof FormData !== 'undefined' && options.body instanceof FormData;
+  const hasJson = Object.prototype.hasOwnProperty.call(options, 'json');
+  const body: BodyInit | null | undefined = hasJson ? JSON.stringify(options.json) : options.body;
+
+  if (hasJson && !headers.has('Content-Type')) {
+    headers.set('Content-Type', 'application/json');
+  }
+  if (!hasJson && !isFormData && body != null && !headers.has('Content-Type')) {
+    headers.set('Content-Type', 'application/json');
+  }
+
+  const doAttempt = async (): Promise<Response> => {
+    const controller = new AbortController();
+    const id = window.setTimeout(() => controller.abort(), timeoutMs);
+    try {
+      return await fetch(url, {
+        ...options,
+        method,
+        headers,
+        body: body as any,
+        credentials: 'include',
+        signal: controller.signal,
+      });
+    } finally {
+      window.clearTimeout(id);
+    }
+  };
+
+  const retries = isIdempotentMethod(method) ? options.retries ?? DEFAULT_RETRIES : 0;
+  const retryDelayMs = options.retryDelayMs ?? DEFAULT_RETRY_DELAY_MS;
+
+  let attempt = 0;
+  while (true) {
+    try {
+      const res = await doAttempt();
+      if (!res.ok && !allowedStatuses.includes(res.status)) {
+        const payload = await readErrorPayload(res);
+        const message = normalizeErrorMessage(payload, res.statusText || 'API request failed');
+        throw new ApiError(message, { status: res.status, url, method, details: payload });
+      }
+
+      if (responseType === 'none') {
+        return undefined as any;
+      }
+
+      const contentLength = res.headers.get('content-length');
+      if (res.status === 204 || contentLength === '0') {
+        return undefined as any;
+      }
+
+      if (responseType === 'text') {
+        return (await res.text()) as any;
+      }
+
+      return (await res.json()) as T;
+    } catch (err: any) {
+      const shouldRetry =
+        attempt < retries &&
+        (err?.name === 'AbortError' || err instanceof TypeError || err instanceof ApiError);
+
+      if (!shouldRetry) {
+        if (err?.name === 'AbortError') {
+          throw new ApiError('Request timed out', { status: null, url, method });
+        }
+        if (err instanceof ApiError) throw err;
+        throw new ApiError(err?.message || 'Network request failed', { status: null, url, method, details: err });
+      }
+
+      // Only retry on network/timeout errors, or retryable HTTP statuses.
+      if (err instanceof ApiError && err.status != null) {
+        // If this is a structured HTTP error, only retry on 408/429/5xx.
+        if (!(err.status === 408 || err.status === 429 || (err.status >= 500 && err.status <= 599))) {
+          throw err;
+        }
+      }
+
+      attempt += 1;
+      await sleep(retryDelayMs * attempt);
+    }
+  }
 }
+
+export const apiClient = {
+  request,
+  get: <T>(endpoint: string, options?: Omit<ApiRequestOptions, 'method'>) =>
+    request<T>(endpoint, { ...options, method: 'GET' }),
+  head: (endpoint: string, options?: Omit<ApiRequestOptions, 'method' | 'responseType'>) =>
+    request<void>(endpoint, { ...options, method: 'HEAD', responseType: 'none' }),
+  json: <T>(endpoint: string, options: Omit<ApiRequestOptions, 'body'> & { json: any }) =>
+    request<T>(endpoint, options),
+};
 
 // Tracks API
 export const tracksAPI = {
-  getAll: () => fetchAPI<Track[]>('/tracks'),
+  getAll: () => apiClient.get<Track[]>('/tracks'),
   
-  getById: (id: string) => fetchAPI<Track>(`/tracks/${id}`),
+  getById: (id: string) => apiClient.get<Track>(`/tracks/${id}`),
   
   upload: async (file: File, metadata: { name?: string; artist?: string; duration?: number }) => {
     const formData = new FormData();
@@ -33,97 +223,68 @@ export const tracksAPI = {
     if (metadata.artist) formData.append('artist', metadata.artist);
     if (metadata.duration) formData.append('duration', metadata.duration.toString());
 
-    const response = await fetch(`${API_BASE_URL}/tracks/upload`, {
+    return apiClient.request<any>('/tracks/upload', {
       method: 'POST',
       body: formData,
     });
-
-    if (!response.ok) {
-      const error = await response.json();
-      throw new Error(error.error || 'Upload failed');
-    }
-
-    return response.json();
   },
-  
-  copy: (sourceTrackId: string) =>
-    fetchAPI<Track>('/tracks/copy', {
+
+  uploadFormData: (formData: FormData) =>
+    apiClient.request<any>('/tracks/upload', {
       method: 'POST',
-      body: JSON.stringify({ sourceTrackId }),
+      body: formData,
     }),
   
-  delete: (id: string) => fetchAPI<{ message: string }>(`/tracks/${id}`, {
-    method: 'DELETE',
-  }),
+  copy: (sourceTrackId: string) =>
+    apiClient.json<Track>('/tracks/copy', { method: 'POST', json: { sourceTrackId } }),
+
+  alias: (baseTrackId: string, aliasName: string) =>
+    apiClient.json<Track>('/tracks/alias', { method: 'POST', json: { baseTrackId, aliasName } }),
+  
+  delete: (id: string) => apiClient.request<{ message: string }>(`/tracks/${id}`, { method: 'DELETE' }),
 };
 
 // Playlists API
 export const playlistsAPI = {
-  getAll: () => fetchAPI<Playlist[]>('/playlists'),
+  getAll: () => apiClient.get<Playlist[]>('/playlists'),
   
-  getById: (id: string) => fetchAPI<Playlist>(`/playlists/${id}`),
+  getById: (id: string) => apiClient.get<Playlist>(`/playlists/${id}`),
   
-  create: (name: string) => fetchAPI<Playlist>('/playlists', {
-    method: 'POST',
-    body: JSON.stringify({ name }),
-  }),
+  create: (name: string) => apiClient.json<Playlist>('/playlists', { method: 'POST', json: { name } }),
   
   update: (id: string, data: { name?: string; locked?: boolean }) => 
-    fetchAPI<Playlist>(`/playlists/${id}`, {
-      method: 'PUT',
-      body: JSON.stringify(data),
-    }),
+    apiClient.json<Playlist>(`/playlists/${id}`, { method: 'PUT', json: data }),
   
-  delete: (id: string) => fetchAPI<{ message: string }>(`/playlists/${id}`, {
-    method: 'DELETE',
-  }),
+  delete: (id: string) => apiClient.request<{ message: string }>(`/playlists/${id}`, { method: 'DELETE' }),
   
   addTracks: (id: string, trackIds: string[]) => 
-    fetchAPI<{ tracks: Track[] }>(`/playlists/${id}/tracks`, {
-      method: 'POST',
-      body: JSON.stringify({ trackIds }),
-    }),
+    apiClient.json<{ tracks: Track[] }>(`/playlists/${id}/tracks`, { method: 'POST', json: { trackIds } }),
   
   removeTrack: (id: string, trackId: string) => 
-    fetchAPI<{ message: string }>(`/playlists/${id}/tracks/${trackId}`, {
-      method: 'DELETE',
-    }),
+    apiClient.request<{ message: string }>(`/playlists/${id}/tracks/${trackId}`, { method: 'DELETE' }),
   
   reorder: (id: string, trackIds: string[]) => 
-    fetchAPI<{ message: string }>(`/playlists/${id}/reorder`, {
-      method: 'PUT',
-      body: JSON.stringify({ trackIds }),
-    }),
+    apiClient.json<{ message: string }>(`/playlists/${id}/reorder`, { method: 'PUT', json: { trackIds } }),
 };
 
 // Queue API
 export const queueAPI = {
-  get: () => fetchAPI<QueueItem[]>('/queue'),
+  get: () => apiClient.get<QueueItem[]>('/queue'),
   
   add: (trackId: string, fromPlaylist?: string) => 
-    fetchAPI<QueueItem>('/queue', {
-      method: 'POST',
-      body: JSON.stringify({ trackId, fromPlaylist }),
-    }),
+    apiClient.json<QueueItem>('/queue', { method: 'POST', json: { trackId, fromPlaylist } }),
   
   reorder: (queueIds: string[]) => 
-    fetchAPI<{ message: string }>('/queue/reorder', {
-      method: 'PUT',
-      body: JSON.stringify({ queueIds }),
-    }),
+    apiClient.json<{ message: string }>('/queue/reorder', { method: 'PUT', json: { queueIds } }),
   
-  remove: (id: string) => fetchAPI<{ message: string }>(`/queue/${id}`, {
-    method: 'DELETE',
-  }),
+  remove: (id: string) => apiClient.request<{ message: string }>(`/queue/${id}`, { method: 'DELETE' }),
   
-  clear: () => fetchAPI<{ message: string }>('/queue', {
-    method: 'DELETE',
-  }),
+  clear: () => apiClient.request<{ message: string }>('/queue', { method: 'DELETE' }),
 };
 
 // Schedules API
 export const schedulesAPI = {
-  getAll: () => fetchAPI<ScheduledPlaylist[]>('/schedules'),
+  getAll: () => apiClient.get<ScheduledPlaylist[]>('/schedules'),
   
   create: (schedule: {
     playlistId: string;
@@ -131,18 +292,37 @@ export const schedulesAPI = {
     dateTime?: string;
     queueSongId?: string;
     triggerPosition?: 'before' | 'after';
-  }) => fetchAPI<ScheduledPlaylist>('/schedules', {
-    method: 'POST',
-    body: JSON.stringify(schedule),
-  }),
+    lockPlaylist?: boolean;
+  }) => apiClient.json<ScheduledPlaylist>('/schedules', { method: 'POST', json: schedule }),
   
   updateStatus: (id: string, status: string) => 
-    fetchAPI<ScheduledPlaylist>(`/schedules/${id}`, {
-      method: 'PUT',
-      body: JSON.stringify({ status }),
-    }),
+    apiClient.json<ScheduledPlaylist>(`/schedules/${id}`, { method: 'PUT', json: { status } }),
   
-  delete: (id: string) => fetchAPI<{ message: string }>(`/schedules/${id}`, {
-    method: 'DELETE',
-  }),
+  delete: (id: string) => apiClient.request<{ message: string }>(`/schedules/${id}`, { method: 'DELETE' }),
+};
+
+export const foldersAPI = {
+  getAll: () => apiClient.get<any[]>('/folders'),
+  create: (name: string) => apiClient.json<any>('/folders', { method: 'POST', json: { name } }),
+  rename: (id: string, name: string) => apiClient.json<any>(`/folders/${id}`, { method: 'PUT', json: { name } }),
+  delete: (id: string) => apiClient.request<{ message: string }>(`/folders/${id}`, { method: 'DELETE' }),
+  getTracks: (folderId: string) => apiClient.get<any[]>(`/folders/${folderId}/tracks`),
+  attachTracks: (folderId: string, trackIds: string[]) =>
+    apiClient.json<{ message: string }>(`/folders/${folderId}/tracks`, { method: 'POST', json: { trackIds } }),
+};
+
+export const historyAPI = {
+  get: (limit = 100) => apiClient.get<any[]>(`/history?limit=${encodeURIComponent(String(limit))}`),
+  create: (payload: {
+    trackId: string;
+    playedAt: string;
+    positionStart: number;
+    positionEnd: number;
+    completed: boolean;
+    source: string;
+    fileStatus: string;
+  }) => apiClient.json<any>('/history', { method: 'POST', json: payload }),
+  delete: (id: string) => apiClient.request<{ message: string }>(`/history/${id}`, { method: 'DELETE' }),
+  action: (id: string, action: 'addToQueue' | 'putBackToLibrary') =>
+    apiClient.json<any>(`/history/${id}/actions`, { method: 'POST', json: { action } }),
 };

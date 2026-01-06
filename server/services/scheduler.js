@@ -37,6 +37,12 @@ async function emitQueueUpdated(app) {
   }
 }
 
+function emitPlaylistLocked(app, playlistId, locked) {
+  const broadcastEvent = app.get('broadcastEvent');
+  if (typeof broadcastEvent !== 'function') return;
+  broadcastEvent({ type: 'playlist-locked', playlistId, locked: Boolean(locked) });
+}
+
 // Atomically fire a single datetime schedule by ID.
 // - Appends its playlist tracks to the queue
 // - Marks the schedule as completed
@@ -76,22 +82,17 @@ export async function fireScheduleAtomically(scheduleId, app) {
       return true;
     }
 
-    // Preempt the current queue head so that the scheduled playlist plays
-    // immediately, and the interrupted track is removed rather than
-    // resuming.
-    const existingQueue = await query(
-      'SELECT id FROM queue ORDER BY order_position',
-    );
-
-    // Remove the first item (current track) if there is one.
-    let remainingIds = [];
-    if (existingQueue.length > 0) {
-      const head = existingQueue[0];
-      await run('DELETE FROM queue WHERE id = ?', [head.id]);
-      remainingIds = existingQueue.slice(1).map((row) => row.id);
+    // If requested, lock the playlist right as it starts.
+    if (schedule.lock_playlist) {
+      await run('UPDATE playlists SET locked = 1 WHERE id = ?', [schedule.playlist_id]);
     }
 
-    // Insert scheduled tracks at the front
+    // Prepend scheduled tracks to the top of the queue while preserving
+    // everything that was already queued.
+    // Shift the existing queue block down by N positions.
+    await run('UPDATE queue SET order_position = order_position + ?', [tracks.length]);
+
+    // Insert scheduled tracks at positions 0..N-1
     let cursor = 0;
     for (const track of tracks) {
       const queueId = crypto.randomUUID();
@@ -99,15 +100,6 @@ export async function fireScheduleAtomically(scheduleId, app) {
         `INSERT INTO queue (id, track_id, from_playlist, order_position)
          VALUES (?, ?, ?, ?)`,
         [queueId, track.id, null, cursor],
-      );
-      cursor += 1;
-    }
-
-    // Reindex remaining queue items to follow the scheduled block
-    for (const id of remainingIds) {
-      await run(
-        'UPDATE queue SET order_position = ? WHERE id = ?',
-        [cursor, id],
       );
       cursor += 1;
     }
@@ -124,6 +116,10 @@ export async function fireScheduleAtomically(scheduleId, app) {
 
     // Emit queue update after commit
     await emitQueueUpdated(app);
+
+    if (schedule.lock_playlist) {
+      emitPlaylistLocked(app, schedule.playlist_id, true);
+    }
     return true;
   } catch (error) {
     console.error('Failed to fire schedule atomically', error);
@@ -141,6 +137,23 @@ export async function runSchedulerTick(app) {
   const nowIso = new Date().toISOString();
 
   try {
+    if (process.env.SCHEDULER_DEBUG === '1') {
+      try {
+        const next = await get(
+          `SELECT id, date_time
+           FROM schedules
+           WHERE type = 'datetime'
+             AND status = 'pending'
+             AND date_time IS NOT NULL
+           ORDER BY date_time ASC
+           LIMIT 1`,
+        );
+        console.log('[scheduler]', { nowIso, next: next ? { id: next.id, date_time: next.date_time } : null });
+      } catch {
+        // ignore
+      }
+    }
+
     const due = await query(
       `SELECT id
        FROM schedules
@@ -154,6 +167,9 @@ export async function runSchedulerTick(app) {
     if (!due || due.length === 0) return;
 
     for (const row of due) {
+      if (process.env.SCHEDULER_DEBUG === '1') {
+        console.log('[scheduler] firing', row.id);
+      }
       await fireScheduleAtomically(row.id, app);
     }
   } catch (error) {

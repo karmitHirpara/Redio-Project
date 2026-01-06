@@ -1,5 +1,5 @@
 // TrackRow.tsx (modified)
-import { useState } from 'react';
+import { memo } from 'react';
 import { Music, Plus } from 'lucide-react';
 import { Track, Playlist } from '../types';
 import { formatDuration, formatFileSize, cn } from '../lib/utils';
@@ -18,18 +18,18 @@ interface TrackRowProps {
   onAddToQueue: (track: Track) => void;
   onAddToPlaylist: (track: Track, playlistId: string) => void;
   playlists: Playlist[];
-  onRemove?: () => void;
+  onRemove?: (trackId: string) => void;
   showRemove?: boolean;
   isLibrary?: boolean;
   isSelected?: boolean;         
   isFocused?: boolean;          
-  onSelect?: () => void;        
+  onSelect?: (trackId: string) => void;        
   onFocusRow?: () => void;      
   onKeyDown?: (e: React.KeyboardEvent) => void; 
   startTimeLabel?: string; // optional: scheduled start time for this track
 }
 
-export function TrackRow({
+export const TrackRow = memo(function TrackRow({
   track,
   onAddToQueue,
   onAddToPlaylist,
@@ -44,9 +44,6 @@ export function TrackRow({
   onKeyDown,
   startTimeLabel,
 }: TrackRowProps) {
-  const [isHovered, setIsHovered] = useState(false);
-
- 
   const rowClasses = cn(
     "group flex items-center gap-2 w-full transition-colors duration-150 ease-out outline-none",
     "px-1.5 py-0.5 rounded-sm",
@@ -54,9 +51,7 @@ export function TrackRow({
       ? "bg-sky-600/25 text-foreground" 
       : isFocused
         ? "bg-slate-700/40 text-foreground" 
-        : isHovered
-          ? "bg-slate-700/20 hover:bg-slate-700/30"
-          : "bg-transparent hover:bg-slate-700/10"
+        : "bg-transparent hover:bg-slate-700/20 focus-visible:bg-slate-700/30"
   );
 
   return (
@@ -78,13 +73,11 @@ export function TrackRow({
             }
           }}
           onClick={() => {
-            if (onSelect) onSelect();
+            if (onSelect) onSelect(track.id);
           }}
           onFocus={() => onFocusRow && onFocusRow()}
           onBlur={() => {}}
           onKeyDown={onKeyDown}
-          onMouseEnter={() => setIsHovered(true)}
-          onMouseLeave={() => setIsHovered(false)}
         >
           <Music className="w-3.5 h-3.5 text-muted-foreground flex-shrink-0" />
 
@@ -131,11 +124,11 @@ export function TrackRow({
         </ContextMenuSub>
 
         {showRemove && onRemove && (
-          <ContextMenuItem onClick={onRemove} className="text-destructive">
+          <ContextMenuItem onClick={() => onRemove(track.id)} className="text-destructive">
             Remove Song
           </ContextMenuItem>
         )}
       </ContextMenuContent>
     </ContextMenu>
   );
-}
+});

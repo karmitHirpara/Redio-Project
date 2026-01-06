@@ -1,11 +1,13 @@
-import { useState, useRef, useEffect, useMemo } from 'react';
+import { startTransition, useState, useRef, useEffect, useMemo, useCallback } from 'react';
 import { Folder, Plus, ChevronRight, ChevronDown } from 'lucide-react';
 import { Input } from './ui/input';
 import { Button } from './ui/button';
 import { Track, Playlist, LibraryFolder } from '../types';
 import { TrackRow } from './TrackRow';
+import { toast } from 'sonner';
+import { foldersAPI, resolveUploadsUrl } from '../services/api';
 import { PlaylistFolder } from './PlaylistFolder';
-import { motion } from 'motion/react';
+import { AnimatePresence, motion, useReducedMotion } from 'framer-motion';
 import {
   Select,
   SelectContent,
@@ -26,6 +28,86 @@ import {
   ContextMenuItem,
   ContextMenuTrigger,
 } from './ui/context-menu';
+
+function VirtualizedFolderTrackList({
+  tracks,
+  selectedTrackId,
+  onSelect,
+  onAddToQueue,
+  onAddToPlaylist,
+  playlists,
+  onRemove,
+}: {
+  tracks: Track[];
+  selectedTrackId: string | null;
+  onSelect: (trackId: string) => void;
+  onAddToQueue: (track: Track) => void;
+  onAddToPlaylist: (track: Track, playlistId: string) => void;
+  playlists: Playlist[];
+  onRemove: (trackId: string) => void;
+}) {
+  const containerRef = useRef<HTMLDivElement | null>(null);
+  const [viewportHeight, setViewportHeight] = useState(0);
+  const [scrollTop, setScrollTop] = useState(0);
+
+  const rowHeight = 28;
+  const overscan = 10;
+
+  useEffect(() => {
+    const el = containerRef.current;
+    if (!el) return;
+
+    const update = () => {
+      setViewportHeight(el.clientHeight);
+    };
+
+    update();
+    const ro = new ResizeObserver(() => update());
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, []);
+
+  const totalHeight = tracks.length * rowHeight;
+  const startIndex = Math.max(0, Math.floor(scrollTop / rowHeight) - overscan);
+  const endIndex = Math.min(
+    tracks.length,
+    Math.ceil((scrollTop + viewportHeight) / rowHeight) + overscan,
+  );
+
+  const items = tracks.slice(startIndex, endIndex);
+
+  return (
+    <div
+      ref={containerRef}
+      className="max-h-72 overflow-y-auto pr-1"
+      onScroll={(e) => {
+        const target = e.currentTarget;
+        setScrollTop(target.scrollTop);
+      }}
+    >
+      <div className="relative" style={{ height: totalHeight }}>
+        <div className="absolute left-0 right-0" style={{ transform: `translateY(${startIndex * rowHeight}px)` }}>
+          <div className="space-y-0.5">
+            {items.map((track) => (
+              <TrackRow
+                key={track.id}
+                track={track}
+                isLibrary
+                isSelected={selectedTrackId === track.id}
+                onSelect={onSelect}
+                onAddToQueue={onAddToQueue}
+                onAddToPlaylist={onAddToPlaylist}
+                playlists={playlists}
+                onRemove={onRemove}
+                showRemove
+              />
+            ))}
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
 
 interface LibraryPanelProps {
   tracks: Track[];
@@ -54,6 +136,8 @@ export function LibraryPanel({
   onRemoveTrack,
   onImportTracks
 }: LibraryPanelProps) {
+  const reduceMotion = useReducedMotion() ?? false;
+  const [hasMounted, setHasMounted] = useState(false);
   const [playlistSearch, setPlaylistSearch] = useState('');
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const [folders, setFolders] = useState<LibraryFolder[]>([]);
@@ -65,15 +149,47 @@ export function LibraryPanel({
   const [folderNameInput, setFolderNameInput] = useState('');
   const [editingFolderId, setEditingFolderId] = useState<string | null>(null);
   const [pendingFolderForUpload, setPendingFolderForUpload] = useState<string | null>(null);
+  const [folderLoadingIds, setFolderLoadingIds] = useState<Set<string>>(new Set());
+
+  const closeFolderDialog = () => {
+    setFolderDialogOpen(false);
+    setEditingFolderId(null);
+    setFolderNameInput('');
+  };
+
+  useEffect(() => {
+    setHasMounted(true);
+  }, []);
+
+  useEffect(() => {
+    if (!folderDialogOpen) return;
+
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        e.preventDefault();
+        closeFolderDialog();
+        return;
+      }
+
+      if (e.key === 'Enter') {
+        const t = e.target as HTMLElement | null;
+        if (t && t.tagName === 'INPUT') {
+          e.preventDefault();
+          void handleConfirmFolder();
+        }
+      }
+    };
+
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [folderDialogOpen, folderNameInput, editingFolderId]);
 
   // Load folders from backend
   useEffect(() => {
     const load = async () => {
       try {
-        const res = await fetch('/api/folders');
-        if (!res.ok) return;
-        const data = await res.json();
-        setFolders(data);
+        const data = await foldersAPI.getAll();
+        setFolders(data as any);
       } catch (err) {
         console.error('Failed to load folders', err);
       }
@@ -81,29 +197,90 @@ export function LibraryPanel({
     load();
   }, []);
 
+  useEffect(() => {
+    if (folders.length === 0) return;
+    const firstFolderId = folders[0]?.id;
+    if (!firstFolderId) return;
+    if (folderTracks[firstFolderId]) return;
+
+    const idle = (window as any).requestIdleCallback as
+      | ((cb: () => void, opts?: { timeout: number }) => number)
+      | undefined;
+    const cancelIdle = (window as any).cancelIdleCallback as ((id: number) => void) | undefined;
+
+    let cancelled = false;
+    const prefetch = async () => {
+      try {
+        const raw = await foldersAPI.getTracks(firstFolderId);
+        const normalized: Track[] = (raw || []).map((t: any) => ({
+          id: t.id,
+          name: t.name,
+          artist: t.artist,
+          duration: t.duration || 0,
+          size: t.size || 0,
+          filePath: resolveUploadsUrl(t.file_path),
+          hash: t.hash,
+          dateAdded: t.date_added ? new Date(t.date_added) : new Date(),
+        }));
+        normalized.sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true }));
+        if (cancelled) return;
+        startTransition(() => {
+          setFolderTracks((prev) => ({ ...prev, [firstFolderId]: normalized }));
+        });
+      } catch {
+        // ignore background prefetch errors
+      }
+    };
+
+    if (idle) {
+      const id = idle(() => void prefetch(), { timeout: 1500 });
+      return () => {
+        cancelled = true;
+        if (cancelIdle) cancelIdle(id);
+      };
+    }
+
+    const id = window.setTimeout(() => void prefetch(), 350);
+    return () => {
+      cancelled = true;
+      window.clearTimeout(id);
+    };
+  }, [folders, folderTracks]);
+
   // Keep expanded folder contents in sync when the global tracks list changes
   useEffect(() => {
     const refreshExpandedFolders = async () => {
       try {
-        for (const folderId of expandedFolderIds) {
-          const res = await fetch(`/api/folders/${folderId}/tracks`);
-          if (!res.ok) continue;
-          const raw = await res.json();
-          const normalized: Track[] = (raw || []).map((t: any) => ({
-            id: t.id,
-            name: t.name,
-            artist: t.artist,
-            duration: t.duration || 0,
-            size: t.size || 0,
-            filePath: t.file_path,
-            hash: t.hash,
-            dateAdded: t.date_added ? new Date(t.date_added) : new Date(),
-          }));
-          // Sort by name so OS-style duplicates (Name, Name (1), Name (2))
-          // appear together and in order in the folder view.
-          normalized.sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true }));
-          setFolderTracks(prev => ({ ...prev, [folderId]: normalized }));
+        const updates: Record<string, Track[]> = {};
+        const results = await Promise.all(
+          expandedFolderIds.map(async (folderId) => {
+            const raw = await foldersAPI.getTracks(folderId);
+            const normalized: Track[] = (raw || []).map((t: any) => ({
+              id: t.id,
+              name: t.name,
+              artist: t.artist,
+              duration: t.duration || 0,
+              size: t.size || 0,
+              filePath: resolveUploadsUrl(t.file_path),
+              hash: t.hash,
+              dateAdded: t.date_added ? new Date(t.date_added) : new Date(),
+            }));
+            normalized.sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true }));
+            return { folderId, tracks: normalized };
+          })
+        );
+
+        for (const r of results) {
+          if (!r.tracks) continue;
+          updates[r.folderId] = r.tracks;
         }
+
+        const keys = Object.keys(updates);
+        if (keys.length === 0) return;
+        setFolderTracks((prev) => ({
+          ...prev,
+          ...updates,
+        }));
       } catch (err) {
         console.error('Failed to refresh expanded folder tracks', err);
       }
@@ -113,6 +290,17 @@ export function LibraryPanel({
       refreshExpandedFolders();
     }
   }, [tracks, expandedFolderIds]);
+
+  const handleSelectFolderTrack = useCallback((trackId: string) => {
+    setSelectedFolderTrackId(trackId);
+  }, []);
+
+  const handleRemoveFolderTrack = useCallback(
+    (trackId: string) => {
+      onRemoveTrack(trackId);
+    },
+    [onRemoveTrack]
+  );
 
   const filteredPlaylists = useMemo(() => {
     return playlists.filter(playlist =>
@@ -129,36 +317,16 @@ export function LibraryPanel({
   const handleConfirmFolder = async () => {
     const trimmed = folderNameInput.trim();
     if (!trimmed) {
-      setFolderDialogOpen(false);
+      closeFolderDialog();
       return;
     }
 
     try {
       if (editingFolderId) {
-        const res = await fetch(`/api/folders/${editingFolderId}`, {
-          method: 'PUT',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ name: trimmed }),
-        });
-        if (!res.ok) {
-          const data = await res.json().catch(() => null);
-          alert(data?.error || 'Failed to rename folder');
-          return;
-        }
-        const updated = await res.json();
+        const updated = await foldersAPI.rename(editingFolderId, trimmed);
         setFolders(prev => prev.map(f => (f.id === updated.id ? updated : f)));
       } else {
-        const res = await fetch('/api/folders', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ name: trimmed }),
-        });
-        if (!res.ok) {
-          const data = await res.json().catch(() => null);
-          alert(data?.error || 'Failed to create folder');
-          return;
-        }
-        const created = await res.json();
+        const created = await foldersAPI.create(trimmed);
         setFolders(prev => [...prev, created]);
       }
 
@@ -178,12 +346,7 @@ export function LibraryPanel({
   const handleDeleteFolder = async (folderId: string) => {
     if (!confirm('Delete this folder?')) return;
     try {
-      const res = await fetch(`/api/folders/${folderId}`, { method: 'DELETE' });
-      if (!res.ok) {
-        const data = await res.json().catch(() => null);
-        alert(data?.error || 'Failed to delete folder');
-        return;
-      }
+      await foldersAPI.delete(folderId);
       setFolders(prev => prev.filter(f => f.id !== folderId));
       setFolderTracks(prev => {
         const next = { ...prev };
@@ -202,30 +365,47 @@ export function LibraryPanel({
 
   const toggleFolderExpanded = async (folderId: string) => {
     setSelectedFolderId(folderId);
-    setExpandedFolderIds((prev) =>
-      prev.includes(folderId) ? prev.filter(id => id !== folderId) : [...prev, folderId]
-    );
+    const willExpand = !expandedFolderIds.includes(folderId);
+    setExpandedFolderIds((prev) => (prev.includes(folderId) ? prev.filter((id) => id !== folderId) : [...prev, folderId]));
+
+    if (!willExpand) {
+      return;
+    }
 
     if (!folderTracks[folderId]) {
-      try {
-        const res = await fetch(`/api/folders/${folderId}/tracks`);
-        if (!res.ok) return;
-        const raw = await res.json();
-        const normalized: Track[] = (raw || []).map((t: any) => ({
-          id: t.id,
-          name: t.name,
-          artist: t.artist,
-          duration: t.duration || 0,
-          size: t.size || 0,
-          filePath: t.file_path,
-          hash: t.hash,
-          dateAdded: t.date_added ? new Date(t.date_added) : new Date(),
-        }));
-        normalized.sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true }));
-        setFolderTracks(prev => ({ ...prev, [folderId]: normalized }));
-      } catch (err) {
-        console.error('Failed to load folder tracks', err);
-      }
+      setFolderLoadingIds((prev) => {
+        const next = new Set(prev);
+        next.add(folderId);
+        return next;
+      });
+
+      window.setTimeout(async () => {
+        try {
+          const raw = await foldersAPI.getTracks(folderId);
+          const normalized: Track[] = (raw || []).map((t: any) => ({
+            id: t.id,
+            name: t.name,
+            artist: t.artist,
+            duration: t.duration || 0,
+            size: t.size || 0,
+            filePath: resolveUploadsUrl(t.file_path),
+            hash: t.hash,
+            dateAdded: t.date_added ? new Date(t.date_added) : new Date(),
+          }));
+          normalized.sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true }));
+          startTransition(() => {
+            setFolderTracks((prev) => ({ ...prev, [folderId]: normalized }));
+          });
+        } catch (err) {
+          console.error('Failed to load folder tracks', err);
+        } finally {
+          setFolderLoadingIds((prev) => {
+            const next = new Set(prev);
+            next.delete(folderId);
+            return next;
+          });
+        }
+      }, 0);
     }
   };
 
@@ -279,22 +459,19 @@ export function LibraryPanel({
 
                   // Refresh this folder's contents after upload
                   try {
-                    const res = await fetch(`/api/folders/${targetFolderId}/tracks`);
-                    if (res.ok) {
-                      const raw = await res.json();
-                      const normalized: Track[] = (raw || []).map((t: any) => ({
-                        id: t.id,
-                        name: t.name,
-                        artist: t.artist,
-                        duration: t.duration || 0,
-                        size: t.size || 0,
-                        filePath: t.file_path,
-                        hash: t.hash,
-                        dateAdded: t.date_added ? new Date(t.date_added) : new Date(),
-                      }));
-                      normalized.sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true }));
-                      setFolderTracks(prev => ({ ...prev, [targetFolderId]: normalized }));
-                    }
+                    const raw = await foldersAPI.getTracks(targetFolderId);
+                    const normalized: Track[] = (raw || []).map((t: any) => ({
+                      id: t.id,
+                      name: t.name,
+                      artist: t.artist,
+                      duration: t.duration || 0,
+                      size: t.size || 0,
+                      filePath: resolveUploadsUrl(t.file_path),
+                      hash: t.hash,
+                      dateAdded: t.date_added ? new Date(t.date_added) : new Date(),
+                    }));
+                    normalized.sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true }));
+                    setFolderTracks(prev => ({ ...prev, [targetFolderId]: normalized }));
                   } catch (err) {
                     console.error('Failed to refresh folder tracks after upload', err);
                   }
@@ -312,155 +489,167 @@ export function LibraryPanel({
     {/* Folder List (VS Code style) */}
     {folders.length > 0 && (
       <div className="flex-1 overflow-y-auto px-2 py-2 space-y-1 border-t border-border scroll-thin">
-        {folders.map(folder => {
-          const expanded = expandedFolderIds.includes(folder.id);
-          const tracksInFolder = folderTracks[folder.id] || [];
-          const trackCount = tracksInFolder.length;
-          return (
-            <div key={folder.id} className="space-y-0.5">
-              <ContextMenu>
-                <ContextMenuTrigger>
-                  <button
-                    type="button"
-                    onClick={() => toggleFolderExpanded(folder.id)}
-                    className={`w-full flex items-center gap-2 rounded px-2 py-1.5 text-xs text-left transition-colors ${
-                      selectedFolderId === folder.id
-                        ? 'bg-accent/80 text-foreground'
-                        : 'hover:bg-accent/40 text-foreground'
-                    }`}
-                  >
-                    {expanded ? (
-                      <ChevronDown className="w-3 h-3 text-muted-foreground" />
-                    ) : (
-                      <ChevronRight className="w-3 h-3 text-muted-foreground" />
-                    )}
-                    <Folder className="w-4 h-4 text-muted-foreground" />
-                    <span className="flex-1 truncate font-semibold text-sm select-text">{folder.name}</span>
-                    {trackCount > 0 && (
-                      <span className="text-[10px] text-muted-foreground select-text">
-                        {trackCount} track{trackCount === 1 ? '' : 's'}
-                      </span>
-                    )}
-                  </button>
-                </ContextMenuTrigger>
-                <ContextMenuContent>
-                  <ContextMenuItem
-                    onClick={() => {
-                      setPendingFolderForUpload(folder.id);
-                      fileInputRef.current?.click();
-                    }}
-                  >
-                    Add Files
-                  </ContextMenuItem>
-                  <ContextMenuItem onClick={() => handleRenameFolder(folder)}>
-                    Rename Folder
-                  </ContextMenuItem>
-                  <ContextMenuItem
-                    onClick={() => handleDeleteFolder(folder.id)}
-                    className="text-destructive"
-                  >
-                    Delete Folder
-                  </ContextMenuItem>
-                </ContextMenuContent>
-              </ContextMenu>
+        <AnimatePresence mode="popLayout">
+          {folders.map(folder => {
+            const expanded = expandedFolderIds.includes(folder.id);
+            const tracksInFolder = folderTracks[folder.id] || [];
+            const trackCount = tracksInFolder.length;
+            return (
+              <motion.div
+                key={folder.id}
+                layout
+                initial={reduceMotion || !hasMounted ? false : { opacity: 0, y: -6 }}
+                animate={reduceMotion || !hasMounted ? undefined : { opacity: 1, y: 0 }}
+                exit={reduceMotion || !hasMounted ? undefined : { opacity: 0, y: 6 }}
+                transition={reduceMotion ? undefined : { duration: 0.16, ease: 'easeOut' }}
+                className="space-y-0.5"
+              >
+                <ContextMenu>
+                  <ContextMenuTrigger>
+                    <button
+                      type="button"
+                      onClick={() => toggleFolderExpanded(folder.id)}
+                      className={`w-full flex items-center gap-2 rounded px-2 py-1.5 text-xs text-left transition-colors ${
+                        selectedFolderId === folder.id
+                          ? 'bg-accent/80 text-foreground'
+                          : 'hover:bg-accent/40 text-foreground'
+                      }`}
+                    >
+                      {expanded ? (
+                        <ChevronDown className="w-3 h-3 text-muted-foreground" />
+                      ) : (
+                        <ChevronRight className="w-3 h-3 text-muted-foreground" />
+                      )}
+                      <Folder className="w-4 h-4 text-muted-foreground" />
+                      <span className="flex-1 truncate font-semibold text-sm select-text">{folder.name}</span>
+                      {trackCount > 0 && (
+                        <span className="text-[10px] text-muted-foreground select-text">
+                          {trackCount} track{trackCount === 1 ? '' : 's'}
+                        </span>
+                      )}
+                    </button>
+                  </ContextMenuTrigger>
+                  <ContextMenuContent>
+                    <ContextMenuItem
+                      onClick={() => {
+                        setPendingFolderForUpload(folder.id);
+                        fileInputRef.current?.click();
+                      }}
+                    >
+                      Add Files
+                    </ContextMenuItem>
+                    <ContextMenuItem onClick={() => handleRenameFolder(folder)}>
+                      Rename Folder
+                    </ContextMenuItem>
+                    <ContextMenuItem
+                      onClick={() => handleDeleteFolder(folder.id)}
+                      className="text-destructive"
+                    >
+                      Delete Folder
+                    </ContextMenuItem>
+                  </ContextMenuContent>
+                </ContextMenu>
 
-              {expanded && (
-                <motion.div
-                  initial={{ opacity: 0, height: 0 }}
-                  animate={{ opacity: 1, height: 'auto' }}
-                  exit={{ opacity: 0, height: 0 }}
-                  transition={{ duration: 0.22, ease: 'easeInOut' }}
-                  className="ml-6 border-l border-border/40 pl-3 mt-1 space-y-0.5 overflow-hidden"
-                >
-                  {tracksInFolder.length === 0 ? (
-                    <div className="text-[11px] text-muted-foreground/80 pl-5 py-0.5">
-                      No tracks in this folder
-                    </div>
-                  ) : (
-                    <div className="space-y-0.5">
-                      {tracksInFolder.map((track) => (
-                        <TrackRow
-                          key={track.id}
-                          track={track}
-                          isLibrary
-                          isSelected={selectedFolderTrackId === track.id}
-                          onSelect={() => setSelectedFolderTrackId(track.id)}
+                <AnimatePresence initial={false}>
+                  {expanded && (
+                    <motion.div
+                      key={`${folder.id}-expanded`}
+                      initial={reduceMotion || !hasMounted ? false : { opacity: 0, height: 0 }}
+                      animate={reduceMotion || !hasMounted ? undefined : { opacity: 1, height: 'auto' }}
+                      exit={reduceMotion || !hasMounted ? undefined : { opacity: 0, height: 0 }}
+                      transition={reduceMotion ? undefined : { duration: 0.22, ease: 'easeInOut' }}
+                      className="ml-6 border-l border-border/40 pl-3 mt-1 space-y-0.5 overflow-hidden"
+                    >
+                      {folderLoadingIds.has(folder.id) ? (
+                        <div className="text-[11px] text-muted-foreground/80 pl-5 py-0.5">
+                          Loading…
+                        </div>
+                      ) : tracksInFolder.length === 0 ? (
+                        <div className="text-[11px] text-muted-foreground/80 pl-5 py-0.5">
+                          No tracks in this folder
+                        </div>
+                      ) : (
+                        <VirtualizedFolderTrackList
+                          tracks={tracksInFolder}
+                          selectedTrackId={selectedFolderTrackId}
+                          onSelect={handleSelectFolderTrack}
                           onAddToQueue={onAddToQueue}
                           onAddToPlaylist={onAddToPlaylist}
                           playlists={playlists}
-                          onRemove={async () => {
-                            onRemoveTrack(track.id);
-                          }}
-                          showRemove
+                          onRemove={handleRemoveFolderTrack}
                         />
-                      ))}
-                    </div>
+                      )}
+                    </motion.div>
                   )}
-                </motion.div>
-              )}
-            </div>
-          );
-        })}
+                </AnimatePresence>
+              </motion.div>
+            );
+          })}
+        </AnimatePresence>
       </div>
     )}
 
       {/* New/Rename Folder Modal (custom, non-Radix to avoid focus issues) */}
-      {folderDialogOpen && (
-        <div
-          className="fixed inset-0 z-50 flex items-center justify-center bg-black/50"
-          onClick={() => {
-            setFolderDialogOpen(false);
-            setEditingFolderId(null);
-            setFolderNameInput('');
-          }}
-        >
-          <div
-            className="bg-background rounded-lg border shadow-lg p-4 w-full max-w-sm"
-            onClick={(e) => e.stopPropagation()}
+      <AnimatePresence>
+        {folderDialogOpen && (
+          <motion.div
+            className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-sm"
+            onClick={() => {
+              closeFolderDialog();
+            }}
+            initial={reduceMotion ? false : { opacity: 0 }}
+            animate={reduceMotion ? undefined : { opacity: 1 }}
+            exit={reduceMotion ? undefined : { opacity: 0 }}
+            transition={reduceMotion ? undefined : { duration: 0.16, ease: 'easeOut' }}
           >
-            <div className="flex items-center justify-between mb-3">
-              <h3 className="font-semibold text-sm">
-                {editingFolderId ? 'Rename Folder' : 'New Folder'}
-              </h3>
-              <button
-                type="button"
-                onClick={() => {
-                  setFolderDialogOpen(false);
-                  setEditingFolderId(null);
-                  setFolderNameInput('');
-                }}
-                className="text-muted-foreground hover:text-foreground text-xs px-1"
-              >
-                ×
-              </button>
-            </div>
-            <div className="space-y-2">
-              <Input
-                autoFocus
-                placeholder="Folder name"
-                value={folderNameInput}
-                onChange={(e) => setFolderNameInput(e.target.value)}
-              />
-            </div>
-            <div className="flex justify-end gap-2 mt-4">
-              <Button
-                size="sm"
-                variant="outline"
-                onClick={() => {
-                  setFolderDialogOpen(false);
-                  setEditingFolderId(null);
-                  setFolderNameInput('');
+            <motion.div
+              className="w-full max-w-lg rounded-xl border border-border/60 bg-background text-foreground shadow-2xl p-6"
+              onClick={(e) => e.stopPropagation()}
+              initial={reduceMotion ? false : { opacity: 0, scale: 0.98, y: 6 }}
+              animate={reduceMotion ? undefined : { opacity: 1, scale: 1, y: 0 }}
+              exit={reduceMotion ? undefined : { opacity: 0, scale: 0.98, y: 6 }}
+              transition={reduceMotion ? undefined : { duration: 0.18, ease: 'easeOut' }}
+            >
+              <form
+                onSubmit={(e) => {
+                  e.preventDefault();
+                  void handleConfirmFolder();
                 }}
               >
-                Cancel
-              </Button>
-              <Button size="sm" onClick={handleConfirmFolder}>
-                Save
-              </Button>
-            </div>
-          </div>
-        </div>
-      )}
+                <div className="flex items-center justify-between mb-4">
+                  <h3 className="text-base font-semibold tracking-tight text-foreground">
+                    {editingFolderId ? 'Rename Folder' : 'New Folder'}
+                  </h3>
+                  <button
+                    type="button"
+                    onClick={closeFolderDialog}
+                    className="text-muted-foreground hover:text-foreground text-lg leading-none px-2"
+                  >
+                    ×
+                  </button>
+                </div>
+                <div className="space-y-2">
+                  <Input
+                    autoFocus
+                    placeholder="Folder name"
+                    value={folderNameInput}
+                    onChange={(e) => setFolderNameInput(e.target.value)}
+                    className="bg-white text-slate-900 placeholder:text-slate-500 border-slate-300 focus-visible:ring-primary/30 focus-visible:border-primary dark:bg-input/40 dark:text-foreground dark:placeholder:text-muted-foreground/80 dark:border-input"
+                  />
+                </div>
+                <div className="flex justify-end gap-3 mt-6">
+                  <Button size="sm" variant="outline" type="button" onClick={closeFolderDialog}>
+                    Cancel
+                  </Button>
+                  <Button size="sm" type="submit">
+                    Save
+                  </Button>
+                </div>
+              </form>
+            </motion.div>
+          </motion.div>
+        )}
+      </AnimatePresence>
     </div>
   );
 }

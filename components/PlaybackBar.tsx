@@ -33,6 +33,7 @@ interface PlaybackBarProps {
   onCrossfadeChange: (value: number) => void;
   audioDevices: UseAudioDevicesResult;
   onSeek?: (seconds: number) => void;
+  onProgress?: (seconds: number) => void;
 }
 
 export function PlaybackBar({
@@ -47,6 +48,7 @@ export function PlaybackBar({
   onCrossfadeChange,
   audioDevices,
   onSeek,
+  onProgress,
 }: PlaybackBarProps) {
   const [showPauseConfirm, setShowPauseConfirm] = useState(false);
   const { primaryAudioRef, secondaryAudioRef, currentTime, duration, handleSeek } = useAudioEngine({
@@ -55,6 +57,11 @@ export function PlaybackBar({
     crossfadeSeconds,
     onNext,
   });
+
+  useEffect(() => {
+    if (!onProgress) return;
+    onProgress(currentTime);
+  }, [currentTime, onProgress]);
 
   // Wire the global Audio Guard selection (from the header Output control)
   // into the actual audio elements used for playback. This keeps the

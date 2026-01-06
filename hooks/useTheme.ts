@@ -11,7 +11,20 @@ export function useTheme() {
   }, [theme]);
 
   const toggleTheme = () => {
-    setTheme(prev => prev === 'default' ? 'light' : 'default');
+    const root = document.documentElement;
+    const reduceMotion =
+      typeof window !== 'undefined' &&
+      typeof window.matchMedia === 'function' &&
+      window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+    if (!reduceMotion) {
+      root.classList.add('theme-transition');
+      window.setTimeout(() => {
+        root.classList.remove('theme-transition');
+      }, 260);
+    }
+
+    setTheme((prev) => (prev === 'default' ? 'light' : 'default'));
   };
 
   return { theme, toggleTheme };

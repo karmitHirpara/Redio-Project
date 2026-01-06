@@ -24,7 +24,7 @@ router.get('/', async (req, res) => {
 // Create schedule
 router.post('/', async (req, res) => {
   try {
-    const { playlistId, type, dateTime, queueSongId, triggerPosition } = req.body;
+    const { playlistId, type, dateTime, queueSongId, triggerPosition, lockPlaylist } = req.body;
 
     if (!playlistId || !type) {
       return res.status(400).json({ error: 'Playlist ID and type are required' });
@@ -47,15 +47,16 @@ router.post('/', async (req, res) => {
 
     const scheduleId = uuidv4();
     await run(
-      `INSERT INTO schedules (id, playlist_id, type, date_time, queue_song_id, trigger_position, status)
-       VALUES (?, ?, ?, ?, ?, ?, 'pending')`,
+      `INSERT INTO schedules (id, playlist_id, type, date_time, queue_song_id, trigger_position, lock_playlist, status)
+       VALUES (?, ?, ?, ?, ?, ?, ?, 'pending')`,
       [
         scheduleId,
         playlistId,
         type,
         dateTime || null,
         queueSongId || null,
-        triggerPosition || null
+        triggerPosition || null,
+        lockPlaylist ? 1 : 0,
       ]
     );
 

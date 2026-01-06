@@ -8,7 +8,13 @@ dotenv.config();
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
-const dbPath = join(dirname(__dirname), process.env.DATABASE_PATH || 'database.sqlite');
+const rawDbPath = process.env.DATABASE_PATH || 'database.sqlite';
+const dbPath = rawDbPath.startsWith('/') ? rawDbPath : join(dirname(__dirname), rawDbPath);
+
+const dbDir = dirname(dbPath);
+if (!fs.existsSync(dbDir)) {
+  fs.mkdirSync(dbDir, { recursive: true });
+}
 
 // Remove existing database
 if (fs.existsSync(dbPath)) {
@@ -77,6 +83,7 @@ db.serialize(() => {
       date_time DATETIME,
       queue_song_id TEXT,
       trigger_position TEXT,
+      lock_playlist BOOLEAN DEFAULT 0,
       status TEXT DEFAULT 'pending',
       created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
       updated_at DATETIME,

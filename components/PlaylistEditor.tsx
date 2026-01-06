@@ -1,6 +1,6 @@
-import { useState, useRef } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { X, Search, Plus, GripVertical } from 'lucide-react';
-import { motion } from 'framer-motion';
+import { AnimatePresence, motion, useReducedMotion } from 'framer-motion';
 import { Button } from './ui/button';
 import { Input } from './ui/input';
 import { Playlist, Track } from '../types';
@@ -9,6 +9,7 @@ import { formatDuration } from '../lib/utils';
 
 interface PlaylistEditorProps {
   playlist: Playlist;
+  highlightTrackId?: string | null;
   onClose: () => void;
   onPlayPlaylistNow: () => void;
   onQueuePlaylist: () => void;
@@ -23,6 +24,7 @@ interface PlaylistEditorProps {
 
 export function PlaylistEditor({
   playlist,
+  highlightTrackId,
   onClose,
   onPlayPlaylistNow,
   onQueuePlaylist,
@@ -34,11 +36,20 @@ export function PlaylistEditor({
   scheduledStartTime,
   onDropTrackOnPlaylistPanel,
 }: PlaylistEditorProps) {
+  const reduceMotion = useReducedMotion() ?? false;
   const [searchQuery, setSearchQuery] = useState('');
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const [dragIndex, setDragIndex] = useState<number | null>(null);
   const [dropIndex, setDropIndex] = useState<number | null>(null);
   const dragStartOrderRef = useRef<Track[] | null>(null);
+  const [flashTrackId, setFlashTrackId] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!highlightTrackId) return;
+    setFlashTrackId(highlightTrackId);
+    const t = window.setTimeout(() => setFlashTrackId(null), 900);
+    return () => window.clearTimeout(t);
+  }, [highlightTrackId]);
 
   const filteredTracks = playlist.tracks.filter(track =>
     track.name.toLowerCase().includes(searchQuery.toLowerCase()) ||
@@ -55,7 +66,9 @@ export function PlaylistEditor({
   };
 
   const handleDragOverRow = (event: React.DragEvent<HTMLDivElement>, index: number) => {
-    if (!canReorder) return;
+    const types = Array.from(event.dataTransfer.types);
+    const hasFiles = types.includes('Files');
+    if (!canReorder && !hasFiles) return;
     event.preventDefault();
 
     const rect = event.currentTarget.getBoundingClientRect();
@@ -247,51 +260,93 @@ export function PlaylistEditor({
           </div>
         ) : (
           <div className="space-y-1">
-            {filteredTracks.map((track, index) => (
-              <motion.div
-                key={track.id}
-                layout
-                transition={{ type: 'spring', stiffness: 380, damping: 30, mass: 0.6 }}
-                whileDrag={{
-                  scale: 1.03,
-                  boxShadow: '0 10px 25px rgba(0,0,0,0.35)',
-                  zIndex: 20,
-                }}
-                className={`flex items-center gap-2 cursor-default select-none relative hover:bg-accent/10 ${
-                  dropIndex === index || dropIndex === index + 1
-                    ? 'bg-accent/15 ring-1 ring-accent/60'
-                    : ''
-                } ${
-                  dropIndex === index
-                    ? 'before:absolute before:left-0 before:right-0 before:top-0 before:h-px before:bg-accent'
-                    : ''
-                } ${
-                  dropIndex === index + 1
-                    ? 'after:absolute after:left-0 before:right-0 after:bottom-0 after:h-px after:bg-accent'
-                    : ''
-                }`}
-                draggable={canReorder}
-                onDragStart={() => handleDragStart(index)}
-                onDragOver={(e) => handleDragOverRow(e, index)}
-                onDragEnd={handleDragEnd}
-              >
-                <span className="w-6 text-[11px] text-muted-foreground text-right">
-                  {index + 1}
-                </span>
-                <GripVertical className="w-4 h-4 text-muted-foreground cursor-grab" />
-                <div className="flex-1">
-                  <TrackRow
-                    track={track}
-                    onAddToQueue={onQueueTrack}
-                    onAddToPlaylist={() => {}}
-                    playlists={[]}
-                    onRemove={() => onRemoveTrack(track.id)}
-                    showRemove={!playlist.locked}
-                    startTimeLabel={startTimeByTrackId[track.id]}
-                  />
-                </div>
-              </motion.div>
-            ))}
+            <AnimatePresence mode="popLayout" initial={false}>
+              {filteredTracks.map((track, index) => (
+                <motion.div
+                  key={track.id}
+                  layout
+                  initial={reduceMotion ? false : { opacity: 0, y: -6 }}
+                  animate={
+                    reduceMotion
+                      ? undefined
+                      : flashTrackId === track.id
+                        ? {
+                            opacity: 1,
+                            y: 0,
+                            scale: [1, 1.01, 1],
+                            backgroundColor: [
+                              'rgba(56,189,248,0.08)',
+                              'rgba(56,189,248,0.18)',
+                              'rgba(56,189,248,0.08)',
+                            ],
+                          }
+                        : { opacity: 1, y: 0, backgroundColor: 'rgba(0,0,0,0)' }
+                  }
+                  exit={reduceMotion ? undefined : { opacity: 0, y: -6 }}
+                  whileTap={reduceMotion ? undefined : { scale: 0.99 }}
+                  transition={
+                    reduceMotion
+                      ? undefined
+                      : flashTrackId === track.id
+                        ? { duration: 0.9, ease: 'easeOut' }
+                        : { duration: 0.18, ease: 'easeOut' }
+                  }
+                  className={`flex items-center gap-2 cursor-default select-none relative hover:bg-accent/10 ${
+                    dropIndex === index || dropIndex === index + 1
+                      ? 'bg-accent/15 ring-1 ring-accent/60'
+                      : ''
+                  }`}
+                  draggable={canReorder}
+                  onDragStart={() => handleDragStart(index)}
+                  onDragOver={(e) => handleDragOverRow(e, index)}
+                  onDragEnd={handleDragEnd}
+                >
+                  <AnimatePresence>
+                    {dropIndex === index && (
+                      <motion.div
+                        key="insert-top"
+                        className="pointer-events-none absolute left-0 right-0 top-0 h-px bg-accent"
+                        initial={reduceMotion ? false : { opacity: 0, scaleX: 0.92 }}
+                        animate={reduceMotion ? undefined : { opacity: 1, scaleX: 1 }}
+                        exit={reduceMotion ? undefined : { opacity: 0, scaleX: 0.92 }}
+                        transition={reduceMotion ? undefined : { duration: 0.12, ease: 'easeOut' }}
+                        style={{ transformOrigin: 'center' }}
+                      />
+                    )}
+                  </AnimatePresence>
+
+                  <AnimatePresence>
+                    {dropIndex === index + 1 && (
+                      <motion.div
+                        key="insert-bottom"
+                        className="pointer-events-none absolute left-0 right-0 bottom-0 h-px bg-accent"
+                        initial={reduceMotion ? false : { opacity: 0, scaleX: 0.92 }}
+                        animate={reduceMotion ? undefined : { opacity: 1, scaleX: 1 }}
+                        exit={reduceMotion ? undefined : { opacity: 0, scaleX: 0.92 }}
+                        transition={reduceMotion ? undefined : { duration: 0.12, ease: 'easeOut' }}
+                        style={{ transformOrigin: 'center' }}
+                      />
+                    )}
+                  </AnimatePresence>
+
+                  <span className="w-6 text-[11px] text-muted-foreground text-right">
+                    {index + 1}
+                  </span>
+                  <GripVertical className="w-4 h-4 text-muted-foreground cursor-grab" />
+                  <div className="flex-1">
+                    <TrackRow
+                      track={track}
+                      onAddToQueue={onQueueTrack}
+                      onAddToPlaylist={() => {}}
+                      playlists={[]}
+                      onRemove={onRemoveTrack}
+                      showRemove={!playlist.locked}
+                      startTimeLabel={startTimeByTrackId[track.id]}
+                    />
+                  </div>
+                </motion.div>
+              ))}
+            </AnimatePresence>
           </div>
         )}
       </div>

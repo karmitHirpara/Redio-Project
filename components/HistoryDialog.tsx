@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from 'react';
 import { Clock, AlertCircle, ChevronDown, ChevronRight, Download } from 'lucide-react';
+import type { Cell, Row } from 'exceljs';
 import {
   Dialog,
   DialogContent,
@@ -18,6 +19,7 @@ import {
 } from './ui/context-menu';
 import { toast } from 'sonner';
 import { motion, AnimatePresence } from 'framer-motion';
+import { historyAPI } from '../services/api';
 
 interface HistoryEntry {
   id: string;
@@ -43,6 +45,19 @@ export function HistoryDialog({ open, onOpenChange }: HistoryDialogProps) {
   const [error, setError] = useState<string | null>(null);
   const [hasLoadedOnce, setHasLoadedOnce] = useState(false);
 
+  const istDateTimeFormatter = useMemo(() => {
+    return new Intl.DateTimeFormat('en-IN', {
+      timeZone: 'Asia/Kolkata',
+      year: 'numeric',
+      month: 'short',
+      day: '2-digit',
+      hour: '2-digit',
+      minute: '2-digit',
+      second: '2-digit',
+      hour12: true,
+    });
+  }, []);
+
   useEffect(() => {
     if (!open) return;
     let cancelled = false;
@@ -51,11 +66,7 @@ export function HistoryDialog({ open, onOpenChange }: HistoryDialogProps) {
       setError(null);
       try {
         if (!cancelled && showSpinner) setLoading(true);
-        const res = await fetch('/api/history?limit=100');
-        if (!res.ok) {
-          throw new Error(`Failed to load history (${res.status})`);
-        }
-        const data: HistoryEntry[] = await res.json();
+        const data: HistoryEntry[] = await historyAPI.get(100);
         if (!cancelled) {
           setEntries(data);
           if (showSpinner && !hasLoadedOnce) {
@@ -82,9 +93,44 @@ export function HistoryDialog({ open, onOpenChange }: HistoryDialogProps) {
     };
   }, [open, hasLoadedOnce]);
 
+  useEffect(() => {
+    if (hasLoadedOnce) return;
+    let cancelled = false;
+    const prefetch = async () => {
+      try {
+        const data: HistoryEntry[] = await historyAPI.get(100);
+        if (!cancelled) {
+          setEntries(data);
+          setHasLoadedOnce(true);
+        }
+      } catch {
+        // ignore background prefetch errors
+      }
+    };
+
+    const idle = (window as any).requestIdleCallback as
+      | ((cb: () => void, opts?: { timeout: number }) => number)
+      | undefined;
+    const cancelIdle = (window as any).cancelIdleCallback as ((id: number) => void) | undefined;
+
+    if (idle) {
+      const id = idle(() => void prefetch(), { timeout: 1500 });
+      return () => {
+        cancelled = true;
+        if (cancelIdle) cancelIdle(id);
+      };
+    }
+
+    const id = window.setTimeout(() => void prefetch(), 350);
+    return () => {
+      cancelled = true;
+      window.clearTimeout(id);
+    };
+  }, [hasLoadedOnce]);
+
   const formatTime = (iso: string) => {
     const d = new Date(iso);
-    return d.toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' });
+    return istDateTimeFormatter.format(d);
   };
 
   const formatDateKey = (iso: string) => {
@@ -162,53 +208,104 @@ export function HistoryDialog({ open, onOpenChange }: HistoryDialogProps) {
     }
   };
 
-  const downloadCsv = (filename: string, rows: HistoryEntry[]) => {
+  const downloadXlsx = async (filename: string, rows: HistoryEntry[]) => {
     try {
-      const headers = ['No', 'Song Name', 'Starting Time', 'Ending Time'];
+      const ExcelJSImport = await import('exceljs');
+      const ExcelJS: any = (ExcelJSImport as any).default ?? ExcelJSImport;
+      const workbook = new ExcelJS.Workbook();
+      workbook.creator = 'Redio';
+      workbook.created = new Date();
 
-      const escape = (v: any) => {
-        if (v === null || v === undefined) return '';
-        const s = String(v).replace(/"/g, '""');
-        return `"${s}` + `"`;
-      };
+      const sheet = workbook.addWorksheet('Playback History', {
+        views: [{ state: 'frozen', ySplit: 1 }],
+      });
 
-      const formatDateTime = (iso: string, durationSeconds: number) => {
-        const start = new Date(iso);
+      sheet.columns = [
+        { header: 'No.', key: 'no', width: 6 },
+        { header: 'Programs File', key: 'programFile', width: 44 },
+        { header: 'Start Time', key: 'startTime', width: 18 },
+        { header: 'End Time', key: 'endTime', width: 18 },
+      ];
+
+      const headerRow = sheet.getRow(1);
+      headerRow.height = 20;
+      headerRow.eachCell((cell: Cell) => {
+        cell.font = { bold: true, color: { argb: 'FFFFFFFF' } };
+        cell.fill = {
+          type: 'pattern',
+          pattern: 'solid',
+          fgColor: { argb: 'FF4F46E5' },
+        };
+        cell.alignment = { vertical: 'middle', horizontal: 'center' };
+        cell.border = {
+          top: { style: 'thin', color: { argb: 'FFCBD5E1' } },
+          left: { style: 'thin', color: { argb: 'FFCBD5E1' } },
+          bottom: { style: 'thin', color: { argb: 'FFCBD5E1' } },
+          right: { style: 'thin', color: { argb: 'FFCBD5E1' } },
+        };
+      });
+
+      const formatTimeOnly = (d: Date) =>
+        d.toLocaleTimeString('en-IN', {
+          timeZone: 'Asia/Kolkata',
+          hour: '2-digit',
+          minute: '2-digit',
+          second: '2-digit',
+          hour12: true,
+        });
+
+      rows.forEach((r, index) => {
+        const durationSeconds = (r.position_end ?? 0) - (r.position_start ?? 0);
+        const start = new Date(r.played_at);
         const end = new Date(start.getTime() + Math.max(0, durationSeconds) * 1000);
 
-        const toParts = (d: Date) => {
-          const dd = String(d.getDate()).padStart(2, '0');
-          const mm = String(d.getMonth() + 1).padStart(2, '0');
-          const yyyy = d.getFullYear();
-          const hh = String(d.getHours()).padStart(2, '0');
-          const mi = String(d.getMinutes()).padStart(2, '0');
-          const ss = String(d.getSeconds()).padStart(2, '0');
-          // Note: time format requested with double colon between hour and minute
-          const time = `${hh}::${mi}::${ss}`;
-          const date = `${dd}/${mm}/${yyyy}`;
-          return { date, time };
-        };
+        const row = sheet.addRow({
+          no: index + 1,
+          programFile: r.track_name || 'Unknown track',
+          startTime: formatTimeOnly(start),
+          endTime: formatTimeOnly(end),
+        });
+        row.height = 18;
+      });
 
-        const s = toParts(start);
-        const e = toParts(end);
-        return {
-          start: `${s.date} ${s.time}`,
-          end: `${e.date} ${e.time}`,
-        };
+      // Styling: borders + alignment for all data rows
+      sheet.eachRow((row: Row, rowNumber: number) => {
+        if (rowNumber === 1) return;
+        row.eachCell((cell: Cell, colNumber: number) => {
+          cell.font = { name: 'Calibri', size: 11 };
+          cell.border = {
+            top: { style: 'thin', color: { argb: 'FFE2E8F0' } },
+            left: { style: 'thin', color: { argb: 'FFE2E8F0' } },
+            bottom: { style: 'thin', color: { argb: 'FFE2E8F0' } },
+            right: { style: 'thin', color: { argb: 'FFE2E8F0' } },
+          };
+          cell.alignment = {
+            vertical: 'middle',
+            horizontal: colNumber === 1 ? 'center' : colNumber === 2 ? 'left' : 'center',
+            wrapText: colNumber === 2,
+          };
+
+          if (rowNumber % 2 === 0) {
+            cell.fill = {
+              type: 'pattern',
+              pattern: 'solid',
+              fgColor: { argb: 'FFF8FAFC' },
+            };
+          }
+        });
+      });
+
+      // Auto filter across all columns
+      sheet.autoFilter = {
+        from: { row: 1, column: 1 },
+        to: { row: Math.max(1, sheet.rowCount), column: 4 },
       };
 
-      const csvLines = [
-        headers.join(','),
-        ...rows.map((r, index) => {
-          const durationSeconds = (r.position_end ?? 0) - (r.position_start ?? 0);
-          const times = formatDateTime(r.played_at, durationSeconds);
-          const no = index + 1;
-          const songName = r.track_name || 'Unknown track';
-          return [no, songName, times.start, times.end].map(escape).join(',');
-        }),
-      ].join('\n');
+      const buffer = await workbook.xlsx.writeBuffer();
+      const blob = new Blob([buffer], {
+        type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+      });
 
-      const blob = new Blob([csvLines], { type: 'text/csv' });
       const url = URL.createObjectURL(blob);
       const a = document.createElement('a');
       a.href = url;
@@ -218,37 +315,21 @@ export function HistoryDialog({ open, onOpenChange }: HistoryDialogProps) {
       a.remove();
       URL.revokeObjectURL(url);
     } catch (err: any) {
-      console.error('Failed to download CSV history log', err);
-      toast.error(err?.message || 'Failed to download CSV history log');
+      console.error('Failed to download XLSX history log', err);
+      toast.error(err?.message || 'Failed to download XLSX history log');
     }
   };
 
   const handleAction = async (entry: HistoryEntry, action: 'putBackToLibrary' | 'addToQueue' | 'delete') => {
     try {
       if (action === 'delete') {
-        const res = await fetch(`/api/history/${entry.id}`, {
-          method: 'DELETE',
-        });
-        if (!res.ok) {
-          const data = await res.json().catch(() => null);
-          throw new Error(data?.error || 'Failed to remove from history');
-        }
+        await historyAPI.delete(entry.id);
         setEntries(prev => prev.filter(e => e.id !== entry.id));
         toast.success('Removed from history');
         return;
       }
 
-      const res = await fetch(`/api/history/${entry.id}/actions`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ action: action === 'addToQueue' ? 'addToQueue' : 'putBackToLibrary' }),
-      });
-
-      const ok = res.ok;
-      const data = await res.json().catch(() => null);
-      if (!ok) {
-        throw new Error(data?.error || 'Action failed');
-      }
+      const data = await historyAPI.action(entry.id, action === 'addToQueue' ? 'addToQueue' : 'putBackToLibrary');
 
       if (action === 'addToQueue') {
         toast.success('Added back to queue');
@@ -332,7 +413,7 @@ export function HistoryDialog({ open, onOpenChange }: HistoryDialogProps) {
                             onClick={(e) => {
                               e.stopPropagation();
                               const filename = `history-${dateKey}.xlsx`;
-                              downloadCsv(filename, dayEntries);
+                              void downloadXlsx(filename, dayEntries);
                             }}
                             className="inline-flex items-center gap-1 rounded-md border border-border/70 bg-background/80 px-2 py-1 text-[11px] text-muted-foreground hover:bg-accent/60 hover:text-foreground transition-colors"
                           >

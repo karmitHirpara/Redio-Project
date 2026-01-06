@@ -7,7 +7,7 @@ import {
   ContextMenuItem,
   ContextMenuTrigger,
 } from './ui/context-menu';
-import { motion } from 'motion/react';
+import { motion, useReducedMotion } from 'framer-motion';
 
 interface PlaylistFolderProps {
   playlist: Playlist;
@@ -30,12 +30,14 @@ export function PlaylistFolder({
   onDuplicate,
   scheduleLabel,
 }: PlaylistFolderProps) {
+  const reduceMotion = useReducedMotion() ?? false;
   return (
     <ContextMenu>
       <ContextMenuTrigger>
         <motion.div
-          whileHover={{ scale: 1.02 }}
-          transition={{ duration: 0.15 }}
+          whileHover={reduceMotion ? undefined : { y: -1 }}
+          whileTap={reduceMotion ? undefined : { scale: 0.99 }}
+          transition={reduceMotion ? undefined : { duration: 0.14, ease: 'easeOut' }}
           className={cn(
             "flex items-center gap-2 p-2 rounded-md cursor-pointer transition-colors",
             "hover:bg-accent/50"

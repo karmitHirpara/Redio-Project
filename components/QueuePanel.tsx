@@ -1,13 +1,13 @@
-import { useState, useRef } from 'react';
-import { GripVertical, Radio } from 'lucide-react';
+import { useMemo, useState, useRef } from 'react';
+import type React from 'react';
+import { Radio } from 'lucide-react';
 import { QueueItem, Playlist } from '../types';
 import { QueueItemRow } from './QueueItemRow';
-import { motion, AnimatePresence } from 'framer-motion';
+import { AnimatePresence, useReducedMotion } from 'framer-motion';
 import { QueueTimingResult } from '../hooks/useQueueTiming';
 
 interface QueuePanelProps {
   queue: QueueItem[];
-  currentTrackId: string | null;
   currentQueueItemId: string | null;
   onRemoveFromQueue: (id: string) => void;
   onReorderQueue: (items: QueueItem[]) => void;
@@ -19,7 +19,6 @@ interface QueuePanelProps {
 
 export function QueuePanel({
   queue,
-  currentTrackId,
   currentQueueItemId,
   onRemoveFromQueue,
   onReorderQueue,
@@ -31,6 +30,11 @@ export function QueuePanel({
   const [dragIndex, setDragIndex] = useState<number | null>(null);
   const [dropIndex, setDropIndex] = useState<number | null>(null);
   const dragStartOrderRef = useRef<QueueItem[] | null>(null);
+  const reduceMotion = useReducedMotion() ?? false;
+
+  const pinnedIndex = currentQueueItemId
+    ? queue.findIndex((item) => item.id === currentQueueItemId)
+    : -1;
 
   const handleDragStart = (index: number) => {
     setDragIndex(index);
@@ -38,6 +42,15 @@ export function QueuePanel({
     // Capture the original queue order at drag start
     dragStartOrderRef.current = [...queue];
   };
+
+  const timingByQueueItemId = useMemo(() => {
+    const map = new Map<string, { start?: Date; end?: Date }>();
+    const list = timing?.queueTimings ?? [];
+    for (const t of list) {
+      map.set(t.item.id, { start: t.start, end: t.end });
+    }
+    return map;
+  }, [timing?.queueTimings]);
 
   const handleDragOverRow = (event: React.DragEvent<HTMLDivElement>, index: number) => {
     if (dragIndex === null) return;
@@ -47,10 +60,14 @@ export function QueuePanel({
     const offsetY = event.clientY - rect.top;
     const halfway = rect.height / 2;
 
-    if (offsetY < halfway) {
-      setDropIndex(index);
+    const desired = offsetY < halfway ? index : index + 1;
+
+    // Keep the currently playing item pinned to the top: do not allow any
+    // drops to land above it.
+    if (pinnedIndex === 0) {
+      setDropIndex(Math.max(desired, 1));
     } else {
-      setDropIndex(index + 1);
+      setDropIndex(desired);
     }
   };
 
@@ -74,7 +91,17 @@ export function QueuePanel({
       const [moved] = visible.splice(from, 1);
       const insertAt = to > from ? to - 1 : to;
       visible.splice(insertAt, 0, moved);
-      onReorderQueue(visible);
+
+      // Enforce that the current playing item stays at index 0.
+      let next = visible;
+      if (currentQueueItemId) {
+        const idx = next.findIndex((q) => q.id === currentQueueItemId);
+        if (idx > 0) {
+          next = [next[idx], ...next.slice(0, idx), ...next.slice(idx + 1)];
+        }
+      }
+
+      onReorderQueue(next);
     }
 
     setDragIndex(null);
@@ -103,44 +130,34 @@ export function QueuePanel({
           </div>
         ) : (
           <AnimatePresence mode="popLayout">
-            {queue.map((item, index) => (
-              // Find timing entry for this item, falling back to nowPlaying for the current track
-              // if it's not present in queueTimings
-              <motion.div
-                key={item.id}
-                initial={{ opacity: 0, y: -10 }}
-                animate={{ opacity: 1, y: 0 }}
-                exit={{ opacity: 0, x: -100 }}
-                transition={{ duration: 0.2 }}
-                className="mb-1"
-              >
-                {(() => {
-                  const entry = timing?.queueTimings.find((t) => t.item.id === item.id);
-                  const isCurrent = item.track.id === currentTrackId;
-                  const np = isCurrent ? timing?.nowPlaying : undefined;
+            {queue.map((item, index) => {
+              const entry = timingByQueueItemId.get(item.id);
+              const isCurrent = Boolean(currentQueueItemId && item.id === currentQueueItemId);
+              const np = isCurrent ? timing?.nowPlaying : undefined;
 
-                  const startTime = (isCurrent ? np?.start : entry?.start) ?? null;
-                  const endTime = (isCurrent ? np?.end : entry?.end) ?? null;
-                  return (
-                    <QueueItemRow
-                      item={item}
-                      isPlaying={item.id === currentQueueItemId}
-                      isNext={index === 0 && item.id !== currentQueueItemId}
-                      onRemove={() => onRemoveFromQueue(item.id)}
-                      index={index}
-                      onDragStart={handleDragStart}
-                      onDragOverRow={handleDragOverRow}
-                      onDragEnd={handleDragEnd}
-                      dropIndex={dropIndex}
-                      startTime={startTime ?? undefined}
-                      endTime={endTime ?? undefined}
-                      playlists={playlists}
-                      onAddToPlaylist={(playlistId) => onAddQueueItemToPlaylist(item, playlistId)}
-                    />
-                  );
-                })()}
-              </motion.div>
-            ))}
+              const startTime = (isCurrent ? np?.start : entry?.start) ?? undefined;
+              const endTime = (isCurrent ? np?.end : entry?.end) ?? undefined;
+
+              return (
+                <QueueItemRow
+                  key={item.id}
+                  item={item}
+                  isPlaying={item.id === currentQueueItemId}
+                  isNext={index === 0 && item.id !== currentQueueItemId}
+                  onRemoveFromQueue={onRemoveFromQueue}
+                  index={index}
+                  onDragStart={handleDragStart}
+                  onDragOverRow={handleDragOverRow}
+                  onDragEnd={handleDragEnd}
+                  dropIndex={dropIndex}
+                  startTime={startTime}
+                  endTime={endTime}
+                  playlists={playlists}
+                  onAddToPlaylist={onAddQueueItemToPlaylist}
+                  reduceMotion={reduceMotion}
+                />
+              );
+            })}
           </AnimatePresence>
         )}
       </div>

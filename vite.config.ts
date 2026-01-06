@@ -2,6 +2,9 @@ import { defineConfig } from 'vite';
 import react from '@vitejs/plugin-react-swc';
 
 export default defineConfig({
+  // Use relative paths in the built index.html so that assets load correctly
+  // when opened from file:// inside the packaged Electron app.
+  base: './',
   plugins: [react()],
   server: {
     host: true,
