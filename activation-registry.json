@@ -1,0 +1,18 @@
+{
+  "licenses": {
+    "REDIO-123": {
+      "maxActivations": 2,
+      "activations": {
+        "0976963a944e2e95cd5864ce924d2959cb39933225193c37e73955746525d7d1": {
+          "fingerprint": "0976963a944e2e95cd5864ce924d2959cb39933225193c37e73955746525d7d1",
+          "firstIssuedAt": "2026-01-17T10:03:29.938Z",
+          "lastIssuedAt": "2026-01-17T10:03:29.938Z",
+          "requestPath": "D:\\Redio Project\\activation-request.json"
+        }
+      },
+      "ownerFingerprint": "0976963a944e2e95cd5864ce924d2959cb39933225193c37e73955746525d7d1",
+      "updatedAt": "2026-01-17T10:03:29.938Z",
+      "product": "Redio"
+    }
+  }
+}
