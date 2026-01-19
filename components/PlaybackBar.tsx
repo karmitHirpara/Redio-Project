@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
-import { Play, Pause, SkipForward, SkipBack, Radio } from 'lucide-react';
+import type React from 'react';
+import { Lock as LockIcon, Pause, Play, Radio, SkipForward, Unlock as UnlockIcon } from 'lucide-react';
 import { Button } from './ui/button';
 import { Slider } from './ui/slider';
 import { Track } from '../types';
@@ -51,12 +52,44 @@ export function PlaybackBar({
   onProgress,
 }: PlaybackBarProps) {
   const [showPauseConfirm, setShowPauseConfirm] = useState(false);
+  const [volume, setVolume] = useState(1);
+  const SEEK_LOCK_KEY = 'redio.playback.seekLocked';
+  const [seekLocked, setSeekLocked] = useState(false);
   const { primaryAudioRef, secondaryAudioRef, currentTime, duration, handleSeek } = useAudioEngine({
     currentTrack,
     isPlaying,
     crossfadeSeconds,
     onNext,
   });
+
+  useEffect(() => {
+    try {
+      const raw = window.localStorage.getItem(SEEK_LOCK_KEY);
+      setSeekLocked(raw === '1');
+    } catch {
+      // ignore
+    }
+  }, []);
+
+  const toggleSeekLock = () => {
+    setSeekLocked((prev) => {
+      const next = !prev;
+      try {
+        window.localStorage.setItem(SEEK_LOCK_KEY, next ? '1' : '0');
+      } catch {
+        // ignore
+      }
+      return next;
+    });
+  };
+
+  useEffect(() => {
+    const v = Number.isFinite(volume) ? Math.min(Math.max(volume, 0), 1) : 1;
+    const a = primaryAudioRef.current;
+    const b = secondaryAudioRef.current;
+    if (a) a.volume = v;
+    if (b) b.volume = v;
+  }, [volume, primaryAudioRef, secondaryAudioRef]);
 
   useEffect(() => {
     if (!onProgress) return;
@@ -118,10 +151,38 @@ export function PlaybackBar({
 
         {/* Playback Controls */}
         <div className="flex-1 flex flex-col gap-1.5">
+          {/* Seek Bar */}
+          {currentTrack && (
+            <div className="flex items-center gap-2.5">
+              <span className="text-[11px] text-muted-foreground w-12 text-right tabular-nums">
+                {formatDuration(currentTime)}
+              </span>
+              <Slider
+                value={[currentTime]}
+                max={duration || currentTrack.duration || 0}
+                step={1}
+                disabled={seekLocked}
+                onValueChange={seekLocked ? undefined : handleSeek}
+                onValueCommit={
+                  seekLocked
+                    ? undefined
+                    : (vals) => {
+                        const seconds = vals[0] ?? 0;
+                        if (onSeek) {
+                          onSeek(seconds);
+                        }
+                      }
+                }
+                className="flex-1 h-1.5"
+              />
+              <span className="text-[11px] text-muted-foreground w-12 text-left tabular-nums">
+                {formatDuration(duration || currentTrack.duration || 0)}
+              </span>
+            </div>
+          )}
+
+          {/* Media Buttons (below seek bar) */}
           <div className="flex items-center justify-center gap-1.5">
-            <Button size="sm" variant="ghost" onClick={onPrevious}>
-              <SkipBack className="w-4 h-4" />
-            </Button>
             <Button
               size="lg"
               onClick={handlePlayPause}
@@ -136,47 +197,40 @@ export function PlaybackBar({
             <Button size="sm" variant="ghost" onClick={onNext}>
               <SkipForward className="w-4 h-4" />
             </Button>
+            <Button
+              size="sm"
+              variant="ghost"
+              onClick={toggleSeekLock}
+              className="ml-1"
+              title={seekLocked ? 'Unlock seek (allow changing position)' : 'Lock seek (prevent changing position)'}
+            >
+              {seekLocked ? <LockIcon className="w-4 h-4" /> : <UnlockIcon className="w-4 h-4" />}
+            </Button>
           </div>
-
-          {/* Seek Bar */}
-          {currentTrack && (
-            <div className="flex items-center gap-2.5">
-              <span className="text-[11px] text-muted-foreground w-12 text-right tabular-nums">
-                {formatDuration(currentTime)}
-              </span>
-              <Slider
-                value={[currentTime]}
-                max={duration || currentTrack.duration || 0}
-                step={1}
-                onValueChange={handleSeek}
-                onValueCommit={(vals) => {
-                  const seconds = vals[0] ?? 0;
-                  if (onSeek) {
-                    onSeek(seconds);
-                  }
-                }}
-                className="flex-1 h-1.5"
-              />
-              <span className="text-[11px] text-muted-foreground w-12 text-left tabular-nums">
-                {formatDuration(duration || currentTrack.duration || 0)}
-              </span>
-            </div>
-          )}
         </div>
 
         {/* Additional Controls */}
-        <div className="flex items-center gap-4">
-          {/* Gap between songs */}
-          <div className="flex items-center gap-2">
+        <div className="rounded-md border border-border/60 bg-muted/20 px-3 py-2">
+          <div className="grid grid-cols-[2.25rem,7rem,3rem] items-center gap-x-2 gap-y-2">
             <span className="text-[11px] text-muted-foreground">Gap</span>
             <Slider
               value={[crossfadeSeconds]}
               max={12}
               step={1}
               onValueChange={(vals) => onCrossfadeChange(vals[0] ?? 0)}
-              className="w-24 h-1.5"
+              className="h-1.5"
             />
-            <span className="text-[11px] text-muted-foreground w-6 text-right tabular-nums">{crossfadeSeconds}s</span>
+            <span className="text-[11px] text-muted-foreground text-right tabular-nums">{crossfadeSeconds}s</span>
+
+            <span className="text-[11px] text-muted-foreground">Vol</span>
+            <Slider
+              value={[Math.round(volume * 100)]}
+              max={100}
+              step={1}
+              onValueChange={(vals) => setVolume((vals[0] ?? 100) / 100)}
+              className="h-1.5"
+            />
+            <span className="text-[11px] text-muted-foreground text-right tabular-nums">{Math.round(volume * 100)}%</span>
           </div>
         </div>
       </div>

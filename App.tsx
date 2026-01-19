@@ -1,10 +1,12 @@
 import { useState, useEffect, useRef } from 'react';
+import type React from 'react';
 import { LibraryPanel } from './components/LibraryPanel';
 import { PlaylistManager } from './components/PlaylistManager';
 import { QueuePanel } from './components/QueuePanel';
 import { PlaybackBar } from './components/PlaybackBar';
 import { ThemeToggle } from './components/ThemeToggle';
 import { ResizeHandle } from './components/ResizeHandle';
+import { FloatingQueueDialog, FloatingDialogRect } from './components/FloatingQueueDialog';
 import { SchedulePlaylistDialog, ScheduleConfig } from './components/SchedulePlaylistDialog';
 import { HistoryDialog } from './components/HistoryDialog';
 import { ConfirmDialog } from './components/ConfirmDialog';
@@ -73,6 +75,18 @@ export default function App() {
   const [dismissedScheduleIds, setDismissedScheduleIds] = useState<string[]>([]);
   const [nowIst, setNowIst] = useState<Date | null>(null);
 
+  const [queueDialogOpen, setQueueDialogOpen] = useState(false);
+  const [queueDialogLocked, setQueueDialogLocked] = useState(false);
+  const [selectedQueueItemId, setSelectedQueueItemId] = useState<string | null>(null);
+  const [queueDialogRect, setQueueDialogRect] = useState<FloatingDialogRect>({
+    x: 80,
+    y: 80,
+    width: 420,
+    height: 520,
+  });
+
+  const toggleQueueDialog = () => setQueueDialogOpen((prev) => !prev);
+
   const [playlistNameDialog, setPlaylistNameDialog] = useState<
     | { mode: 'create'; name: string }
     | { mode: 'rename'; playlistId: string; name: string }
@@ -121,7 +135,7 @@ export default function App() {
   };
 
   const leftPanel = useResizable({ initialWidth: 320, minWidth: 250, maxWidth: 500 });
-  const rightPanel = useResizable({ initialWidth: 320, minWidth: 250, maxWidth: 500 });
+  const rightPanel = useResizable({ initialWidth: 320, minWidth: 250, maxWidth: 500, direction: 'rtl' });
 
   const currentQueueItem = currentQueueItemId
     ? queue.find((item) => item.id === currentQueueItemId) || null
@@ -274,10 +288,6 @@ export default function App() {
 
           const firstQueueItemId = newQueue[0]?.id ?? null;
 
-          // Explicit scheduler preemption: when the backend marks a
-          // datetime schedule as fired it tags this event so we always
-          // jump to the new head, even if it happens to be the same
-          // track ID as the one that was already playing.
           if (data.reason === 'schedule-preempt' && firstQueueItemId) {
             const interruptedTrack = currentTrackRef.current;
             if (interruptedTrack) {
@@ -910,6 +920,38 @@ export default function App() {
       toast.error(error.message || 'Failed to remove from queue');
     }
   };
+
+  useEffect(() => {
+    const onKeyDown = (e: KeyboardEvent) => {
+      const target = e.target as HTMLElement | null;
+      const isTypingTarget =
+        !!target &&
+        (target.tagName === 'INPUT' ||
+          target.tagName === 'TEXTAREA' ||
+          (target as any).isContentEditable);
+
+      if (isTypingTarget) return;
+
+      if (e.key === 'q' || e.key === 'Q') {
+        e.preventDefault();
+        toggleQueueDialog();
+        return;
+      }
+      if (e.key === 'Escape') {
+        setQueueDialogOpen(false);
+      }
+
+      if (!queueDialogOpen) return;
+      if (queueDialogLocked) return;
+      if (!selectedQueueItemId) return;
+      if (e.key === 'Delete' || e.key === 'Backspace') {
+        e.preventDefault();
+        handleRemoveFromQueue(selectedQueueItemId);
+      }
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [queueDialogLocked, queueDialogOpen, selectedQueueItemId, toggleQueueDialog, handleRemoveFromQueue]);
 
   const handleReorderQueue = async (items: QueueItem[]) => {
     const previousQueue = queue;
@@ -1998,12 +2040,21 @@ export default function App() {
             <Clock className="w-4 h-4" />
             <span>History</span>
           </Button>
+          <Button
+            variant={queueDialogOpen ? 'default' : 'ghost'}
+            size="sm"
+            className={queueDialogOpen ? 'text-xs' : 'text-xs text-muted-foreground hover:text-foreground'}
+            onClick={toggleQueueDialog}
+            title="Queue (Q)"
+          >
+            Queue
+          </Button>
           <ThemeToggle theme={theme} onToggle={toggleTheme} />
         </div>
       </div>
 
-      {/* Main three-panel layout: Library | Playlists | Queue */}
-      <div className="flex flex-1 min-h-0">
+      {/* Main two-panel layout: Library | Playlists */}
+      <div className="flex flex-1 min-h-0 pb-20">
         {/* Library (left) */}
         <div className="flex-shrink-0 h-full" style={{ width: leftPanel.width }}>
           <ErrorBoundary
@@ -2071,52 +2122,71 @@ export default function App() {
             />
           </ErrorBoundary>
         </div>
-
-        {/* Resize handle between Playlists and Queue */}
-        <ResizeHandle
-          onMouseDown={rightPanel.handleMouseDown}
-          isResizing={rightPanel.isResizing}
-        />
-
-        {/* Queue (right) */}
-        <div className="flex-shrink-0 h-full" style={{ width: rightPanel.width }}>
-          <ErrorBoundary
-            title="Queue"
-            resetKeys={[queue.length, currentQueueItemId]}
-            onError={(error) => {
-              console.error('Queue panel crashed', error);
-              toast.error('Queue panel crashed');
-            }}
-          >
-            <QueuePanel
-              queue={queue}
-              currentQueueItemId={currentQueueItemId}
-              onRemoveFromQueue={handleRemoveFromQueue}
-              onReorderQueue={handleReorderQueue}
-              timing={timing}
-              now={nowIst}
-              playlists={playlists}
-              onAddQueueItemToPlaylist={handleAddQueueItemToPlaylist}
-            />
-          </ErrorBoundary>
-        </div>
       </div>
 
+      <FloatingQueueDialog
+        open={queueDialogOpen}
+        title="Queue"
+        subtitle={`${queue.length} tracks`}
+        rect={queueDialogRect}
+        minWidth={320}
+        minHeight={360}
+        locked={queueDialogLocked}
+        onClose={() => setQueueDialogOpen(false)}
+        onClear={() => {
+          void queueAPI
+            .clear()
+            .then(() => setQueue([]))
+            .catch((err) => {
+              console.error('Failed to clear queue', err);
+              toast.error('Failed to clear queue');
+            });
+        }}
+        onToggleLocked={() => setQueueDialogLocked((prev) => !prev)}
+        onRectChange={setQueueDialogRect}
+      >
+        <ErrorBoundary
+          title="Queue"
+          resetKeys={[queue.length, currentQueueItemId, queueDialogLocked]}
+          onError={(error) => {
+            console.error('Queue panel crashed', error);
+            toast.error('Queue panel crashed');
+          }}
+        >
+          <QueuePanel
+            queue={queue}
+            currentQueueItemId={currentQueueItemId}
+            onRemoveFromQueue={handleRemoveFromQueue}
+            onReorderQueue={handleReorderQueue}
+            timing={timing}
+            now={nowIst}
+            playlists={playlists}
+            onAddQueueItemToPlaylist={handleAddQueueItemToPlaylist}
+            locked={queueDialogLocked}
+            selectedQueueItemId={selectedQueueItemId}
+            onSelectQueueItem={setSelectedQueueItemId}
+            showHeader={false}
+          />
+        </ErrorBoundary>
+      </FloatingQueueDialog>
+
       {/* Bottom Playback Bar */}
-      <PlaybackBar
-        currentTrack={currentTrack}
-        nextTrack={nextTrack}
-        isPlaying={isPlaying}
-        onPlayPause={handlePlayPause}
-        onNext={handleNext}
-        onPrevious={handlePrevious}
-        isLive={isLive}
-        crossfadeSeconds={crossfadeSeconds}
-        onCrossfadeChange={setCrossfadeSeconds}
-        audioDevices={audioDevices}
-        onSeek={handleSeekWithTiming}
-        onProgress={handlePlaybackProgress}
-      />
+      <div className="fixed left-0 right-0 bottom-0 z-50">
+        <PlaybackBar
+          currentTrack={currentTrack}
+          nextTrack={nextTrack}
+          isPlaying={isPlaying}
+          onPlayPause={handlePlayPause}
+          onNext={handleNext}
+          onPrevious={handlePrevious}
+          isLive={isLive}
+          crossfadeSeconds={crossfadeSeconds}
+          onCrossfadeChange={setCrossfadeSeconds}
+          audioDevices={audioDevices}
+          onSeek={handleSeekWithTiming}
+          onProgress={handlePlaybackProgress}
+        />
+      </div>
 
       <Toaster position="bottom-right" />
 

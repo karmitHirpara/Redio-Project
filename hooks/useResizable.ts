@@ -4,9 +4,10 @@ interface UseResizableOptions {
   initialWidth: number;
   minWidth: number;
   maxWidth: number;
+  direction?: 'ltr' | 'rtl';
 }
 
-export function useResizable({ initialWidth, minWidth, maxWidth }: UseResizableOptions) {
+export function useResizable({ initialWidth, minWidth, maxWidth, direction = 'ltr' }: UseResizableOptions) {
   const [width, setWidth] = useState(initialWidth);
   const [isResizing, setIsResizing] = useState(false);
   const startXRef = useRef(0);
@@ -24,7 +25,8 @@ export function useResizable({ initialWidth, minWidth, maxWidth }: UseResizableO
 
     const handleMouseMove = (e: MouseEvent) => {
       const delta = e.clientX - startXRef.current;
-      const newWidth = Math.min(Math.max(startWidthRef.current + delta, minWidth), maxWidth);
+      const signedDelta = direction === 'rtl' ? -delta : delta;
+      const newWidth = Math.min(Math.max(startWidthRef.current + signedDelta, minWidth), maxWidth);
       setWidth(newWidth);
     };
 
@@ -39,7 +41,7 @@ export function useResizable({ initialWidth, minWidth, maxWidth }: UseResizableO
       document.removeEventListener('mousemove', handleMouseMove);
       document.removeEventListener('mouseup', handleMouseUp);
     };
-  }, [isResizing, minWidth, maxWidth]);
+  }, [isResizing, minWidth, maxWidth, direction]);
 
   return { width, isResizing, handleMouseDown };
 }

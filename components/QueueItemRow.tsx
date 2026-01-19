@@ -15,6 +15,8 @@ interface QueueItemRowProps {
   isPlaying: boolean;
   isNext: boolean;
   onRemoveFromQueue: (id: string) => void;
+  onSelect: (id: string) => void;
+  selected: boolean;
   index: number;
   onDragStart: (index: number) => void;
   onDragOverRow: (event: React.DragEvent<HTMLDivElement>, index: number) => void;
@@ -25,6 +27,7 @@ interface QueueItemRowProps {
   reduceMotion: boolean;
   playlists: Playlist[];
   onAddToPlaylist: (item: QueueItem, playlistId: string) => void;
+  locked?: boolean;
 }
 
 export const QueueItemRow = memo(function QueueItemRow({
@@ -32,6 +35,8 @@ export const QueueItemRow = memo(function QueueItemRow({
   isPlaying,
   isNext,
   onRemoveFromQueue,
+  onSelect,
+  selected,
   index,
   onDragStart,
   onDragOverRow,
@@ -40,6 +45,7 @@ export const QueueItemRow = memo(function QueueItemRow({
   endTime,
   dropIndex,
   reduceMotion,
+  locked = false,
 }: QueueItemRowProps) {
   const formatClock = (d?: Date) => {
     if (!d) return '';
@@ -60,7 +66,7 @@ export const QueueItemRow = memo(function QueueItemRow({
   };
   return (
     <ContextMenu>
-      <ContextMenuTrigger>
+      <ContextMenuTrigger disabled={locked}>
         <motion.div
           layout
           initial={reduceMotion ? false : { opacity: 0, y: -6 }}
@@ -68,12 +74,14 @@ export const QueueItemRow = memo(function QueueItemRow({
           exit={reduceMotion ? undefined : { opacity: 0, y: -6 }}
           transition={reduceMotion ? undefined : { duration: 0.18, ease: 'easeOut' }}
           whileTap={reduceMotion ? undefined : { scale: 0.99 }}
-          draggable={!isPlaying}
+          draggable={!locked && !isPlaying}
           className={cn(
             "group flex items-center gap-1 px-2 py-0.5 rounded-md transition-colors cursor-pointer text-xs relative",
             "hover:bg-accent/25",
             isPlaying && "bg-primary/10 border border-primary/30 shadow-sm",
             isNext && !isPlaying && "bg-accent/20",
+            locked && "opacity-80",
+            selected && !isPlaying && "bg-accent/30 ring-1 ring-accent/70",
             // Make the active drop target stand out more than simple hover
             (dropIndex === index || dropIndex === index + 1) &&
               "bg-accent/30 ring-1 ring-accent/60 shadow-sm",
@@ -83,6 +91,10 @@ export const QueueItemRow = memo(function QueueItemRow({
               "after:absolute after:left-0 before:right-0 after:bottom-0 after:h-px after:bg-accent"
           )}
           onDragStartCapture={(e: React.DragEvent<HTMLDivElement>) => {
+            if (locked) {
+              e.preventDefault();
+              return;
+            }
             if (isPlaying) {
               e.preventDefault();
               return;
@@ -100,6 +112,10 @@ export const QueueItemRow = memo(function QueueItemRow({
           }}
           onDragOverCapture={(e: React.DragEvent<HTMLDivElement>) => onDragOverRow(e, index)}
           onDragEndCapture={onDragEnd}
+          onClick={() => {
+            if (locked) return;
+            onSelect(item.id);
+          }}
         >
           <div className="w-5 text-[10px] text-foreground/70 text-center flex-shrink-0">
             {index + 1}
@@ -136,22 +152,26 @@ export const QueueItemRow = memo(function QueueItemRow({
             </div>
           </div>
 
-          <button
-            onClick={(e) => {
-              e.stopPropagation();
-              onRemoveFromQueue(item.id);
-            }}
-            className="opacity-0 group-hover:opacity-100 transition-opacity p-1 hover:bg-destructive/10 hover:text-destructive rounded"
-          >
-            <X className="w-4 h-4" />
-          </button>
+          {!locked && (
+            <button
+              onClick={(e) => {
+                e.stopPropagation();
+                onRemoveFromQueue(item.id);
+              }}
+              className="opacity-0 group-hover:opacity-100 transition-opacity p-1 hover:bg-destructive/10 hover:text-destructive rounded"
+            >
+              <X className="w-4 h-4" />
+            </button>
+          )}
         </motion.div>
       </ContextMenuTrigger>
-      <ContextMenuContent>
-        <ContextMenuItem onClick={() => onRemoveFromQueue(item.id)} className="text-destructive">
-          Remove from Queue
-        </ContextMenuItem>
-      </ContextMenuContent>
+      {!locked && (
+        <ContextMenuContent>
+          <ContextMenuItem onClick={() => onRemoveFromQueue(item.id)} className="text-destructive">
+            Remove from Queue
+          </ContextMenuItem>
+        </ContextMenuContent>
+      )}
     </ContextMenu>
   );
 });
