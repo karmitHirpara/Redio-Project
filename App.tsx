@@ -1,15 +1,17 @@
 import { useState, useEffect, useRef } from 'react';
+import type React from 'react';
 import { LibraryPanel } from './components/LibraryPanel';
 import { PlaylistManager } from './components/PlaylistManager';
 import { QueuePanel } from './components/QueuePanel';
 import { PlaybackBar } from './components/PlaybackBar';
 import { ThemeToggle } from './components/ThemeToggle';
 import { ResizeHandle } from './components/ResizeHandle';
+import { FloatingQueueDialog, FloatingDialogRect } from './components/FloatingQueueDialog';
 import { SchedulePlaylistDialog, ScheduleConfig } from './components/SchedulePlaylistDialog';
 import { HistoryDialog } from './components/HistoryDialog';
 import { ConfirmDialog } from './components/ConfirmDialog';
 import { ErrorBoundary } from './components/ErrorBoundary';
-import { Clock } from 'lucide-react';
+import { Clock, ListMusic, ListOrdered, Music2, Speaker } from 'lucide-react';
 import { Button } from './components/ui/button';
 import { useTheme } from './hooks/useTheme';
 import { useResizable } from './hooks/useResizable';
@@ -73,6 +75,18 @@ export default function App() {
   const [dismissedScheduleIds, setDismissedScheduleIds] = useState<string[]>([]);
   const [nowIst, setNowIst] = useState<Date | null>(null);
 
+  const [queueDialogOpen, setQueueDialogOpen] = useState(false);
+  const [queueDialogLocked, setQueueDialogLocked] = useState(false);
+  const [selectedQueueItemId, setSelectedQueueItemId] = useState<string | null>(null);
+  const [queueDialogRect, setQueueDialogRect] = useState<FloatingDialogRect>({
+    x: 80,
+    y: 80,
+    width: 420,
+    height: 520,
+  });
+
+  const toggleQueueDialog = () => setQueueDialogOpen((prev) => !prev);
+
   const [playlistNameDialog, setPlaylistNameDialog] = useState<
     | { mode: 'create'; name: string }
     | { mode: 'rename'; playlistId: string; name: string }
@@ -121,7 +135,7 @@ export default function App() {
   };
 
   const leftPanel = useResizable({ initialWidth: 320, minWidth: 250, maxWidth: 500 });
-  const rightPanel = useResizable({ initialWidth: 320, minWidth: 250, maxWidth: 500 });
+  const rightPanel = useResizable({ initialWidth: 320, minWidth: 250, maxWidth: 500, direction: 'rtl' });
 
   const currentQueueItem = currentQueueItemId
     ? queue.find((item) => item.id === currentQueueItemId) || null
@@ -274,10 +288,6 @@ export default function App() {
 
           const firstQueueItemId = newQueue[0]?.id ?? null;
 
-          // Explicit scheduler preemption: when the backend marks a
-          // datetime schedule as fired it tags this event so we always
-          // jump to the new head, even if it happens to be the same
-          // track ID as the one that was already playing.
           if (data.reason === 'schedule-preempt' && firstQueueItemId) {
             const interruptedTrack = currentTrackRef.current;
             if (interruptedTrack) {
@@ -910,6 +920,38 @@ export default function App() {
       toast.error(error.message || 'Failed to remove from queue');
     }
   };
+
+  useEffect(() => {
+    const onKeyDown = (e: KeyboardEvent) => {
+      const target = e.target as HTMLElement | null;
+      const isTypingTarget =
+        !!target &&
+        (target.tagName === 'INPUT' ||
+          target.tagName === 'TEXTAREA' ||
+          (target as any).isContentEditable);
+
+      if (isTypingTarget) return;
+
+      if (e.key === 'q' || e.key === 'Q') {
+        e.preventDefault();
+        toggleQueueDialog();
+        return;
+      }
+      if (e.key === 'Escape') {
+        setQueueDialogOpen(false);
+      }
+
+      if (!queueDialogOpen) return;
+      if (queueDialogLocked) return;
+      if (!selectedQueueItemId) return;
+      if (e.key === 'Delete' || e.key === 'Backspace') {
+        e.preventDefault();
+        handleRemoveFromQueue(selectedQueueItemId);
+      }
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [queueDialogLocked, queueDialogOpen, selectedQueueItemId, toggleQueueDialog, handleRemoveFromQueue]);
 
   const handleReorderQueue = async (items: QueueItem[]) => {
     const previousQueue = queue;
@@ -1952,23 +1994,51 @@ export default function App() {
   return (
     <div className="h-screen flex flex-col">
       {/* Top bar */}
-      <div className="flex items-center px-4 py-2 border-b border-border text-[11px] text-muted-foreground">
-        <div className="flex-none font-medium text-foreground/80">
-          {tracks.length} tracks · {playlists.length} playlists · {queue.length} in queue
+      <div className="flex items-center justify-between px-4 py-2 border-b border-border/70 bg-background/70 backdrop-blur text-[11px] text-muted-foreground">
+        {/* Left: Project statistics */}
+        <div className="flex items-center gap-2 flex-none">
+          <div className="flex items-center gap-3 px-3 py-1.5 rounded-md border border-border/70 bg-muted/20 text-foreground/80">
+            <div className="flex items-center gap-1">
+              <Music2 className="w-3.5 h-3.5 text-muted-foreground" />
+              <span className="font-medium">{tracks.length}</span>
+              <span className="text-muted-foreground">Tracks</span>
+            </div>
+            <div className="w-px h-4 bg-border/70" />
+            <div className="flex items-center gap-1">
+              <ListMusic className="w-3.5 h-3.5 text-muted-foreground" />
+              <span className="font-medium">{playlists.length}</span>
+              <span className="text-muted-foreground">Playlists</span>
+            </div>
+            <div className="w-px h-4 bg-border/70" />
+            <div className="flex items-center gap-1">
+              <ListOrdered className="w-3.5 h-3.5 text-muted-foreground" />
+              <span className="font-medium">{queue.length}</span>
+              <span className="text-muted-foreground">Queue</span>
+            </div>
+          </div>
         </div>
-        <div className="flex-1 text-center font-mono text-[11px] tracking-wide text-foreground/80">
-          {formatIstTime(nowIst)}
+
+        {/* Center: Clock */}
+        <div className="flex-1 flex justify-center">
+          <div className="px-3 py-1.5 rounded-md border border-border/70 bg-muted/10 font-mono text-[11px] tracking-wide text-foreground/80">
+            {formatIstTime(nowIst)}
+          </div>
         </div>
+
+        {/* Right: Actions */}
         <div className="flex items-center gap-2 flex-none">
           {headerSupportsOutputSelection && (
-            <div className="hidden sm:flex flex-col items-end gap-0.5 max-w-[9rem]">
-              <div className="flex items-center gap-1">
-                <span className="text-[11px] text-muted-foreground whitespace-nowrap">Output</span>
-                <Select
-                  value={headerSelectedDeviceId}
-                  onValueChange={(value) => setHeaderSelectedDeviceId(value)}
-                >
-                  <SelectTrigger size="sm" className="h-7 w-[6.5rem] text-[11px] truncate">
+            <div className="hidden sm:flex flex-col items-end gap-0.5 px-2 py-1 rounded-md border border-border/70 bg-muted/10">
+              <div className="flex items-center gap-2">
+                <div className="h-8 px-2 rounded-md bg-muted/10 flex items-center gap-1 text-[11px] leading-none text-muted-foreground whitespace-nowrap">
+                  <Speaker className="w-4 h-4" />
+                  <span>Output</span>
+                </div>
+                <Select value={headerSelectedDeviceId} onValueChange={(value) => setHeaderSelectedDeviceId(value)}>
+                  <SelectTrigger
+                    size="sm"
+                    className="h-8 w-[7.5rem] text-[11px] truncate leading-none bg-muted/20 hover:bg-muted/30 border border-border/70"
+                  >
                     <SelectValue placeholder="Default" />
                   </SelectTrigger>
                   <SelectContent>
@@ -1981,29 +2051,52 @@ export default function App() {
                   </SelectContent>
                 </Select>
               </div>
-              {(headerOutputError || headerFallbackToDefault) && (
-                <div className="text-[10px] leading-tight text-muted-foreground max-w-[9rem] text-right truncate">
-                  {headerOutputError ? headerOutputError : headerFallbackToDefault ? 'Output device missing; using default' : ''}
+              {headerSelectedDeviceId !== 'default' && (headerOutputError || headerFallbackToDefault) && (
+                <div className="text-[10px] leading-tight text-muted-foreground max-w-[10.5rem] text-right truncate">
+                  {headerOutputError
+                    ? headerOutputError
+                    : headerFallbackToDefault
+                      ? 'Output device missing; using default'
+                      : ''}
                 </div>
               )}
             </div>
           )}
-          <Button
-            variant="ghost"
-            size="sm"
-            className="gap-1 text-xs text-muted-foreground hover:text-foreground"
-            onClick={() => setHistoryOpen(true)}
-            title="History"
-          >
-            <Clock className="w-4 h-4" />
-            <span>History</span>
-          </Button>
-          <ThemeToggle theme={theme} onToggle={toggleTheme} />
+
+          <div className="flex items-center gap-2 px-2 py-1 rounded-md border border-border/70 bg-muted/10">
+            <Button
+              variant="ghost"
+              size="sm"
+              className="gap-2 text-xs bg-muted/10 hover:bg-muted/20 text-foreground/80 hover:text-foreground border border-transparent hover:border-border/60"
+              onClick={() => setHistoryOpen(true)}
+              title="History"
+            >
+              <Clock className="w-4 h-4" />
+              <span>History</span>
+            </Button>
+
+            <Button
+              variant={queueDialogOpen ? 'default' : 'ghost'}
+              size="sm"
+              className={
+                queueDialogOpen
+                  ? 'gap-2 text-xs'
+                  : 'gap-2 text-xs bg-muted/10 hover:bg-muted/20 text-foreground/80 hover:text-foreground border border-transparent hover:border-border/60'
+              }
+              onClick={toggleQueueDialog}
+              title="Queue (Q)"
+            >
+              <ListOrdered className="w-4 h-4" />
+              <span>Queue</span>
+            </Button>
+
+            <ThemeToggle theme={theme} onToggle={toggleTheme} />
+          </div>
         </div>
       </div>
 
-      {/* Main three-panel layout: Library | Playlists | Queue */}
-      <div className="flex flex-1 min-h-0">
+      {/* Main two-panel layout: Library | Playlists */}
+      <div className="flex flex-1 min-h-0 pb-20">
         {/* Library (left) */}
         <div className="flex-shrink-0 h-full" style={{ width: leftPanel.width }}>
           <ErrorBoundary
@@ -2071,52 +2164,62 @@ export default function App() {
             />
           </ErrorBoundary>
         </div>
-
-        {/* Resize handle between Playlists and Queue */}
-        <ResizeHandle
-          onMouseDown={rightPanel.handleMouseDown}
-          isResizing={rightPanel.isResizing}
-        />
-
-        {/* Queue (right) */}
-        <div className="flex-shrink-0 h-full" style={{ width: rightPanel.width }}>
-          <ErrorBoundary
-            title="Queue"
-            resetKeys={[queue.length, currentQueueItemId]}
-            onError={(error) => {
-              console.error('Queue panel crashed', error);
-              toast.error('Queue panel crashed');
-            }}
-          >
-            <QueuePanel
-              queue={queue}
-              currentQueueItemId={currentQueueItemId}
-              onRemoveFromQueue={handleRemoveFromQueue}
-              onReorderQueue={handleReorderQueue}
-              timing={timing}
-              now={nowIst}
-              playlists={playlists}
-              onAddQueueItemToPlaylist={handleAddQueueItemToPlaylist}
-            />
-          </ErrorBoundary>
-        </div>
       </div>
 
+      <FloatingQueueDialog
+        open={queueDialogOpen}
+        title="Queue"
+        subtitle={`${queue.length} tracks`}
+        rect={queueDialogRect}
+        minWidth={320}
+        minHeight={360}
+        locked={queueDialogLocked}
+        onClose={() => setQueueDialogOpen(false)}
+        onToggleLocked={() => setQueueDialogLocked((prev) => !prev)}
+        onRectChange={setQueueDialogRect}
+      >
+        <ErrorBoundary
+          title="Queue"
+          resetKeys={[queue.length, currentQueueItemId, queueDialogLocked]}
+          onError={(error) => {
+            console.error('Queue panel crashed', error);
+            toast.error('Queue panel crashed');
+          }}
+        >
+          <QueuePanel
+            queue={queue}
+            currentQueueItemId={currentQueueItemId}
+            onRemoveFromQueue={handleRemoveFromQueue}
+            onReorderQueue={handleReorderQueue}
+            timing={timing}
+            now={nowIst}
+            playlists={playlists}
+            onAddQueueItemToPlaylist={handleAddQueueItemToPlaylist}
+            locked={queueDialogLocked}
+            selectedQueueItemId={selectedQueueItemId}
+            onSelectQueueItem={setSelectedQueueItemId}
+            showHeader={false}
+          />
+        </ErrorBoundary>
+      </FloatingQueueDialog>
+
       {/* Bottom Playback Bar */}
-      <PlaybackBar
-        currentTrack={currentTrack}
-        nextTrack={nextTrack}
-        isPlaying={isPlaying}
-        onPlayPause={handlePlayPause}
-        onNext={handleNext}
-        onPrevious={handlePrevious}
-        isLive={isLive}
-        crossfadeSeconds={crossfadeSeconds}
-        onCrossfadeChange={setCrossfadeSeconds}
-        audioDevices={audioDevices}
-        onSeek={handleSeekWithTiming}
-        onProgress={handlePlaybackProgress}
-      />
+      <div className="fixed left-0 right-0 bottom-0 z-50">
+        <PlaybackBar
+          currentTrack={currentTrack}
+          nextTrack={nextTrack}
+          isPlaying={isPlaying}
+          onPlayPause={handlePlayPause}
+          onNext={handleNext}
+          onPrevious={handlePrevious}
+          isLive={isLive}
+          crossfadeSeconds={crossfadeSeconds}
+          onCrossfadeChange={setCrossfadeSeconds}
+          audioDevices={audioDevices}
+          onSeek={handleSeekWithTiming}
+          onProgress={handlePlaybackProgress}
+        />
+      </div>
 
       <Toaster position="bottom-right" />
 

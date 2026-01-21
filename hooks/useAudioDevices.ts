@@ -23,6 +23,23 @@ const STORAGE_KEY = 'radio.selectedOutputDevice';
 // user grants a media permission.
 let hasRequestedAudioPermission = false;
 
+const normalizeDeviceLabel = (label: string) => {
+  let next = (label || '').trim();
+  next = next.replace(/^default\s*-\s*/i, '');
+  next = next.replace(/^communications\s*-\s*/i, '');
+  next = next.replace(/\s+/g, ' ');
+  return next;
+};
+
+const isNoiseOutputDevice = (label: string) => {
+  const l = (label || '').toLowerCase();
+  // Common Windows noise devices that clutter output selection in this app.
+  // These are usually HDMI/Display sinks or OS duplicates.
+  if (l.includes('display audio')) return true;
+  if (l.includes('intel') && l.includes('display')) return true;
+  return false;
+};
+
 export function useAudioDevices(): UseAudioDevicesResult {
   const [devices, setDevices] = useState<AudioOutputDevice[]>([]);
   const [selectedDeviceId, setSelectedDeviceId] = useState<string>('default');
@@ -53,8 +70,6 @@ export function useAudioDevices(): UseAudioDevicesResult {
     try {
       let list = await navigator.mediaDevices.enumerateDevices();
 
-      console.log('enumerateDevices list:', list);
-
       // If all devices are anonymous (no labels and empty ids), try to request
       // audio permission once to unlock richer device information, then
       // re-enumerate.
@@ -64,7 +79,6 @@ export function useAudioDevices(): UseAudioDevicesResult {
           hasRequestedAudioPermission = true;
           await navigator.mediaDevices.getUserMedia({ audio: true });
           list = await navigator.mediaDevices.enumerateDevices();
-          console.log('enumerateDevices list after permission:', list);
         } catch (permErr: any) {
           // If permission is denied, we simply fall back to anonymous devices
           // and rely on the OS-level "System default" route.
@@ -77,14 +91,20 @@ export function useAudioDevices(): UseAudioDevicesResult {
         // id "default" in the UI so we do not collapse everything into the
         // same sink.
         .filter((d) => d.kind === 'audiooutput' && d.deviceId)
-        .map((d) => ({ deviceId: d.deviceId, label: d.label || 'Audio output' }));
+        .map((d) => ({ deviceId: d.deviceId, label: d.label || 'Audio output' }))
+        .map((d) => ({ ...d, label: normalizeDeviceLabel(d.label) }))
+        .filter((d) => d.label)
+        .filter((d) => !isNoiseOutputDevice(d.label));
 
-      const unique: Record<string, AudioOutputDevice> = {};
-      outputs.forEach((d) => {
-        unique[d.deviceId] = d;
-      });
+      // Deduplicate by (normalized) label first (to collapse Windows “Default/Communications”
+      // variants) while still keeping stable deviceIds.
+      const byLabel: Record<string, AudioOutputDevice> = {};
+      for (const d of outputs) {
+        const key = d.label.toLowerCase();
+        if (!byLabel[key]) byLabel[key] = d;
+      }
 
-      const normalized = Object.values(unique);
+      const normalized = Object.values(byLabel);
       setDevices(normalized);
 
       setSelectedDeviceId((prev) => {

@@ -6,6 +6,7 @@ import { Input } from './ui/input';
 import { Playlist, Track } from '../types';
 import { TrackRow } from './TrackRow';
 import { formatDuration } from '../lib/utils';
+import { ConfirmDialog } from './ConfirmDialog';
 
 interface PlaylistEditorProps {
   playlist: Playlist;
@@ -38,7 +39,9 @@ export function PlaylistEditor({
 }: PlaylistEditorProps) {
   const reduceMotion = useReducedMotion() ?? false;
   const [searchQuery, setSearchQuery] = useState('');
+  const [queueConfirmOpen, setQueueConfirmOpen] = useState(false);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const listRef = useRef<HTMLDivElement | null>(null);
   const [dragIndex, setDragIndex] = useState<number | null>(null);
   const [dropIndex, setDropIndex] = useState<number | null>(null);
   const dragStartOrderRef = useRef<Track[] | null>(null);
@@ -148,6 +151,19 @@ export function PlaylistEditor({
 
   return (
     <div className="h-full flex flex-col bg-background">
+      <ConfirmDialog
+        open={queueConfirmOpen}
+        title="Queue this playlist?"
+        description="This will add all tracks from this playlist to the queue."
+        confirmLabel="Queue"
+        cancelLabel="Cancel"
+        onConfirm={() => {
+          setQueueConfirmOpen(false);
+          onQueuePlaylist();
+        }}
+        onCancel={() => setQueueConfirmOpen(false)}
+      />
+
       {/* Header */}
       <div className="p-4 border-b border-border space-y-3">
         <div className="flex items-center justify-between">
@@ -163,7 +179,7 @@ export function PlaylistEditor({
               size="sm"
               variant="secondary"
               disabled={playlist.tracks.length === 0}
-              onClick={onQueuePlaylist}
+              onClick={() => setQueueConfirmOpen(true)}
             >
               Queue
             </Button>
@@ -175,12 +191,12 @@ export function PlaylistEditor({
 
         <div className="flex items-center gap-2">
           <div className="relative flex-1">
-            <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-muted-foreground" />
+            <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-500 dark:text-muted-foreground" />
             <Input 
               placeholder="Search in playlist..."
               value={searchQuery}
               onChange={(e) => setSearchQuery(e.target.value)}
-              className="pl-9"
+              className="pl-9 text-slate-900 dark:text-foreground placeholder:text-slate-500 dark:placeholder:text-muted-foreground"
             />
           </div>
           <Button

@@ -1,6 +1,6 @@
 import sqlite3 from 'sqlite3';
 import { fileURLToPath } from 'url';
-import { dirname, join } from 'path';
+import path, { dirname, join } from 'path';
 import fs from 'fs';
 import dotenv from 'dotenv';
 
@@ -13,7 +13,7 @@ const __dirname = dirname(__filename);
 // Electron main process for packaged builds), use it directly; otherwise
 // resolve it relative to the server root for dev/server usage.
 const rawDbPath = process.env.DATABASE_PATH || 'database.sqlite';
-const dbPath = rawDbPath.startsWith('/')
+const dbPath = path.isAbsolute(rawDbPath)
   ? rawDbPath
   : join(dirname(__dirname), rawDbPath);
 

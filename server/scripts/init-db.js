@@ -1,6 +1,6 @@
 import sqlite3 from 'sqlite3';
 import { fileURLToPath } from 'url';
-import { dirname, join } from 'path';
+import path, { dirname, join } from 'path';
 import dotenv from 'dotenv';
 import fs from 'fs';
 
@@ -9,7 +9,7 @@ dotenv.config();
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 const rawDbPath = process.env.DATABASE_PATH || 'database.sqlite';
-const dbPath = rawDbPath.startsWith('/') ? rawDbPath : join(dirname(__dirname), rawDbPath);
+const dbPath = path.isAbsolute(rawDbPath) ? rawDbPath : join(dirname(__dirname), rawDbPath);
 
 const dbDir = dirname(dbPath);
 if (!fs.existsSync(dbDir)) {

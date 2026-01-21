@@ -15,6 +15,10 @@ interface QueuePanelProps {
   now?: Date | null;
   playlists: Playlist[];
   onAddQueueItemToPlaylist: (item: QueueItem, playlistId: string) => void;
+  locked?: boolean;
+  selectedQueueItemId?: string | null;
+  onSelectQueueItem?: (id: string) => void;
+  showHeader?: boolean;
 }
 
 export function QueuePanel({
@@ -26,6 +30,10 @@ export function QueuePanel({
   now,
   playlists,
   onAddQueueItemToPlaylist,
+  locked = false,
+  selectedQueueItemId = null,
+  onSelectQueueItem,
+  showHeader = true,
 }: QueuePanelProps) {
   const [dragIndex, setDragIndex] = useState<number | null>(null);
   const [dropIndex, setDropIndex] = useState<number | null>(null);
@@ -37,6 +45,7 @@ export function QueuePanel({
     : -1;
 
   const handleDragStart = (index: number) => {
+    if (locked) return;
     setDragIndex(index);
     setDropIndex(index);
     // Capture the original queue order at drag start
@@ -53,6 +62,7 @@ export function QueuePanel({
   }, [timing?.queueTimings]);
 
   const handleDragOverRow = (event: React.DragEvent<HTMLDivElement>, index: number) => {
+    if (locked) return;
     if (dragIndex === null) return;
     event.preventDefault();
 
@@ -72,6 +82,12 @@ export function QueuePanel({
   };
 
   const handleDragEnd = () => {
+    if (locked) {
+      setDragIndex(null);
+      setDropIndex(null);
+      dragStartOrderRef.current = null;
+      return;
+    }
     const original = dragStartOrderRef.current;
     if (dragIndex === null || dropIndex === null || !original) {
       setDragIndex(null);
@@ -110,17 +126,16 @@ export function QueuePanel({
   };
 
   return (
-    <div className="h-full flex flex-col bg-background">
-      {/* Header */}
-      <div className="p-4 border-b border-border">
-        <h2 className="flex items-center gap-2 text-sm font-semibold tracking-tight text-foreground">
-          <Radio className="w-4 h-4" />
-          Queue
-        </h2>
-        <p className="text-[11px] text-muted-foreground mt-1">
-          {queue.length} tracks
-        </p>
-      </div>
+    <div className="h-full flex flex-col bg-transparent">
+      {showHeader && (
+        <div className="p-4 border-b border-border">
+          <h2 className="flex items-center gap-2 text-sm font-semibold tracking-tight text-foreground">
+            <Radio className="w-4 h-4" />
+            Queue
+          </h2>
+          <p className="text-[11px] text-muted-foreground mt-1">{queue.length} tracks</p>
+        </div>
+      )}
 
       {/* Queue List */}
       <div className="flex-1 overflow-y-auto p-2 scroll-thin">
@@ -145,6 +160,11 @@ export function QueuePanel({
                   isPlaying={item.id === currentQueueItemId}
                   isNext={index === 0 && item.id !== currentQueueItemId}
                   onRemoveFromQueue={onRemoveFromQueue}
+                  onSelect={(id) => {
+                    if (locked) return;
+                    if (onSelectQueueItem) onSelectQueueItem(id);
+                  }}
+                  selected={Boolean(selectedQueueItemId && item.id === selectedQueueItemId)}
                   index={index}
                   onDragStart={handleDragStart}
                   onDragOverRow={handleDragOverRow}
@@ -155,6 +175,7 @@ export function QueuePanel({
                   playlists={playlists}
                   onAddToPlaylist={onAddQueueItemToPlaylist}
                   reduceMotion={reduceMotion}
+                  locked={locked}
                 />
               );
             })}

@@ -9,12 +9,18 @@ export function ResizeHandle({ onMouseDown, isResizing }: ResizeHandleProps) {
   return (
     <div
       className={cn(
-        "w-1 bg-border hover:bg-primary/50 cursor-col-resize transition-colors relative group",
-        isResizing && "bg-primary"
+        "w-3 cursor-col-resize transition-colors relative group flex items-stretch justify-center",
+        isResizing && "bg-primary/10"
       )}
       onMouseDown={onMouseDown}
     >
-      <div className="absolute inset-y-0 -left-1 -right-1" />
+      <div
+        className={cn(
+          "w-px my-2 rounded-full bg-border/80 group-hover:bg-primary/50 transition-colors",
+          isResizing && "bg-primary"
+        )}
+      />
+      <div className="absolute inset-y-0 left-0 right-0" />
     </div>
   );
 }

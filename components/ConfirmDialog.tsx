@@ -1,5 +1,6 @@
 import { Button } from './ui/button';
 import { AnimatePresence, motion, useReducedMotion } from 'framer-motion';
+import { useEffect } from 'react';
 
 interface ConfirmDialogProps {
   open: boolean;
@@ -22,6 +23,18 @@ export function ConfirmDialog({
 }: ConfirmDialogProps) {
   const reduceMotion = useReducedMotion() ?? false;
 
+  useEffect(() => {
+    if (!open) return;
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        e.preventDefault();
+        onCancel();
+      }
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [open, onCancel]);
+
   return (
     <AnimatePresence>
       {open && (
@@ -31,6 +44,9 @@ export function ConfirmDialog({
           animate={reduceMotion ? undefined : { opacity: 1 }}
           exit={reduceMotion ? undefined : { opacity: 0 }}
           transition={reduceMotion ? undefined : { duration: 0.16, ease: 'easeOut' }}
+          onMouseDown={(e) => {
+            if (e.target === e.currentTarget) onCancel();
+          }}
         >
           <motion.div
             className="bg-background border border-border rounded-md shadow-lg p-4 w-full max-w-sm"
@@ -38,6 +54,7 @@ export function ConfirmDialog({
             animate={reduceMotion ? undefined : { opacity: 1, scale: 1, y: 0 }}
             exit={reduceMotion ? undefined : { opacity: 0, scale: 0.98, y: 6 }}
             transition={reduceMotion ? undefined : { duration: 0.18, ease: 'easeOut' }}
+            onMouseDown={(e) => e.stopPropagation()}
           >
             <div className="mb-3">
               <h2 className="text-sm font-semibold mb-1">{title}</h2>

@@ -4,13 +4,16 @@ interface UseResizableOptions {
   initialWidth: number;
   minWidth: number;
   maxWidth: number;
+  direction?: 'ltr' | 'rtl';
 }
 
-export function useResizable({ initialWidth, minWidth, maxWidth }: UseResizableOptions) {
+export function useResizable({ initialWidth, minWidth, maxWidth, direction = 'ltr' }: UseResizableOptions) {
   const [width, setWidth] = useState(initialWidth);
   const [isResizing, setIsResizing] = useState(false);
   const startXRef = useRef(0);
   const startWidthRef = useRef(initialWidth);
+  const rafIdRef = useRef<number | null>(null);
+  const pendingWidthRef = useRef<number | null>(null);
 
   const handleMouseDown = useCallback((e: React.MouseEvent) => {
     e.preventDefault();
@@ -24,11 +27,28 @@ export function useResizable({ initialWidth, minWidth, maxWidth }: UseResizableO
 
     const handleMouseMove = (e: MouseEvent) => {
       const delta = e.clientX - startXRef.current;
-      const newWidth = Math.min(Math.max(startWidthRef.current + delta, minWidth), maxWidth);
-      setWidth(newWidth);
+      const signedDelta = direction === 'rtl' ? -delta : delta;
+      const newWidth = Math.min(Math.max(startWidthRef.current + signedDelta, minWidth), maxWidth);
+
+      pendingWidthRef.current = newWidth;
+      if (rafIdRef.current !== null) return;
+      rafIdRef.current = window.requestAnimationFrame(() => {
+        rafIdRef.current = null;
+        if (pendingWidthRef.current !== null) {
+          setWidth(pendingWidthRef.current);
+        }
+      });
     };
 
     const handleMouseUp = () => {
+      if (rafIdRef.current !== null) {
+        window.cancelAnimationFrame(rafIdRef.current);
+        rafIdRef.current = null;
+      }
+      if (pendingWidthRef.current !== null) {
+        setWidth(pendingWidthRef.current);
+      }
+      pendingWidthRef.current = null;
       setIsResizing(false);
     };
 
@@ -38,8 +58,13 @@ export function useResizable({ initialWidth, minWidth, maxWidth }: UseResizableO
     return () => {
       document.removeEventListener('mousemove', handleMouseMove);
       document.removeEventListener('mouseup', handleMouseUp);
+
+      if (rafIdRef.current !== null) {
+        window.cancelAnimationFrame(rafIdRef.current);
+        rafIdRef.current = null;
+      }
     };
-  }, [isResizing, minWidth, maxWidth]);
+  }, [isResizing, minWidth, maxWidth, direction]);
 
   return { width, isResizing, handleMouseDown };
 }

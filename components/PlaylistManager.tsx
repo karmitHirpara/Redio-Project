@@ -1,8 +1,10 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useCallback, useMemo } from 'react';
 import { Playlist, Track, QueueItem, ScheduledPlaylist } from '../types';
 import { PlaylistNavigator } from './PlaylistNavigator';
 import { PlaylistEditor } from './PlaylistEditor';
 import { motion, AnimatePresence } from 'framer-motion';
+import { ResizeHandle } from './ResizeHandle';
+import { useResizable } from '../hooks/useResizable';
 
 interface PlaylistManagerProps {
   playlists: Playlist[];
@@ -54,6 +56,29 @@ export function PlaylistManager({
   const [selectedPlaylist, setSelectedPlaylist] = useState<Playlist | null>(null);
   const [isEditorOpen, setIsEditorOpen] = useState(false);
 
+  const NAV_WIDTH_KEY = 'redio.playlists.nav.width';
+  const initialNavWidth = (() => {
+    try {
+      const raw = window.localStorage.getItem(NAV_WIDTH_KEY);
+      const n = raw ? Number(raw) : NaN;
+      if (Number.isFinite(n)) {
+        return Math.min(Math.max(n, 240), 460);
+      }
+    } catch {
+      // ignore
+    }
+    return 288;
+  })();
+  const navPanel = useResizable({ initialWidth: initialNavWidth, minWidth: 240, maxWidth: 460 });
+
+  useEffect(() => {
+    try {
+      window.localStorage.setItem(NAV_WIDTH_KEY, String(Math.round(navPanel.width)));
+    } catch {
+      // ignore
+    }
+  }, [navPanel.width]);
+
   const selectedPlaylistStartTime = (() => {
     if (!selectedPlaylist) return null;
     const candidates = scheduledPlaylists.filter((s) =>
@@ -71,7 +96,7 @@ export function PlaylistManager({
     return new Date(earliest);
   })();
 
-  const handleSelectPlaylist = (playlist: Playlist) => {
+  const handleSelectPlaylist = useCallback((playlist: Playlist) => {
     // If the user clicks the currently selected playlist while the editor
     // is open, treat it as a toggle to close the editor and let the list
     // expand to full width. Otherwise, open the editor for that playlist.
@@ -81,7 +106,7 @@ export function PlaylistManager({
     }
     setSelectedPlaylist(playlist);
     setIsEditorOpen(true);
-  };
+  }, [isEditorOpen, selectedPlaylist]);
 
   // Keep selectedPlaylist in sync when playlists change (e.g. add/remove/reorder tracks)
   useEffect(() => {
@@ -100,27 +125,136 @@ export function PlaylistManager({
     setSelectedPlaylist(null);
   };
 
+  const selectedPlaylistId = selectedPlaylist?.id ?? null;
+
+  const onPlayPlaylistNowCb = useCallback(() => {
+    if (!selectedPlaylistId) return;
+    onPlayPlaylistNow(selectedPlaylistId);
+  }, [onPlayPlaylistNow, selectedPlaylistId]);
+
+  const onQueuePlaylistCb = useCallback(() => {
+    if (!selectedPlaylistId) return;
+    onQueuePlaylist(selectedPlaylistId);
+  }, [onQueuePlaylist, selectedPlaylistId]);
+
+  const onAddSongsCb = useCallback(
+    (tracks: Track[]) => {
+      if (!selectedPlaylistId) return;
+      onAddSongsToPlaylist(selectedPlaylistId, tracks);
+    },
+    [onAddSongsToPlaylist, selectedPlaylistId]
+  );
+
+  const onRemoveTrackCb = useCallback(
+    (trackId: string) => {
+      if (!selectedPlaylistId) return;
+      onRemoveTrackFromPlaylist(selectedPlaylistId, trackId);
+    },
+    [onRemoveTrackFromPlaylist, selectedPlaylistId]
+  );
+
+  const onReorderTracksCb = useCallback(
+    (tracks: Track[]) => {
+      if (!selectedPlaylistId) return;
+      onReorderPlaylistTracks(selectedPlaylistId, tracks);
+    },
+    [onReorderPlaylistTracks, selectedPlaylistId]
+  );
+
+  const onImportFilesCb = useCallback(
+    (files: File[], insertIndex?: number, suppressDuplicateDialog?: boolean) => {
+      if (!selectedPlaylistId) return;
+      onImportFilesToPlaylist(selectedPlaylistId, files, insertIndex, suppressDuplicateDialog);
+    },
+    [onImportFilesToPlaylist, selectedPlaylistId]
+  );
+
+  const onDropTrackOnPlaylistPanelCb = useCallback(
+    (trackId: string, insertIndex: number) => {
+      if (!selectedPlaylistId) return;
+      onDropTrackOnPlaylistPanel(selectedPlaylistId, trackId, insertIndex);
+    },
+    [onDropTrackOnPlaylistPanel, selectedPlaylistId]
+  );
+
+  const playlistNavigatorEl = useMemo(() => {
+    return (
+      <PlaylistNavigator
+        playlists={playlists}
+        selectedPlaylist={selectedPlaylist}
+        onSelectPlaylist={handleSelectPlaylist}
+        onCreatePlaylist={onCreatePlaylist}
+        onRenamePlaylist={onRenamePlaylist}
+        onDeletePlaylist={onDeletePlaylist}
+        onToggleLockPlaylist={onToggleLockPlaylist}
+        onDuplicatePlaylist={onDuplicatePlaylist}
+        onSchedulePlaylist={onSchedulePlaylist}
+        scheduledPlaylists={scheduledPlaylists}
+        onDeleteSchedule={onDeleteSchedule}
+        onDropTrackOnPlaylistHeader={onDropTrackOnPlaylistHeader}
+        onDropFilesOnPlaylistHeader={onDropFilesOnPlaylistHeader}
+      />
+    );
+  }, [
+    playlists,
+    selectedPlaylist,
+    handleSelectPlaylist,
+    onCreatePlaylist,
+    onRenamePlaylist,
+    onDeletePlaylist,
+    onToggleLockPlaylist,
+    onDuplicatePlaylist,
+    onSchedulePlaylist,
+    scheduledPlaylists,
+    onDeleteSchedule,
+    onDropTrackOnPlaylistHeader,
+    onDropFilesOnPlaylistHeader,
+  ]);
+
+  const playlistEditorEl = useMemo(() => {
+    if (!selectedPlaylist) return null;
+    return (
+      <PlaylistEditor
+        playlist={selectedPlaylist}
+        highlightTrackId={
+          recentPlaylistAdd && recentPlaylistAdd.playlistId === selectedPlaylist.id
+            ? recentPlaylistAdd.trackId
+            : null
+        }
+        onClose={handleCloseEditor}
+        onPlayPlaylistNow={onPlayPlaylistNowCb}
+        onQueuePlaylist={onQueuePlaylistCb}
+        onAddSongs={onAddSongsCb}
+        onRemoveTrack={onRemoveTrackCb}
+        onReorderTracks={onReorderTracksCb}
+        onImportFiles={onImportFilesCb}
+        onQueueTrack={onQueueTrackFromPlaylist}
+        scheduledStartTime={selectedPlaylistStartTime}
+        onDropTrackOnPlaylistPanel={onDropTrackOnPlaylistPanelCb}
+      />
+    );
+  }, [
+    selectedPlaylist,
+    recentPlaylistAdd,
+    handleCloseEditor,
+    onPlayPlaylistNowCb,
+    onQueuePlaylistCb,
+    onAddSongsCb,
+    onRemoveTrackCb,
+    onReorderTracksCb,
+    onImportFilesCb,
+    onQueueTrackFromPlaylist,
+    selectedPlaylistStartTime,
+    onDropTrackOnPlaylistPanelCb,
+  ]);
+
   // When the editor is closed (or there is no selected playlist), show only
   // the navigator taking the full width so there is no empty panel.
   if (!isEditorOpen || !selectedPlaylist) {
     return (
       <div className="h-full flex bg-background">
         <div className="flex-1 border-r border-border">
-          <PlaylistNavigator
-            playlists={playlists}
-            selectedPlaylist={selectedPlaylist}
-            onSelectPlaylist={handleSelectPlaylist}
-            onCreatePlaylist={onCreatePlaylist}
-            onRenamePlaylist={onRenamePlaylist}
-            onDeletePlaylist={onDeletePlaylist}
-            onToggleLockPlaylist={onToggleLockPlaylist}
-            onDuplicatePlaylist={onDuplicatePlaylist}
-            onSchedulePlaylist={onSchedulePlaylist}
-            scheduledPlaylists={scheduledPlaylists}
-            onDeleteSchedule={onDeleteSchedule}
-            onDropTrackOnPlaylistHeader={onDropTrackOnPlaylistHeader}
-            onDropFilesOnPlaylistHeader={onDropFilesOnPlaylistHeader}
-          />
+          {playlistNavigatorEl}
         </div>
       </div>
     );
@@ -131,23 +265,14 @@ export function PlaylistManager({
   return (
     <div className="h-full flex bg-background">
       {/* Left Subpanel - Playlist Navigator */}
-      <div className="w-72 transition-all duration-300 border-r border-border">
-        <PlaylistNavigator
-          playlists={playlists}
-          selectedPlaylist={selectedPlaylist}
-          onSelectPlaylist={handleSelectPlaylist}
-          onCreatePlaylist={onCreatePlaylist}
-          onRenamePlaylist={onRenamePlaylist}
-          onDeletePlaylist={onDeletePlaylist}
-          onToggleLockPlaylist={onToggleLockPlaylist}
-          onDuplicatePlaylist={onDuplicatePlaylist}
-          onSchedulePlaylist={onSchedulePlaylist}
-          scheduledPlaylists={scheduledPlaylists}
-          onDeleteSchedule={onDeleteSchedule}
-          onDropTrackOnPlaylistHeader={onDropTrackOnPlaylistHeader}
-          onDropFilesOnPlaylistHeader={onDropFilesOnPlaylistHeader}
-        />
+      <div
+        className="transition-all duration-200 border-r border-border relative flex-shrink-0"
+        style={{ width: navPanel.width }}
+      >
+        {playlistNavigatorEl}
       </div>
+
+      <ResizeHandle onMouseDown={navPanel.handleMouseDown} isResizing={navPanel.isResizing} />
 
       {/* Right Subpanel - Playlist Editor */}
       <AnimatePresence mode="wait">
@@ -159,28 +284,7 @@ export function PlaylistManager({
             transition={{ duration: 0.3, ease: 'easeInOut' }}
             className="flex-1 overflow-hidden"
           >
-            <PlaylistEditor
-              playlist={selectedPlaylist}
-              highlightTrackId={
-                recentPlaylistAdd && recentPlaylistAdd.playlistId === selectedPlaylist.id
-                  ? recentPlaylistAdd.trackId
-                  : null
-              }
-              onClose={handleCloseEditor}
-              onPlayPlaylistNow={() => onPlayPlaylistNow(selectedPlaylist.id)}
-              onQueuePlaylist={() => onQueuePlaylist(selectedPlaylist.id)}
-              onAddSongs={(tracks) => onAddSongsToPlaylist(selectedPlaylist.id, tracks)}
-              onRemoveTrack={(trackId) => onRemoveTrackFromPlaylist(selectedPlaylist.id, trackId)}
-              onReorderTracks={(tracks) => onReorderPlaylistTracks(selectedPlaylist.id, tracks)}
-              onImportFiles={(files, insertIndex, suppressDuplicateDialog) =>
-                onImportFilesToPlaylist(selectedPlaylist.id, files, insertIndex, suppressDuplicateDialog)
-              }
-              onQueueTrack={onQueueTrackFromPlaylist}
-              scheduledStartTime={selectedPlaylistStartTime}
-              onDropTrackOnPlaylistPanel={(trackId, insertIndex) =>
-                onDropTrackOnPlaylistPanel(selectedPlaylist.id, trackId, insertIndex)
-              }
-            />
+            {playlistEditorEl}
           </motion.div>
         )}
       </AnimatePresence>

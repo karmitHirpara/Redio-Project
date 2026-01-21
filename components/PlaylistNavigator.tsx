@@ -95,20 +95,20 @@ export function PlaylistNavigator({
     <div className="h-full flex flex-col">
       {/* Header */}
       <div className="p-4 border-b border-border space-y-3">
-        <div className="flex items-center justify-between gap-2">
-          <h2 className="text-foreground">Playlists</h2>
-          <div className="flex items-center gap-2">
+        <div className="flex items-center justify-between gap-2 flex-wrap">
+          <h2 className="text-sm font-semibold tracking-tight text-foreground min-w-0 truncate">Playlists</h2>
+          <div className="flex items-center gap-2 flex-wrap justify-end">
             <Button
               size="sm"
               variant={showScheduledOnly ? 'default' : 'outline'}
-              className="h-7 px-2 text-[11px]"
+              className="h-8 px-2.5 text-[11px]"
               onClick={() => setShowScheduledOnly((v) => !v)}
               title="Show only playlists with pending schedules"
             >
               <span className="mr-1 text-xs">●</span>
               Scheduled
             </Button>
-            <Button size="sm" onClick={onCreatePlaylist}>
+            <Button size="sm" className="h-8" onClick={onCreatePlaylist}>
               <Plus className="w-4 h-4 mr-2" />
               New
             </Button>
@@ -116,12 +116,12 @@ export function PlaylistNavigator({
         </div>
 
         <div className="relative">
-          <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-muted-foreground" />
+          <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-500 dark:text-muted-foreground" />
           <Input
             placeholder="Search playlists..."
             value={searchQuery}
             onChange={(e) => setSearchQuery(e.target.value)}
-            className="pl-9"
+            className="pl-9 text-slate-900 dark:text-foreground placeholder:text-slate-500 dark:placeholder:text-muted-foreground"
           />
         </div>
       </div>

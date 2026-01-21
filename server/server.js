@@ -7,6 +7,7 @@ import fs from 'fs';
 import http from 'http';
 import { WebSocketServer } from 'ws';
 import { runSchedulerTick } from './services/scheduler.js';
+import { isS3UploadStorage, getS3PublicBaseUrl } from './services/objectStorage.js';
 
 // Import routes
 import tracksRouter from './routes/tracks.js';
@@ -23,6 +24,7 @@ const __dirname = dirname(__filename);
 
 const app = express();
 const PORT = process.env.PORT || 3001;
+const HOST = process.env.HOST || process.env.BIND_HOST || '127.0.0.1';
 export const backendPort = PORT;
 
 // Ensure uploads directory exists. If UPLOAD_PATH is absolute (as provided by
@@ -71,6 +73,10 @@ app.use(express.json({ limit: '1mb' }));
 app.use(express.urlencoded({ extended: true, limit: '1mb' }));
 
 app.use('/api', (req, res, next) => {
+  if (process.env.REQUIRE_DESKTOP_HEADER !== '1') {
+    return next();
+  }
+
   if (req.method === 'GET' || req.method === 'HEAD' || req.method === 'OPTIONS') {
     return next();
   }
@@ -83,16 +89,30 @@ app.use('/api', (req, res, next) => {
   return next();
 });
 
-// Static files for audio uploads
-app.use(
-  '/uploads',
-  express.static(uploadsDir, {
-    dotfiles: 'deny',
-    index: false,
-    fallthrough: false,
-    redirect: false,
-  }),
-);
+// Audio uploads
+// - local mode: serve from disk
+// - s3 mode (AWS S3 / Cloudflare R2): redirect to public object URL
+if (isS3UploadStorage() && getS3PublicBaseUrl()) {
+  app.get('/uploads/*', (req, res) => {
+    const key = path.basename(String(req.params[0] || ''));
+    if (!key) {
+      return res.status(404).json({ error: 'Not Found' });
+    }
+
+    const base = getS3PublicBaseUrl();
+    return res.redirect(302, `${base}/${encodeURIComponent(key)}`);
+  });
+} else {
+  app.use(
+    '/uploads',
+    express.static(uploadsDir, {
+      dotfiles: 'deny',
+      index: false,
+      fallthrough: false,
+      redirect: false,
+    }),
+  );
+}
 
 // API Routes
 app.use('/api/tracks', tracksRouter);
@@ -165,8 +185,9 @@ wss.on('connection', (socket, req) => {
     const origin = req?.headers?.origin;
     const remote = req?.socket?.remoteAddress;
 
-    // Only accept loopback connections. This prevents LAN access.
-    if (!isLoopbackAddress(remote)) {
+    const wsLoopbackOnly = process.env.WS_LOOPBACK_ONLY !== '0';
+    // Only accept loopback connections by default.
+    if (wsLoopbackOnly && !isLoopbackAddress(remote)) {
       socket.terminate();
       return;
     }
@@ -191,12 +212,12 @@ wss.on('connection', (socket, req) => {
 
 // Start server
 let schedulerInterval = null;
-server.listen(PORT, '127.0.0.1', () => {
+server.listen(PORT, HOST, () => {
   console.log(`🚀 Radio Automation Server running on port ${PORT}`);
-  console.log(`📡 API available at http://localhost:${PORT}`);
+  console.log(`📡 API available at http://${HOST}:${PORT}`);
   console.log(`🎵 Upload directory: ${uploadsDir}`);
   console.log(`🌐 CORS enabled for: ${process.env.CORS_ORIGIN}`);
-  console.log(`🔌 WebSocket endpoint: ws://localhost:${PORT}/ws`);
+  console.log(`🔌 WebSocket endpoint: ws://${HOST}:${PORT}/ws`);
 
   // Lightweight backend scheduler for datetime playlists. Default to a
   // 1s interval so fired schedules line up closely with the visible clock.

@@ -6,6 +6,16 @@ A broadcast-grade radio automation platform with a modern React UI and a lightwe
 
 This system delivers complete radio-style automation: audio library management, playlists, a flexible play queue, real-time scheduling, seamless playback with crossfades, and detailed playback history. All clients stay synchronized via WebSockets.
 
+## ✅ Features (short)
+
+- **Library**: upload/import audio, duplicate detection (SHA-256), folder organization
+- **Playlists**: create/lock/duplicate, drag-to-reorder editor
+- **Queue**: drag-and-drop ordering, accurate clock timings, real-time sync
+- **Scheduling**: datetime schedules + song-trigger schedules
+- **Playback**: crossfade/fade controls, play/pause/skip
+- **History**: detailed playback logs + export
+- **Desktop app**: packaged Electron app with embedded backend
+
 ## 🚀 Core Features
 
 ### Library
@@ -51,6 +61,12 @@ This system delivers complete radio-style automation: audio library management, 
 
 - Built with modern React components
 - Supports Dark (default) and Light themes
+- Floating, draggable Queue dialog (resizeable, lock mode)
+- Resizable playlist sidebar (always visible) with smooth performance
+- Improved input contrast for better readability in both themes
+- Confirmation dialogs for critical actions (ESC/outside-click to dismiss)
+- Output device warnings only show when a specific device is missing
+- Professional visual polish: consistent button styling, hover states, and spacing
 
 ## 🛠️ Tech Stack
 
@@ -84,10 +100,7 @@ This system delivers complete radio-style automation: audio library management, 
 
 ```bash
 npm install
-
-cd server
-npm install
-cd ..
+npm install --prefix server
 ```
 
 ### 2. Create backend .env
@@ -103,9 +116,7 @@ CORS_ORIGIN=http://localhost:5173
 ### 3. Initialize database
 
 ```bash
-cd server
-node scripts/init-db.js
-cd ..
+npm run init-db
 ```
 
 ### 4. Start servers
@@ -132,6 +143,11 @@ The desktop app runs the backend embedded inside Electron.
 npm run dev:desktop
 ```
 
+In Desktop mode, the backend runs embedded inside Electron and stores runtime data in OS user data:
+
+- SQLite DB: `%APPDATA%/radio-automation-frontend/data/database.sqlite`
+- Uploads: `%APPDATA%/radio-automation-frontend/uploads`
+
 To build a packaged desktop app:
 
 ```bash
@@ -143,6 +159,8 @@ If native modules (sqlite3) fail to load after dependency changes:
 ```bash
 npm run rebuild:electron
 ```
+
+Windows packaging note: installers require a valid multi-size `.ico` (must include 256x256).
 
 ## 🔐 Security Notes (Desktop)
 
@@ -162,12 +180,25 @@ npm run rebuild:electron
   - `X-Redio-Client: redio-desktop`
   - The frontend sends this automatically.
 
-### Upload constraints
+## 🔐 Desktop Licensing (Offline activation)
 
-- Max size: **50MB**
-- Allowed extensions: `.mp3`, `.wav`, `.ogg`, `.m4a`, `.flac`
-- Duplicate detection uses **SHA-256 hashing**.
-- All filesystem access is guarded against path traversal.
+Packaged desktop builds require:
+
+- `license.json` (signed)
+- `activation.json` (signed)
+
+### Where the app looks for these files
+
+- Primary location (auto-managed): `%APPDATA%/radio-automation-frontend/`
+- Convenience: you can also place `license.json` and `activation.json` next to the installed `.exe` and the app will copy them into `%APPDATA%`.
+
+### Flow (high level)
+
+- Client installs and starts the app
+- App shows **Activation Required** and can save `activation-request.json`
+- Vendor generates `activation.json` using the request + the vendor private key
+
+Full step-by-step commands are in `SETUP.md`.
 
 ## 📁 Project Structure
 
@@ -211,6 +242,58 @@ npm run rebuild:electron
 - Express API + WebSocket realtime sync
 - Persistent storage in SQLite
 - Handles uploads, duplicate detection, queue operations, schedule execution, and history logging
+
+## 🎛️ UI Schema Design
+
+### Primary entities
+
+- **Track**: audio item with name/artist/duration/filePath/hash.
+- **Playlist**: ordered list of tracks, can be locked.
+- **QueueItem**: a scheduled/ordered playback item (references a track, allows duplicates).
+- **ScheduledPlaylist**: triggers a playlist insertion (datetime or song-trigger).
+- **LibraryFolder**: flat folder grouping for library tracks.
+
+### Layout
+
+- **Top bar**
+  - IST clock
+  - History
+  - Theme toggle
+  - Output device selector (Audio Guard)
+- **Left panel: Library**
+  - Folder list
+  - Track list (virtualized)
+  - Upload/import into library or folder
+- **Center panel: Playlists**
+  - Playlist navigator (create/rename/duplicate/lock)
+  - Playlist editor (drag reorder, import files, play now, queue)
+  - Schedule actions
+- **Right panel: Queue**
+  - Drag-and-drop ordering
+  - Pinned currently playing item
+  - Estimated start/end times
+- **Bottom bar: Playback**
+  - Play/pause/skip
+  - Seek bar
+  - Crossfade control
+
+### Core flows
+
+- **Import track(s)**
+  - Upload via Library or Playlist
+  - Backend stores file under uploads directory and records metadata + hash
+  - Frontend refreshes tracks and shows duplicate prompts when needed
+- **Build a playlist**
+  - Create playlist
+  - Add tracks from Library/Queue
+  - Reorder via drag-and-drop
+- **Play & queue**
+  - Queue items can be reordered; current item remains pinned
+  - Playback bar drives the audio engine and reports progress back to App state
+- **Scheduling**
+  - Datetime schedules preempt playback and prepend playlist tracks
+  - Song-trigger schedules insert before/after a chosen queue item
+  - Backend scheduler emits WebSocket updates; UI stays in sync
 
 ## ⏱ Timing & Scheduling
 
@@ -300,7 +383,7 @@ chmod 755 server/uploads
 npm run build:web
 ```
 
-- Deploy the `dist/` folder (Vercel, Netlify, etc.).
+- Deploy the `dist/` folder.
 - Point `/api` to backend.
 
 

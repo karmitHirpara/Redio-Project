@@ -7,6 +7,7 @@ import crypto from 'crypto';
 import { fileURLToPath } from 'url';
 import { dirname } from 'path';
 import { query, run, get } from '../config/database.js';
+import { isS3UploadStorage, s3PutFile, s3ObjectExists, s3DeleteObject, s3CopyObject, s3KeyFromUploadsPath } from '../services/objectStorage.js';
 
 const router = express.Router();
 
@@ -19,6 +20,8 @@ const rawUploadPath = process.env.UPLOAD_PATH || 'uploads';
 const uploadsDir = path.isAbsolute(rawUploadPath)
   ? rawUploadPath
   : path.join(__dirname, '..', rawUploadPath);
+
+const useS3 = isS3UploadStorage();
 
 if (!fs.existsSync(uploadsDir)) {
   fs.mkdirSync(uploadsDir, { recursive: true });
@@ -175,16 +178,26 @@ router.post('/copy', async (req, res) => {
       newName = `${baseName} (${nextIndex})`;
     }
 
-    const srcPath = resolveUploadPath(existing.file_path || '');
-    if (!fs.existsSync(srcPath)) {
-      return res.status(404).json({ error: 'Source audio file not found on disk' });
-    }
-
-    const ext = path.extname(srcPath) || '.mp3';
+    const ext = path.extname(String(existing.file_path || '')) || '.mp3';
     const newFileName = `${uuidv4()}${ext}`;
-    const destPath = resolveUploadPath(newFileName);
 
-    fs.copyFileSync(srcPath, destPath);
+    if (useS3) {
+      const srcKey = s3KeyFromUploadsPath(existing.file_path || '');
+      const destKey = s3KeyFromUploadsPath(newFileName);
+      const ok = await s3ObjectExists(srcKey);
+      if (!ok) {
+        return res.status(404).json({ error: 'Source audio file not found in object storage' });
+      }
+      await s3CopyObject({ sourceKey: srcKey, destKey });
+    } else {
+      const srcPath = resolveUploadPath(existing.file_path || '');
+      if (!fs.existsSync(srcPath)) {
+        return res.status(404).json({ error: 'Source audio file not found on disk' });
+      }
+
+      const destPath = resolveUploadPath(newFileName);
+      fs.copyFileSync(srcPath, destPath);
+    }
 
     const trackId = uuidv4();
     const newRelativePath = `/uploads/${newFileName}`;
@@ -324,9 +337,25 @@ router.post('/upload', (req, res, next) => {
     // Check if file already exists
     const existing = await get('SELECT * FROM tracks WHERE hash = ?', [hash]);
     if (existing) {
-      // If the DB says we already have this audio but the underlying file
-      // is missing on disk, treat this upload as a repair: keep the new
-      // file, update file_path for the existing track, and return it.
+      if (useS3) {
+        const existingKey = s3KeyFromUploadsPath(existing.file_path || '');
+        const ok = await s3ObjectExists(existingKey);
+
+        if (!ok) {
+          await s3PutFile({ key: existingKey, filePath: uploadedPath, contentType: req.file.mimetype });
+          fs.unlinkSync(uploadedPath);
+          const repaired = await get('SELECT * FROM tracks WHERE id = ?', [existing.id]);
+          return res.status(200).json(repaired);
+        }
+
+        fs.unlinkSync(uploadedPath);
+        return res.status(409).json({
+          error: 'Duplicate file',
+          existingTrack: existing,
+        });
+      }
+
+      // local disk mode
       const existingFilePath = resolveUploadPath(existing.file_path || '');
 
       if (!fs.existsSync(existingFilePath)) {
@@ -341,8 +370,6 @@ router.post('/upload', (req, res, next) => {
         return res.status(200).json(repaired);
       }
 
-      // True duplicate: underlying file exists already. Remove the freshly
-      // uploaded file and signal a duplicate to the caller.
       fs.unlinkSync(uploadedPath);
       return res.status(409).json({
         error: 'Duplicate file',
@@ -352,6 +379,12 @@ router.post('/upload', (req, res, next) => {
 
     const trackId = uuidv4();
     const { name, artist, duration } = req.body;
+
+    if (useS3) {
+      const key = s3KeyFromUploadsPath(req.file.filename);
+      await s3PutFile({ key, filePath: uploadedPath, contentType: req.file.mimetype });
+      fs.unlinkSync(uploadedPath);
+    }
 
     await run(
       `INSERT INTO tracks (id, name, artist, duration, size, file_path, hash)
@@ -394,15 +427,26 @@ router.delete('/:id', async (req, res) => {
     // Only delete the underlying audio file if no other tracks reference
     // the same file_path. This ensures duplicate/alias entries that share
     // audio continue to work until the last reference is removed.
-    const filePath = resolveUploadPath(track.file_path || '');
     if (track.file_path) {
       const refRow = await get(
         'SELECT COUNT(*) as count FROM tracks WHERE file_path = ?',
         [track.file_path],
       );
       const refCount = refRow?.count ?? 0;
-      if (refCount <= 1 && fs.existsSync(filePath)) {
-        fs.unlinkSync(filePath);
+      if (refCount <= 1) {
+        if (useS3) {
+          try {
+            const key = s3KeyFromUploadsPath(track.file_path);
+            await s3DeleteObject(key);
+          } catch {
+            // ignore storage delete errors
+          }
+        } else {
+          const filePath = resolveUploadPath(track.file_path || '');
+          if (fs.existsSync(filePath)) {
+            fs.unlinkSync(filePath);
+          }
+        }
       }
     }
 

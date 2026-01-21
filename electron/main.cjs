@@ -1,9 +1,22 @@
 // electron/main.cjs
-const { app, BrowserWindow, shell } = require('electron');
+const { app, BrowserWindow, shell, dialog, clipboard } = require('electron');
 const path = require('path');
 const fs = require('fs');
+const { pathToFileURL } = require('url');
+const {
+  validateLicenseOrThrow,
+  validateActivationOrThrow,
+  getDefaultLicensePath,
+  getDefaultActivationPath,
+  getDeviceFingerprint,
+  getDeviceFingerprintV2,
+} = require('./license.cjs');
 
 let backendModule = null;
+let licenseInfo = null;
+let expiryTimeout = null;
+let expiryInterval = null;
+let expiryHandled = false;
 
 async function startBackend() {
   // Resolve runtime data directories in the per-user application data folder.
@@ -25,7 +38,8 @@ async function startBackend() {
   process.env.UPLOAD_PATH = uploadsDir;
 
   const serverPath = path.join(__dirname, '..', 'server', 'server.js');
-  backendModule = await import(serverPath);
+  // On Windows, dynamic import of absolute paths must use a file:// URL.
+  backendModule = await import(pathToFileURL(serverPath).href);
 }
 
 function isAllowedNavigationUrl(targetUrl) {
@@ -54,6 +68,345 @@ function maybeOpenExternal(targetUrl) {
   }
 
   return false;
+}
+
+async function ensureLicenseOrQuit() {
+  // Allow developers to bypass licensing during local development.
+  if (!app.isPackaged) return true;
+  if (process.env.REDIO_LICENSE_BYPASS === '1') return true;
+
+  const defaultLicensePath = getDefaultLicensePath({ app });
+
+  // Convenience for distribution: allow shipping a license.json alongside the exe
+  // (client can paste it there), then we copy it into userData.
+  try {
+    const exeDir = path.dirname(process.execPath);
+    const exeSideLicense = path.join(exeDir, 'license.json');
+    if (!fs.existsSync(defaultLicensePath) && fs.existsSync(exeSideLicense)) {
+      fs.mkdirSync(path.dirname(defaultLicensePath), { recursive: true });
+      fs.copyFileSync(exeSideLicense, defaultLicensePath);
+    }
+  } catch {
+    // ignore
+  }
+
+  // If still missing, prompt the user to select the license file.
+  if (!fs.existsSync(defaultLicensePath)) {
+    let fingerprint = '';
+    let fingerprint2 = '';
+    try {
+      fingerprint = await getDeviceFingerprint();
+      fingerprint2 = await getDeviceFingerprintV2();
+    } catch {
+      fingerprint = '';
+      fingerprint2 = '';
+    }
+
+    const introDetail = fingerprint
+      ? `Device fingerprints:\n\nCLIENT_FP=${fingerprint}\nCLIENT_FP2=${fingerprint2}\n\nSend CLIENT_FP2 to your provider (recommended; survives Windows reinstall) to receive a license.json.\n\nOr select your license.json now.`
+      : 'Send this device fingerprint (CLIENT_FP2 recommended) to your provider to receive a license.json, or select your license.json now.';
+
+    const decision = await dialog.showMessageBox({
+      type: 'warning',
+      title: 'Activation Required',
+      message: 'Redio requires a license to start on this device.',
+      detail: introDetail,
+      buttons: fingerprint ? ['Copy Fingerprint', 'Select license.json', 'Quit'] : ['Select license.json', 'Quit'],
+      defaultId: fingerprint ? 1 : 0,
+      cancelId: fingerprint ? 2 : 1,
+      noLink: true,
+    });
+
+    if (fingerprint && decision.response === 0) {
+      try {
+        clipboard.writeText(`CLIENT_FP=${fingerprint}\nCLIENT_FP2=${fingerprint2}`);
+      } catch {
+        // ignore
+      }
+    }
+
+    const shouldSelect = fingerprint ? decision.response === 1 : decision.response === 0;
+    if (!shouldSelect) {
+      app.quit();
+      return false;
+    }
+
+    const result = await dialog.showOpenDialog({
+      title: 'Select Redio License File',
+      message: 'Please select your license.json to activate this device.',
+      properties: ['openFile'],
+      filters: [{ name: 'License', extensions: ['json'] }],
+    });
+
+    if (result.canceled || !result.filePaths || result.filePaths.length === 0) {
+      app.quit();
+      return false;
+    }
+
+    try {
+      fs.mkdirSync(path.dirname(defaultLicensePath), { recursive: true });
+      fs.copyFileSync(result.filePaths[0], defaultLicensePath);
+    } catch (e) {
+      await dialog.showMessageBox({
+        type: 'error',
+        title: 'License Error',
+        message: 'Failed to install license file.',
+        detail: String(e && e.message ? e.message : e),
+      });
+      app.quit();
+      return false;
+    }
+  }
+
+  const publicKeyPath = path.join(__dirname, 'license-public.pem');
+  let publicKeyPem = '';
+  try {
+    publicKeyPem = fs.readFileSync(publicKeyPath, 'utf8');
+  } catch {
+    await dialog.showMessageBox({
+      type: 'error',
+      title: 'License Error',
+      message: 'Missing license verification key.',
+      detail: `Could not read: ${publicKeyPath}`,
+    });
+    app.quit();
+    return false;
+  }
+
+  try {
+    const info = await validateLicenseOrThrow({
+      app,
+      fs,
+      path,
+      publicKeyPem,
+      licensePath: defaultLicensePath,
+    });
+    licenseInfo = info;
+
+    if (licenseInfo && licenseInfo.payload && licenseInfo.payload.licenseId) {
+      const okActivation = await ensureActivationOrQuit({ publicKeyPem });
+      if (!okActivation) return false;
+    }
+
+    return true;
+  } catch (err) {
+    await dialog.showMessageBox({
+      type: 'error',
+      title: 'License Error',
+      message: 'This copy of Redio is not licensed for this device.',
+      detail: String(err && err.message ? err.message : err),
+    });
+    app.quit();
+    return false;
+  }
+}
+
+async function ensureActivationOrQuit({ publicKeyPem }) {
+  if (!app.isPackaged) return true;
+  if (process.env.REDIO_LICENSE_BYPASS === '1') return true;
+  if (!licenseInfo || !licenseInfo.payload || !licenseInfo.payload.licenseId) return true;
+
+  const defaultActivationPath = getDefaultActivationPath({ app });
+
+  try {
+    const exeDir = path.dirname(process.execPath);
+    const exeSideActivation = path.join(exeDir, 'activation.json');
+    if (!fs.existsSync(defaultActivationPath) && fs.existsSync(exeSideActivation)) {
+      fs.mkdirSync(path.dirname(defaultActivationPath), { recursive: true });
+      fs.copyFileSync(exeSideActivation, defaultActivationPath);
+    }
+  } catch {
+    // ignore
+  }
+
+  const licenseId = String(licenseInfo.payload.licenseId || '');
+  const maxActivations = Number(licenseInfo.payload.maxActivations || 0);
+  const fp1 = String(licenseInfo.fingerprint || '');
+  const fp2 = String(licenseInfo.fingerprintV2 || '');
+
+  const validateIfPresent = async () => {
+    if (!fs.existsSync(defaultActivationPath)) return { ok: false, error: null };
+    try {
+      await validateActivationOrThrow({
+        app,
+        fs,
+        path,
+        publicKeyPem,
+        activationPath: defaultActivationPath,
+        licenseId,
+        fingerprints: { fp1, fp2 },
+      });
+      return { ok: true, error: null };
+    } catch (e) {
+      return { ok: false, error: e };
+    }
+  };
+
+  const firstCheck = await validateIfPresent();
+  if (firstCheck.ok) return true;
+
+  if (firstCheck.error) {
+    await dialog.showMessageBox({
+      type: 'error',
+      title: 'Activation Error',
+      message: 'This device is not activated for this license.',
+      detail: String(firstCheck.error && firstCheck.error.message ? firstCheck.error.message : firstCheck.error),
+    });
+  }
+
+  while (true) {
+    const detail = `LicenseId: ${licenseId}\nMax Activations: ${maxActivations}\n\nThis device:\nCLIENT_FP=${fp1}\nCLIENT_FP2=${fp2}\n\nSteps:\n1) Save activation-request.json and send it to your provider\n2) Receive activation.json and import it here`;
+
+    const decision = await dialog.showMessageBox({
+      type: 'warning',
+      title: 'Activation Required',
+      message: 'This license requires offline activation on this device.',
+      detail,
+      buttons: ['Copy Fingerprint', 'Save activation-request.json', 'Select activation.json', 'Quit'],
+      defaultId: 2,
+      cancelId: 3,
+      noLink: true,
+    });
+
+    if (decision.response === 0) {
+      try {
+        clipboard.writeText(`LICENSE_ID=${licenseId}\nCLIENT_FP=${fp1}\nCLIENT_FP2=${fp2}`);
+      } catch {
+        // ignore
+      }
+      continue;
+    }
+
+    if (decision.response === 1) {
+      const result = await dialog.showSaveDialog({
+        title: 'Save Activation Request',
+        defaultPath: path.join(app.getPath('desktop'), 'activation-request.json'),
+        filters: [{ name: 'Activation Request', extensions: ['json'] }],
+      });
+
+      if (!result.canceled && result.filePath) {
+        try {
+          const request = {
+            licenseId,
+            fingerprint: fp2 || fp1,
+            requestedAt: new Date().toISOString(),
+            product: String(licenseInfo.payload.product || 'Redio'),
+          };
+          fs.writeFileSync(result.filePath, JSON.stringify(request, null, 2), 'utf8');
+          await dialog.showMessageBox({
+            type: 'info',
+            title: 'Activation Request Saved',
+            message: 'Send this file to your provider to receive activation.json.',
+            detail: result.filePath,
+          });
+        } catch (e) {
+          await dialog.showMessageBox({
+            type: 'error',
+            title: 'Activation Error',
+            message: 'Failed to save activation request.',
+            detail: String(e && e.message ? e.message : e),
+          });
+        }
+      }
+
+      continue;
+    }
+
+    if (decision.response === 2) {
+      const result = await dialog.showOpenDialog({
+        title: 'Select Activation File',
+        message: 'Please select your activation.json to activate this device.',
+        properties: ['openFile'],
+        filters: [{ name: 'Activation', extensions: ['json'] }],
+      });
+
+      if (result.canceled || !result.filePaths || result.filePaths.length === 0) {
+        continue;
+      }
+
+      try {
+        fs.mkdirSync(path.dirname(defaultActivationPath), { recursive: true });
+        fs.copyFileSync(result.filePaths[0], defaultActivationPath);
+      } catch (e) {
+        await dialog.showMessageBox({
+          type: 'error',
+          title: 'Activation Error',
+          message: 'Failed to install activation file.',
+          detail: String(e && e.message ? e.message : e),
+        });
+        continue;
+      }
+
+      const check = await validateIfPresent();
+      if (check.ok) return true;
+
+      await dialog.showMessageBox({
+        type: 'error',
+        title: 'Activation Error',
+        message: 'Activation file is invalid for this device/license.',
+        detail: String(check.error && check.error.message ? check.error.message : check.error),
+      });
+      continue;
+    }
+
+    app.quit();
+    return false;
+  }
+}
+
+async function handleExpiredLicense(reason) {
+  if (expiryHandled) return;
+  expiryHandled = true;
+
+  try {
+    if (expiryTimeout) clearTimeout(expiryTimeout);
+    if (expiryInterval) clearInterval(expiryInterval);
+  } catch {
+    // ignore
+  }
+
+  await dialog.showMessageBox({
+    type: 'error',
+    title: 'License Expired',
+    message: 'Your Redio license has expired.',
+    detail: reason || 'Please contact your provider to renew your license.',
+  });
+
+  app.quit();
+}
+
+function startExpiryWatchdog() {
+  if (!app.isPackaged) return;
+  if (process.env.REDIO_LICENSE_BYPASS === '1') return;
+  if (!licenseInfo || !Number.isFinite(licenseInfo.expiresAtMs)) return;
+  if (licenseInfo.expiresAtMs === Number.POSITIVE_INFINITY) return;
+
+  const scheduleNext = () => {
+    const msLeft = licenseInfo.expiresAtMs - Date.now();
+    if (msLeft <= 0) {
+      void handleExpiredLicense('License expired.');
+      return;
+    }
+
+    if (expiryTimeout) clearTimeout(expiryTimeout);
+    // Cap the timeout so very long durations don't overflow setTimeout limits.
+    const MAX_TIMEOUT_MS = 24 * 60 * 60 * 1000;
+    expiryTimeout = setTimeout(() => {
+      void handleExpiredLicense('License expired.');
+    }, Math.min(msLeft, MAX_TIMEOUT_MS));
+  };
+
+  scheduleNext();
+
+  if (expiryInterval) clearInterval(expiryInterval);
+  // Also check periodically to handle sleep/wake or system time jumps.
+  expiryInterval = setInterval(() => {
+    if (Date.now() > licenseInfo.expiresAtMs) {
+      void handleExpiredLicense('License expired.');
+      return;
+    }
+    scheduleNext();
+  }, 60 * 1000);
 }
 
 function createWindow() {
@@ -101,8 +454,21 @@ function createWindow() {
 }
 
 app.whenReady().then(async () => {
-  await startBackend();
-  createWindow();
+  try {
+    const ok = await ensureLicenseOrQuit();
+    if (!ok) return;
+    startExpiryWatchdog();
+    await startBackend();
+    createWindow();
+  } catch (e) {
+    await dialog.showMessageBox({
+      type: 'error',
+      title: 'Startup Error',
+      message: 'Redio failed to start after activation.',
+      detail: String(e && e.message ? e.message : e),
+    });
+    app.quit();
+  }
 });
 
 app.on('before-quit', async () => {
