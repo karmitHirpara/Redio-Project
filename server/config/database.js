@@ -132,9 +132,108 @@ function ensureCoreSchema(database) {
     database.run(`
       CREATE TABLE IF NOT EXISTS folders (
         id TEXT PRIMARY KEY,
-        name TEXT NOT NULL UNIQUE
+        name TEXT NOT NULL,
+        parent_id TEXT NOT NULL DEFAULT ''
       )
     `);
+
+    database.all(`PRAGMA table_info(folders)`, (pragmaErr, cols) => {
+      if (pragmaErr) {
+        console.error('Failed to inspect folders table for migrations', pragmaErr.message);
+        return;
+      }
+
+      const hasParentId = Array.isArray(cols) && cols.some((c) => c.name === 'parent_id');
+      if (hasParentId) {
+        database.run(`UPDATE folders SET parent_id = '' WHERE parent_id IS NULL`);
+
+        database.run(
+          `CREATE UNIQUE INDEX IF NOT EXISTS idx_folders_parent_name ON folders (parent_id, name COLLATE NOCASE)`
+        );
+
+        database.run(`CREATE INDEX IF NOT EXISTS idx_folders_parent_id ON folders (parent_id)`);
+        return;
+      }
+
+      // Migration from legacy folders schema (name globally UNIQUE, no parent_id)
+      database.run('BEGIN IMMEDIATE TRANSACTION', (beginErr) => {
+        if (beginErr) {
+          console.error('Failed to start folders migration transaction', beginErr.message);
+          return;
+        }
+
+        database.run(
+          `CREATE TABLE IF NOT EXISTS folders__migrated (
+            id TEXT PRIMARY KEY,
+            name TEXT NOT NULL,
+            parent_id TEXT NOT NULL DEFAULT ''
+          )`,
+          (createErr) => {
+            if (createErr) {
+              console.error('Failed to create folders migration table', createErr.message);
+              database.run('ROLLBACK');
+              return;
+            }
+
+            database.run(
+              `INSERT OR IGNORE INTO folders__migrated (id, name, parent_id)
+               SELECT id, name, '' FROM folders`,
+              (copyErr) => {
+                if (copyErr) {
+                  console.error('Failed to copy legacy folders data', copyErr.message);
+                  database.run('ROLLBACK');
+                  return;
+                }
+
+                database.run(`DROP TABLE folders`, (dropErr) => {
+                  if (dropErr) {
+                    console.error('Failed to drop legacy folders table', dropErr.message);
+                    database.run('ROLLBACK');
+                    return;
+                  }
+
+                  database.run(`ALTER TABLE folders__migrated RENAME TO folders`, (renameErr) => {
+                    if (renameErr) {
+                      console.error('Failed to rename migrated folders table', renameErr.message);
+                      database.run('ROLLBACK');
+                      return;
+                    }
+
+                    database.run(
+                      `CREATE UNIQUE INDEX IF NOT EXISTS idx_folders_parent_name ON folders (parent_id, name COLLATE NOCASE)`,
+                      (idxErr) => {
+                        if (idxErr) {
+                          console.error('Failed to ensure folders unique index', idxErr.message);
+                          database.run('ROLLBACK');
+                          return;
+                        }
+
+                        database.run(
+                          `CREATE INDEX IF NOT EXISTS idx_folders_parent_id ON folders (parent_id)`,
+                          (idx2Err) => {
+                            if (idx2Err) {
+                              console.error('Failed to ensure folders parent index', idx2Err.message);
+                              database.run('ROLLBACK');
+                              return;
+                            }
+
+                            database.run('COMMIT', (commitErr) => {
+                              if (commitErr) {
+                                console.error('Failed to commit folders migration', commitErr.message);
+                              }
+                            });
+                          }
+                        );
+                      }
+                    );
+                  });
+                });
+              }
+            );
+          }
+        );
+      });
+    });
 
     database.run(`
       CREATE TABLE IF NOT EXISTS folder_tracks (

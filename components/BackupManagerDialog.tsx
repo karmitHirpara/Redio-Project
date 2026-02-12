@@ -511,7 +511,11 @@ export function BackupManagerDialog({ open, onOpenChange }: BackupManagerDialogP
               <div>
                 <h4 className="font-medium mb-2">Metadata</h4>
                 <div className="text-sm space-y-1">
-                  <div>Type: {BACKUP_TYPE_LABELS[previewData.metadata.type]}</div>
+                  <div>
+                    Type:{' '}
+                    {BACKUP_TYPE_LABELS[previewData.metadata.type as keyof typeof BACKUP_TYPE_LABELS] ||
+                      String(previewData.metadata.type)}
+                  </div>
                   <div>Created: {formatDate(previewData.metadata.createdAt)}</div>
                   <div>Size: {formatFileSize(previewData.metadata.size)}</div>
                   <div>Version: {previewData.metadata.version}</div>

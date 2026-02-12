@@ -20,7 +20,7 @@ interface PlaylistEditorProps {
   onImportFiles: (files: File[], insertIndex?: number, suppressDuplicateDialog?: boolean) => void;
   onQueueTrack: (track: Track) => void;
   scheduledStartTime?: Date | null;
-  onDropTrackOnPlaylistPanel?: (trackId: string, insertIndex: number) => void;
+  onDropTrackOnPlaylistPanel?: (trackIds: string[], insertIndex: number) => void;
 }
 
 export function PlaylistEditor({
@@ -237,23 +237,39 @@ export function PlaylistEditor({
         onDragOver={(e) => {
           const types = Array.from(e.dataTransfer.types);
           const hasTrackId = types.includes('application/x-track-id');
+          const hasTracks = types.includes('application/x-redio-tracks');
           const hasFiles = types.includes('Files');
-          if ((hasTrackId && onDropTrackOnPlaylistPanel) || hasFiles) {
+          if ((hasTrackId && onDropTrackOnPlaylistPanel) || (hasTracks && onDropTrackOnPlaylistPanel) || hasFiles) {
             e.preventDefault();
           }
         }}
         onDrop={(e) => {
           const types = Array.from(e.dataTransfer.types);
           const hasTrackId = types.includes('application/x-track-id');
+          const hasTracks = types.includes('application/x-redio-tracks');
           const hasFiles = types.includes('Files');
           e.preventDefault();
           e.stopPropagation();
+
+          if (hasTracks && onDropTrackOnPlaylistPanel) {
+            try {
+              const payload = JSON.parse(e.dataTransfer.getData('application/x-redio-tracks') || '{}');
+              const trackIds = payload.trackIds || [];
+              if (trackIds.length === 0) return;
+              const insertAt = dropIndex !== null ? dropIndex : filteredTracks.length;
+              onDropTrackOnPlaylistPanel(trackIds, insertAt);
+              setDropIndex(null);
+              return;
+            } catch {
+              // Fall through to single-track handling
+            }
+          }
 
           if (hasTrackId && onDropTrackOnPlaylistPanel) {
             const trackId = e.dataTransfer.getData('application/x-track-id');
             if (!trackId) return;
             const insertAt = dropIndex !== null ? dropIndex : filteredTracks.length;
-            onDropTrackOnPlaylistPanel(trackId, insertAt);
+            onDropTrackOnPlaylistPanel([trackId], insertAt);
             setDropIndex(null);
             return;
           }
@@ -264,9 +280,8 @@ export function PlaylistEditor({
             const insertAt = dropIndex !== null ? dropIndex : filteredTracks.length;
             // OS drag-and-drop into playlist: suppress duplicate dialog for a
             // smoother flow, always treating duplicates as "Add Copy".
-            onImportFiles(files, insertAt, true);
+            void onImportFiles(files, insertAt, true);
             setDropIndex(null);
-            return;
           }
         }}
       >

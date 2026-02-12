@@ -23,9 +23,11 @@ interface TrackRowProps {
   isLibrary?: boolean;
   isSelected?: boolean;         
   isFocused?: boolean;          
-  onSelect?: (trackId: string) => void;        
+  isRecentlyMoved?: boolean;
+  onSelect?: (trackId: string, e: React.MouseEvent) => void;
   onFocusRow?: () => void;      
   onKeyDown?: (e: React.KeyboardEvent) => void; 
+  getDragPayload?: () => { trackIds: string[]; sourceFolderId?: string };
   startTimeLabel?: string; // optional: scheduled start time for this track
 }
 
@@ -39,19 +41,22 @@ export const TrackRow = memo(function TrackRow({
   isLibrary = false,
   isSelected = false,
   isFocused = false,
+  isRecentlyMoved = false,
   onSelect,
   onFocusRow,
   onKeyDown,
+  getDragPayload,
   startTimeLabel,
 }: TrackRowProps) {
   const rowClasses = cn(
-    "group flex items-center gap-2 w-full transition-colors duration-150 ease-out outline-none",
-    "px-1.5 py-0.5 rounded-sm",
+    'group flex items-center gap-2 w-full transition-colors duration-150 ease-out outline-none',
+    'px-2 py-1 rounded-sm',
     isSelected
-      ? "bg-sky-600/25 text-foreground" 
+      ? 'bg-[#094771] dark:bg-[#1a3b5c] text-white'
       : isFocused
-        ? "bg-slate-700/40 text-foreground" 
-        : "bg-transparent hover:bg-slate-700/20 focus-visible:bg-slate-700/30"
+        ? 'bg-[#2a2d2e] dark:bg-[#37373d] text-foreground'
+        : 'bg-transparent hover:bg-[#2a2d2e] dark:hover:bg-[#37373d] text-foreground',
+    isRecentlyMoved && !isSelected && 'bg-[#2a2d2e] dark:bg-[#37373d]'
   );
 
   return (
@@ -66,14 +71,42 @@ export const TrackRow = memo(function TrackRow({
           onDragStart={(e) => {
             if (!isLibrary) return;
             try {
+              const payload = getDragPayload ? getDragPayload() : { trackIds: [track.id] };
+              e.dataTransfer.setData('application/x-redio-tracks', JSON.stringify(payload));
               e.dataTransfer.setData('application/x-track-id', track.id);
-              e.dataTransfer.effectAllowed = 'copyMove';
+              e.dataTransfer.effectAllowed = 'move';
+
+              // Responsive drag preview: create a small drag image with count
+              const count = (payload as any).count || payload.trackIds.length;
+              if (count > 1) {
+                const dragEl = document.createElement('div');
+                dragEl.textContent = `${count} items`;
+                dragEl.style.cssText = `
+                  position: fixed;
+                  top: -1000px;
+                  left: -1000px;
+                  background: var(--background);
+                  color: var(--foreground);
+                  border: 1px solid var(--border);
+                  border-radius: 6px;
+                  padding: 4px 8px;
+                  font-size: 12px;
+                  font-weight: 500;
+                  box-shadow: 0 2px 8px rgba(0,0,0,0.15);
+                  pointer-events: none;
+                  z-index: 9999;
+                `;
+                document.body.appendChild(dragEl);
+                e.dataTransfer.setDragImage(dragEl, 0, 0);
+                // Clean up after a short delay
+                setTimeout(() => dragEl.remove(), 10);
+              }
             } catch {
               // dataTransfer may not be available in some environments; ignore.
             }
           }}
-          onClick={() => {
-            if (onSelect) onSelect(track.id);
+          onClick={(e) => {
+            if (onSelect) onSelect(track.id, e);
           }}
           onFocus={() => onFocusRow && onFocusRow()}
           onBlur={() => {}}

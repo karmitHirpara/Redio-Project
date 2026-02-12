@@ -20,7 +20,7 @@ interface PlaylistNavigatorProps {
   onSchedulePlaylist: (playlistId: string) => void;
   scheduledPlaylists: ScheduledPlaylist[];
   onDeleteSchedule: (scheduleId: string) => void | Promise<void>;
-  onDropTrackOnPlaylistHeader?: (playlistId: string, trackId: string) => void;
+  onDropTrackOnPlaylistHeader?: (playlistId: string, trackIds: string[]) => void;
   onDropFilesOnPlaylistHeader?: (playlistId: string, files: File[]) => void;
 }
 
@@ -165,8 +165,9 @@ export function PlaylistNavigator({
                 onDragOver={(e) => {
                   const types = Array.from(e.dataTransfer.types);
                   const hasTrackId = types.includes('application/x-track-id');
+                  const hasTracks = types.includes('application/x-redio-tracks');
                   const hasFiles = types.includes('Files');
-                  if ((hasTrackId && onDropTrackOnPlaylistHeader) || (hasFiles && onDropFilesOnPlaylistHeader)) {
+                  if ((hasTrackId && onDropTrackOnPlaylistHeader) || (hasTracks && onDropTrackOnPlaylistHeader) || (hasFiles && onDropFilesOnPlaylistHeader)) {
                     e.preventDefault();
                     if (dragOverPlaylistId !== playlist.id) {
                       setDragOverPlaylistId(playlist.id);
@@ -181,7 +182,23 @@ export function PlaylistNavigator({
                 onDrop={(e) => {
                   const types = Array.from(e.dataTransfer.types);
                   const hasTrackId = types.includes('application/x-track-id');
+                  const hasTracks = types.includes('application/x-redio-tracks');
                   const hasFiles = types.includes('Files');
+
+                  if (hasTracks && onDropTrackOnPlaylistHeader) {
+                    try {
+                      const payload = JSON.parse(e.dataTransfer.getData('application/x-redio-tracks') || '{}');
+                      const trackIds = payload.trackIds || [];
+                      if (trackIds.length === 0) return;
+                      e.preventDefault();
+                      e.stopPropagation();
+                      setDragOverPlaylistId(null);
+                      onDropTrackOnPlaylistHeader(playlist.id, trackIds);
+                      return;
+                    } catch {
+                      // Fall through to single-track handling
+                    }
+                  }
 
                   if (hasTrackId && onDropTrackOnPlaylistHeader) {
                     const trackId = e.dataTransfer.getData('application/x-track-id');
@@ -189,7 +206,7 @@ export function PlaylistNavigator({
                     e.preventDefault();
                     e.stopPropagation();
                     setDragOverPlaylistId(null);
-                    onDropTrackOnPlaylistHeader(playlist.id, trackId);
+                    onDropTrackOnPlaylistHeader(playlist.id, [trackId]);
                     return;
                   }
 

@@ -30,6 +30,11 @@ export function useAudioEngine({
   const [currentTime, setCurrentTime] = useState(0);
   const [duration, setDuration] = useState(0);
 
+  const crossfadeSecondsRef = useRef<number>(crossfadeSeconds);
+  useEffect(() => {
+    crossfadeSecondsRef.current = crossfadeSeconds;
+  }, [crossfadeSeconds]);
+
   const primaryAudioRef = useRef<HTMLAudioElement>(null);
   const secondaryAudioRef = useRef<HTMLAudioElement>(null);
   const lastTrackIdRef = useRef<string | null>(null);
@@ -299,7 +304,10 @@ export function useAudioEngine({
       // Use crossfadeSeconds as a gap duration (in seconds) so there is
       // configurable silence between songs before advancing to the next
       // track.
-      const delayMs = Math.max(0, (crossfadeSeconds ?? 0) * 1000);
+      const gapSeconds = Number.isFinite(crossfadeSecondsRef.current)
+        ? Math.max(0, crossfadeSecondsRef.current)
+        : 0;
+      const delayMs = Math.max(0, gapSeconds * 1000);
       pendingAdvanceUntilMsRef.current = Date.now() + delayMs;
       endDelayTimeoutRef.current = window.setTimeout(() => {
         endDelayTimeoutRef.current = null;
@@ -335,7 +343,7 @@ export function useAudioEngine({
       detachA?.();
       detachB?.();
     };
-  }, [onNext, duration, crossfadeSeconds, currentTrack, isPlaying]);
+  }, [onNext, duration, currentTrack, isPlaying]);
 
   const handleSeek = (value: number[]) => {
     const newTime = value[0];

@@ -99,6 +99,21 @@ router.post('/', async (req, res) => {
   }
 });
 
+// Delete all history entries
+router.delete('/', async (req, res) => {
+  try {
+    const result = await run('DELETE FROM playback_history');
+    console.log(`Cleared ${result.changes} history entries`);
+    res.json({ 
+      message: `Cleared ${result.changes} history entries`,
+      count: result.changes 
+    });
+  } catch (error) {
+    console.error('Error clearing history:', error);
+    res.status(500).json({ error: 'Failed to clear history' });
+  }
+});
+
 // Delete a single history entry
 router.delete('/:id', async (req, res) => {
   try {

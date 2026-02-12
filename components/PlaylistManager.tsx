@@ -25,9 +25,9 @@ interface PlaylistManagerProps {
   onQueueTrackFromPlaylist: (track: Track) => void;
   scheduledPlaylists: ScheduledPlaylist[];
   onDeleteSchedule: (scheduleId: string) => void | Promise<void>;
-  onDropTrackOnPlaylistHeader: (playlistId: string, trackId: string) => void;
+  onDropTrackOnPlaylistHeader: (playlistId: string, trackIds: string[]) => void;
   onDropFilesOnPlaylistHeader: (playlistId: string, files: File[], suppressDuplicateDialog?: boolean) => void;
-  onDropTrackOnPlaylistPanel: (playlistId: string, trackId: string, insertIndex: number) => void;
+  onDropTrackOnPlaylistPanel: (playlistId: string, trackIds: string[], insertIndex: number) => void;
 }
 
 export function PlaylistManager({
@@ -170,9 +170,9 @@ export function PlaylistManager({
   );
 
   const onDropTrackOnPlaylistPanelCb = useCallback(
-    (trackId: string, insertIndex: number) => {
+    (trackIds: string[], insertIndex: number) => {
       if (!selectedPlaylistId) return;
-      onDropTrackOnPlaylistPanel(selectedPlaylistId, trackId, insertIndex);
+      onDropTrackOnPlaylistPanel(selectedPlaylistId, trackIds, insertIndex);
     },
     [onDropTrackOnPlaylistPanel, selectedPlaylistId]
   );

@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect, useRef, useCallback } from 'react';
 import type React from 'react';
 import { LibraryPanel } from './components/LibraryPanel';
 import { PlaylistManager } from './components/PlaylistManager';
@@ -60,6 +60,12 @@ export default function App() {
   const playbackPositionSecondsRef = useRef(0);
   const pauseStartedAtRef = useRef<Date | null>(null);
   const playbackStartedQueueItemIdRef = useRef<string | null>(null);
+  const historyEntryIdRef = useRef<string | null>(null);
+  const historyEntryTrackIdRef = useRef<string | null>(null);
+  const historyEntryPlayedAtIsoRef = useRef<string | null>(null);
+  const historyEntryCreateTokenRef = useRef<number>(0);
+  const historyEntryCreatePromiseRef = useRef<Promise<any> | null>(null);
+  const historyLastPlayheadSecondsRef = useRef(0);
   const datetimeWarnedRef = useRef<Set<string>>(new Set());
   const [scheduleDialogOpen, setScheduleDialogOpen] = useState(false);
   const [historyOpen, setHistoryOpen] = useState(false);
@@ -136,7 +142,151 @@ export default function App() {
 
   const handlePlaybackProgress = (seconds: number) => {
     playbackPositionSecondsRef.current = seconds;
+    // Keep a monotonic playhead snapshot for history logging.
+    // The audio engine resets the UI time to 0 at ended while waiting for the
+    // next track; we must not overwrite the final playhead with 0.
+    if (Number.isFinite(seconds) && seconds > historyLastPlayheadSecondsRef.current) {
+      historyLastPlayheadSecondsRef.current = seconds;
+    }
   };
+
+  const startPlaybackHistoryIfNeeded = useCallback(
+    async (track: Track, source: string, playedAt: Date) => {
+      // If we already started a row for this exact track instance, do nothing.
+      if (historyEntryIdRef.current && historyEntryTrackIdRef.current === track.id) return;
+
+      // If a create is already in-flight for this same track, do nothing.
+      if (historyEntryCreatePromiseRef.current && historyEntryTrackIdRef.current === track.id) return;
+
+      // Reset playhead snapshot for the new track.
+      historyLastPlayheadSecondsRef.current = 0;
+      playbackPositionSecondsRef.current = 0;
+
+      const playedAtIso = playedAt.toISOString();
+      historyEntryPlayedAtIsoRef.current = playedAtIso;
+      historyEntryTrackIdRef.current = track.id;
+      historyEntryIdRef.current = null;
+
+      const createToken = ++historyEntryCreateTokenRef.current;
+
+      try {
+        const createPromise = historyAPI.create({
+          trackId: track.id,
+          playedAt: playedAtIso,
+          positionStart: 0,
+          positionEnd: 0,
+          completed: false,
+          source,
+          fileStatus: 'ok',
+        });
+        historyEntryCreatePromiseRef.current = createPromise;
+
+        const entry = await createPromise;
+
+        // If we finalized/changed track while this request was in-flight, ignore.
+        if (historyEntryCreateTokenRef.current !== createToken) return;
+
+        historyEntryIdRef.current = entry?.id ?? null;
+        historyEntryCreatePromiseRef.current = null;
+        console.log(`History created: track ${track.name}, start: ${playedAtIso}`);
+      } catch (error) {
+        if (historyEntryCreateTokenRef.current === createToken) {
+          historyEntryCreatePromiseRef.current = null;
+        }
+        console.error('Failed to create playback history row', error);
+      }
+    },
+    [],
+  );
+
+  const finalizePlaybackHistory = useCallback(
+    async (
+      track: Track,
+      options?: {
+        completed?: boolean;
+        source?: string;
+        playedAtOverride?: string;
+        endTimestampOverride?: Date;
+      },
+    ) => {
+      const source = options?.source ?? 'queue';
+      const completed = options?.completed ?? true;
+
+      // Use the top-center clock for end time, or override if provided
+      const endTimestamp = options?.endTimestampOverride ?? (nowIst ?? new Date());
+      
+      // Get the original start timestamp from when we created the history entry
+      const baseStart = options?.playedAtOverride
+        ? new Date(options.playedAtOverride)
+        : historyEntryPlayedAtIsoRef.current
+          ? new Date(historyEntryPlayedAtIsoRef.current)
+          : nowPlayingStart ?? endTimestamp;
+
+      // Calculate elapsed time based on the actual elapsed time from the top-center clock
+      const elapsedMs = endTimestamp.getTime() - baseStart.getTime();
+      const elapsedSeconds = Math.max(0, Math.round(elapsedMs / 1000));
+      
+      // Prefer playhead seconds if available, but ensure it's not greater than elapsed time.
+      // NOTE: For naturally completed tracks we intentionally include the configured
+      // Gap (silence) time before advancing, so history reflects the broadcast clock.
+      const playheadSeconds = Math.max(
+        0,
+        Math.min(
+          elapsedSeconds,
+          historyLastPlayheadSecondsRef.current || playbackPositionSecondsRef.current || 0,
+        ),
+      );
+
+      const positionEnd = Math.max(1, completed ? elapsedSeconds : playheadSeconds || elapsedSeconds);
+
+      // If the row creation is still in-flight for this track, wait for it so we can UPDATE
+      // instead of leaving position_end at 0 (which renders as '-').
+      if (!historyEntryIdRef.current && historyEntryCreatePromiseRef.current && historyEntryTrackIdRef.current === track.id) {
+        try {
+          const entry = await historyEntryCreatePromiseRef.current;
+          historyEntryIdRef.current = entry?.id ?? null;
+        } catch {
+          // ignore: we'll fall back to create below
+        } finally {
+          historyEntryCreatePromiseRef.current = null;
+        }
+      }
+
+      const historyId = historyEntryIdRef.current;
+
+      // Clear refs so the next track starts a new row.
+      historyEntryIdRef.current = null;
+      historyEntryTrackIdRef.current = null;
+      historyEntryPlayedAtIsoRef.current = null;
+      historyLastPlayheadSecondsRef.current = 0;
+      historyEntryCreatePromiseRef.current = null;
+      historyEntryCreateTokenRef.current += 1;
+
+      try {
+        if (historyId) {
+          // Update with the precise end timestamp from top-center clock
+          await historyAPI.update(historyId, { positionEnd, completed });
+          console.log(`History updated: track ${track.name}, end time: ${endTimestamp.toISOString()}, position: ${positionEnd}s`);
+          return;
+        }
+
+        // Fallback: if we never got an ID (network error), write a standalone row.
+        await historyAPI.create({
+          trackId: track.id,
+          playedAt: baseStart.toISOString(),
+          positionStart: 0,
+          positionEnd,
+          completed,
+          source,
+          fileStatus: 'ok',
+        });
+        console.log(`History created: track ${track.name}, start: ${baseStart.toISOString()}, end: ${endTimestamp.toISOString()}, position: ${positionEnd}s`);
+      } catch (error) {
+        console.error('Failed to finalize playback history', error);
+      }
+    },
+    [nowIst, nowPlayingStart],
+  );
 
   const leftPanel = useResizable({ initialWidth: 320, minWidth: 250, maxWidth: 500 });
   const rightPanel = useResizable({ initialWidth: 320, minWidth: 250, maxWidth: 500, direction: 'rtl' });
@@ -175,27 +325,54 @@ export default function App() {
     seekAnchor,
   });
 
-  const handleDropTrackOnPlaylistHeader = async (playlistId: string, trackId: string) => {
-    const track = tracks.find((t) => t.id === trackId);
-    if (!track) return;
-    await handleAddToPlaylist(track, playlistId, true);
+  const handleDropTrackOnPlaylistHeader = async (playlistId: string, trackIds: string[]) => {
+    for (const trackId of trackIds) {
+      const track = tracks.find((t) => t.id === trackId);
+      if (track) {
+        await handleAddToPlaylist(track, playlistId, true);
+      }
+    }
   };
 
+  // Finalize history when user closes the browser to ensure accurate end time
   useEffect(() => {
     if (typeof window === 'undefined') return;
     if (window.location?.protocol === 'file:') return;
 
+    const finalizeHistoryOnUnload = () => {
+      if (historyEntryIdRef.current && currentTrackRef.current) {
+        // Use the finalizePlaybackHistory function for consistent end timestamp handling
+        const endTime = new Date();
+        void finalizePlaybackHistory(currentTrackRef.current, {
+          completed: false,
+          source: 'queue',
+          endTimestampOverride: endTime,
+        }).catch(() => {
+          // Ignore errors during unload
+        });
+      }
+    };
+
     const handler = (e: BeforeUnloadEvent) => {
+      finalizeHistoryOnUnload();
       e.preventDefault();
       e.returnValue = '';
       return '';
     };
 
     window.addEventListener('beforeunload', handler);
+    
+    // Also handle pagehide event for better mobile support
+    const handlePageHide = () => {
+      finalizeHistoryOnUnload();
+    };
+    window.addEventListener('pagehide', handlePageHide);
+    
     return () => {
       window.removeEventListener('beforeunload', handler);
+      window.removeEventListener('pagehide', handlePageHide);
     };
-  }, []);
+  }, [finalizePlaybackHistory]);
 
   // Keep a lightweight clock for display in the top bar
   useEffect(() => {
@@ -426,11 +603,15 @@ export default function App() {
         void resync();
       };
 
-      socket.onmessage = (event) => {
+      socket.onmessage = async (event) => {
         try {
           const data = JSON.parse(event.data);
           if (data.type === 'database-restored') {
             void resyncAll();
+            window.dispatchEvent(new Event('redio:library-resync'));
+            return;
+          }
+          if (data.type === 'library-updated') {
             window.dispatchEvent(new Event('redio:library-resync'));
             return;
           }
@@ -472,13 +653,14 @@ export default function App() {
                   ? Math.max(0, Math.round((now - wallClockStart.getTime()) / 1000))
                   : 0;
                 const playheadSeconds = Math.max(0, Math.round(playbackPositionSecondsRef.current || 0));
+                const interruptionTime = nowIst ?? new Date();
                 const interruptedSeconds = Math.max(playheadSeconds, wallClockElapsedSeconds);
-                const playedAtOverride = new Date(Date.now() - interruptedSeconds * 1000).toISOString();
-                logPlaybackHistory(interruptedTrack, {
+                const playedAtOverride = new Date(interruptionTime.getTime() - interruptedSeconds * 1000).toISOString();
+                await finalizePlaybackHistory(interruptedTrack, {
                   completed: false,
                   source: 'queue',
                   playedAtOverride,
-                  positionEndOverrideSeconds: interruptedSeconds,
+                  endTimestampOverride: interruptionTime,
                 });
               }
 
@@ -507,18 +689,23 @@ export default function App() {
 
               setCurrentQueueItemId(firstQueueItemId);
               setIsPlaying(true);
-              setNowPlayingStart(new Date());
+              setNowPlayingStart(nowIst ?? new Date());
               return;
             }
 
             if (previousCurrentId && !wasCurrentStillPresent && firstQueueItemId) {
+              const interruptionTime = nowIst ?? new Date();
               const interruptedTrack = currentTrackRef.current;
               if (interruptedTrack) {
-                logPlaybackHistory(interruptedTrack, { completed: false, source: 'queue' });
+                void finalizePlaybackHistory(interruptedTrack, { 
+                  completed: false, 
+                  source: 'queue',
+                  endTimestampOverride: interruptionTime,
+                });
               }
               setCurrentQueueItemId(firstQueueItemId);
               setIsPlaying(true);
-              setNowPlayingStart(new Date());
+              setNowPlayingStart(nowIst ?? new Date());
             } else {
               setCurrentQueueItemId((prev: string | null) => prev ?? firstQueueItemId);
             }
@@ -531,6 +718,17 @@ export default function App() {
       socket.onclose = () => {
         console.log('WebSocket disconnected');
         hasLiveQueueRef.current = false;
+        
+        // Finalize history for currently playing track when server disconnects
+        if (historyEntryIdRef.current && currentTrackRef.current) {
+          const disconnectionTime = new Date();
+          void finalizePlaybackHistory(currentTrackRef.current, {
+            completed: false,
+            source: 'queue',
+            endTimestampOverride: disconnectionTime,
+          });
+        }
+        
         scheduleReconnect();
       };
 
@@ -835,9 +1033,13 @@ export default function App() {
 
     if (playbackStartedQueueItemIdRef.current !== currentQueueItemId) {
       playbackStartedQueueItemIdRef.current = currentQueueItemId;
-      setNowPlayingStart(new Date());
+      const start = nowIst ?? new Date();
+      setNowPlayingStart(start);
+      if (currentTrack) {
+        void startPlaybackHistoryIfNeeded(currentTrack, 'queue', start);
+      }
     }
-  }, [currentQueueItemId, isPlaying]);
+  }, [currentQueueItemId, isPlaying, currentTrack, nowIst, startPlaybackHistoryIfNeeded]);
 
   // Clear any seek override when the playing item changes so the next
   // track's timing derives from its own start.
@@ -845,19 +1047,68 @@ export default function App() {
     setSeekAnchor(null);
   }, [currentQueueItemId]);
 
+  // Finalize history when the current track changes (even from pause state)
+  // This ensures that moving to next song always records end time for previous song
+  useEffect(() => {
+    // Skip if no previous track to finalize
+    if (!historyEntryTrackIdRef.current || !historyEntryIdRef.current) return;
+    
+    // Skip if the track hasn't actually changed
+    if (currentTrack && historyEntryTrackIdRef.current === currentTrack.id) return;
+    
+    // Finalize the previous track's history
+    const previousTrackId = historyEntryTrackIdRef.current;
+    const previousTrack = tracks.find(t => t.id === previousTrackId);
+    
+    if (previousTrack) {
+      const changeTime = nowIst ?? new Date();
+      void finalizePlaybackHistory(previousTrack, {
+        completed: false,
+        source: 'queue',
+        endTimestampOverride: changeTime,
+      });
+    }
+  }, [currentTrack?.id, nowIst, finalizePlaybackHistory, tracks]);
+
   // Adjust start time when pausing/resuming so future timings stay accurate
   useEffect(() => {
     if (!nowPlayingStart) return;
-
-    if (!isPlaying && !pauseStartedAtRef.current) {
+    if (!isPlaying) {
       pauseStartedAtRef.current = new Date();
-    } else if (isPlaying && pauseStartedAtRef.current) {
+    } else if (pauseStartedAtRef.current) {
       const now = new Date();
       const delta = now.getTime() - pauseStartedAtRef.current.getTime();
       pauseStartedAtRef.current = null;
       setNowPlayingStart(new Date(nowPlayingStart.getTime() + delta));
     }
   }, [isPlaying, nowPlayingStart]);
+
+  // Finalize history when playback is completely stopped (no next track)
+  // This handles cases like manual stop when queue is empty
+  useEffect(() => {
+    // Only finalize if playback stopped and no track is selected (complete stop)
+    if (!isPlaying && !currentQueueItemId && historyEntryIdRef.current && currentTrackRef.current) {
+      const stopTime = nowIst ?? new Date();
+      void finalizePlaybackHistory(currentTrackRef.current, {
+        completed: false,
+        source: 'queue',
+        endTimestampOverride: stopTime,
+      });
+    }
+  }, [isPlaying, currentQueueItemId, nowIst, finalizePlaybackHistory]);
+
+  // If playback starts while a track is already selected (e.g. operator
+  // clicked an item while paused), ensure we capture the start time.
+  // Note: History creation is handled by the useEffect above.
+  useEffect(() => {
+    if (!isPlaying) return;
+    if (!currentQueueItemId || !currentTrack) return;
+
+    if (!nowPlayingStart) {
+      const start = nowIst ?? new Date();
+      setNowPlayingStart(start);
+    }
+  }, [isPlaying, currentQueueItemId, currentTrack, nowPlayingStart, nowIst]);
 
   const ALLOWED_UPLOAD_EXTENSIONS = new Set(['.mp3', '.wav', '.ogg', '.m4a', '.flac']);
   const ALLOWED_UPLOAD_MIME_TYPES = new Set([
@@ -1251,7 +1502,7 @@ export default function App() {
 
   const handleDropTrackOnPlaylistPanel = async (
     playlistId: string,
-    trackId: string,
+    trackIds: string[],
     insertIndex: number,
   ) => {
     const playlist = playlists.find((p) => p.id === playlistId);
@@ -1261,42 +1512,48 @@ export default function App() {
       return;
     }
 
-    const track = tracks.find((t) => t.id === trackId);
-    if (!track) return;
+    const tracksToAdd = tracks.map((t) => trackIds.includes(t.id) ? t : null).filter(Boolean) as Track[];
+    if (tracksToAdd.length === 0) return;
 
     try {
       const existingNames: string[] = (playlist.tracks || [])
         .map((t) => String(t.name || ''))
         .filter(Boolean);
 
-      const baseName = track.name.replace(/ \((\d+)\)$/,'');
-      const desiredName = getNextSequentialName(baseName, existingNames);
+      const tracksToAttach: Track[] = [];
+      for (const track of tracksToAdd) {
+        const baseName = track.name.replace(/ \((\d+)\)$/,'');
+        const desiredName = getNextSequentialName(baseName, existingNames);
 
-      const namePattern = new RegExp(`^${escapeRegExp(baseName)}(?: \\((\\d+)\\))?$`);
-      const hasSameBase = existingNames.some((name) => namePattern.test(name));
+        const namePattern = new RegExp(`^${escapeRegExp(baseName)}(?: \\((\\d+)\\))?$`);
+        const hasSameBase = existingNames.some((name) => namePattern.test(name));
 
-      let trackToAttach: Track = track;
+        let trackToAttach: Track = track;
 
-      if (hasSameBase) {
-        const t = await tracksAPI.alias(track.id, desiredName);
-        const aliasTrack: Track = {
-          id: t.id,
-          name: t.name,
-          artist: t.artist,
-          duration: t.duration && t.duration > 0 ? t.duration : track.duration,
-          size: t.size,
-          filePath: resolveUploadsUrl((t as any).filePath || (t as any).file_path),
-          hash: t.hash,
-          dateAdded: (t as any).date_added ? new Date((t as any).date_added) : new Date(),
-        };
+        if (hasSameBase) {
+          const t = await tracksAPI.alias(track.id, desiredName);
+          const aliasTrack: Track = {
+            id: t.id,
+            name: t.name,
+            artist: t.artist,
+            duration: t.duration && t.duration > 0 ? t.duration : track.duration,
+            size: t.size,
+            filePath: resolveUploadsUrl((t as any).filePath || (t as any).file_path),
+            hash: t.hash,
+            dateAdded: (t as any).date_added ? new Date((t as any).date_added) : new Date(),
+          };
 
-        setTracks((prev) => [aliasTrack, ...prev]);
-        trackToAttach = aliasTrack;
+          setTracks((prev) => [aliasTrack, ...prev]);
+          trackToAttach = aliasTrack;
+        }
+
+        tracksToAttach.push(trackToAttach);
+        existingNames.push(trackToAttach.name);
       }
 
-      await playlistsAPI.addTracks(playlistId, [trackToAttach.id]);
+      await playlistsAPI.addTracks(playlistId, tracksToAttach.map(t => t.id));
 
-      // Compute the new in-memory order with the item inserted at insertIndex
+      // Compute the new in-memory order with items inserted at insertIndex
       let newTracks: Track[] = [];
       setPlaylists((prev) =>
         prev.map((p) => {
@@ -1305,7 +1562,7 @@ export default function App() {
           const clampedIndex = Math.min(Math.max(insertIndex, 0), p.tracks.length);
           const before = p.tracks.slice(0, clampedIndex);
           const after = p.tracks.slice(clampedIndex);
-          newTracks = [...before, trackToAttach, ...after];
+          newTracks = [...before, ...tracksToAttach, ...after];
 
           return {
             ...p,
@@ -1315,7 +1572,7 @@ export default function App() {
         }),
       );
 
-      setRecentPlaylistAdd({ playlistId, trackId: trackToAttach.id, createdAt: Date.now() });
+      setRecentPlaylistAdd({ playlistId, trackId: tracksToAttach[0].id, createdAt: Date.now() });
 
       // Persist the new order so the DB matches the visual insertion position
       if (newTracks.length > 0) {
@@ -1327,7 +1584,7 @@ export default function App() {
         }
       }
 
-      toast.success(`Added to "${playlist.name}"`);
+      toast.success(`Added ${tracksToAttach.length} track${tracksToAttach.length !== 1 ? 's' : ''} to "${playlist.name}"`);
     } catch (error: any) {
       console.error('Failed to add track to playlist at position', error);
       toast.error(error.message || 'Failed to add track to playlist');
@@ -1972,52 +2229,6 @@ export default function App() {
     }
   };
 
-  // Playback Controls
-  // Record real listening time for tracks by writing a separate history row
-  // for each play instance (including duplicates and scheduled plays).
-  const logPlaybackHistory = (
-    track: Track,
-    options?: {
-      completed?: boolean;
-      source?: string;
-      playedAtOverride?: string;
-      positionEndOverrideSeconds?: number;
-    },
-  ) => {
-    const source = options?.source ?? 'queue';
-    const completed = options?.completed ?? true;
-
-    // Derive how long this track has actually been playing based on
-    // nowPlayingStart and the current wall clock. Clamp to at least 1s so
-    // very short or immediately-preempted plays (e.g. when a schedule fires
-    // mid-track) are still logged.
-    const now = new Date();
-    const baseStart = options?.playedAtOverride ? new Date(options.playedAtOverride) : nowPlayingStart ?? now;
-    const elapsedMs = now.getTime() - baseStart.getTime();
-    const elapsedSeconds = Math.max(1, Math.round(elapsedMs / 1000));
-    const playheadSeconds = Math.max(0, Math.round(playbackPositionSecondsRef.current || 0));
-    const positionEnd =
-      typeof options?.positionEndOverrideSeconds === 'number'
-        ? Math.max(0, options.positionEndOverrideSeconds)
-        : Math.max(elapsedSeconds, playheadSeconds);
-
-    const payload = {
-      trackId: track.id,
-      playedAt: baseStart.toISOString(),
-      positionStart: 0,
-      positionEnd,
-      completed,
-      source,
-      fileStatus: 'ok',
-    };
-
-    historyAPI
-      .create(payload)
-      .catch((error) => {
-        console.error('Failed to write playback history', error);
-      });
-  };
-
   useEffect(() => {
     // Drive datetime schedules off the same 1s clock used for the top bar.
     // The backend scheduler is responsible for actually firing the playlists;
@@ -2070,7 +2281,7 @@ export default function App() {
     if (!currentQueueItemId && queue.length > 0) {
       setCurrentQueueItemId(queue[0].id);
       setIsPlaying(true);
-      setNowPlayingStart(new Date());
+      setNowPlayingStart(nowIst ?? new Date());
     } else {
       setIsPlaying(!isPlaying);
     }
@@ -2092,8 +2303,13 @@ export default function App() {
 
     const finishedItem = queue[currentIndex];
 
-    // Log history entry for the track we are leaving
-    logPlaybackHistory(finishedItem.track, { completed: true, source: 'queue' });
+    // Log history entry for the track we are leaving with precise end time
+    const completionTime = nowIst ?? new Date();
+    void finalizePlaybackHistory(finishedItem.track, { 
+      completed: true, 
+      source: 'queue',
+      endTimestampOverride: completionTime,
+    });
 
     // Base queue after removing the finished track
     let baseQueue = queue.filter((_, index) => index !== currentIndex);
@@ -2163,7 +2379,7 @@ export default function App() {
     if (baseQueue.length > 0) {
       setCurrentQueueItemId(baseQueue[0].id);
       setIsPlaying(true);
-      setNowPlayingStart(new Date());
+      setNowPlayingStart(nowIst ?? new Date());
     } else {
       setCurrentQueueItemId(null);
       setIsPlaying(false);

@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react';
-import { Clock, AlertCircle, ChevronDown, ChevronRight, Download } from 'lucide-react';
+import { Clock, AlertCircle, ChevronDown, ChevronRight, Download, Trash } from 'lucide-react';
 import type { Cell, Row } from 'exceljs';
 import {
   Dialog,
@@ -344,6 +344,20 @@ export function HistoryDialog({ open, onOpenChange }: HistoryDialogProps) {
     }
   };
 
+  const clearAllHistory = async () => {
+    if (!window.confirm('Are you sure you want to clear all playback history? This action cannot be undone.')) {
+      return;
+    }
+
+    try {
+      await historyAPI.clearAll();
+      setEntries([]);
+      toast.success('All history cleared');
+    } catch (err: any) {
+      toast.error(err.message || 'Failed to clear history');
+    }
+  };
+
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="sm:max-w-3xl w-[96vw] max-w-3xl sm:p-6 p-4">
@@ -447,7 +461,6 @@ export function HistoryDialog({ open, onOpenChange }: HistoryDialogProps) {
                               {dayEntries.map((entry, idx) => {
                                 const durationSeconds = (entry.position_end ?? 0) - (entry.position_start ?? 0);
                                 const start = new Date(entry.played_at);
-                                const end = new Date(start.getTime() + Math.max(0, durationSeconds) * 1000);
                                 const startTime = start.toLocaleTimeString('en-IN', {
                                   timeZone: 'Asia/Kolkata',
                                   hour: '2-digit',
@@ -455,13 +468,21 @@ export function HistoryDialog({ open, onOpenChange }: HistoryDialogProps) {
                                   second: '2-digit',
                                   hour12: true,
                                 });
-                                const endTime = end.toLocaleTimeString('en-IN', {
-                                  timeZone: 'Asia/Kolkata',
-                                  hour: '2-digit',
-                                  minute: '2-digit',
-                                  second: '2-digit',
-                                  hour12: true,
-                                });
+
+                                // Only show '-' while a track is still in progress (no finalized duration yet).
+                                // Interrupted tracks should still show an end time once position_end is updated.
+                                const endTime = durationSeconds > 0
+                                  ? new Date(start.getTime() + Math.max(0, durationSeconds) * 1000).toLocaleTimeString(
+                                      'en-IN',
+                                      {
+                                        timeZone: 'Asia/Kolkata',
+                                        hour: '2-digit',
+                                        minute: '2-digit',
+                                        second: '2-digit',
+                                        hour12: true,
+                                      },
+                                    )
+                                  : '-';
 
                                 return (
                                   <ContextMenu key={entry.id}>
@@ -531,7 +552,17 @@ export function HistoryDialog({ open, onOpenChange }: HistoryDialogProps) {
           )}
         </div>
 
-        <div className="mt-4 flex justify-end">
+        <div className="mt-4 flex justify-between items-center">
+          <Button
+            variant="destructive"
+            size="sm"
+            onClick={clearAllHistory}
+            disabled={entries.length === 0}
+            className="flex items-center gap-2"
+          >
+            <Trash className="w-4 h-4" />
+            Clear History
+          </Button>
           <Button variant="outline" size="sm" onClick={() => onOpenChange(false)}>
             Close
           </Button>

@@ -41,6 +41,7 @@ export interface ScheduledPlaylist {
 export interface LibraryFolder {
   id: string;
   name: string;
+  parent_id?: string;
 }
 
 export type SortOption = 'name' | 'size' | 'dateAdded';

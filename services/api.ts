@@ -304,12 +304,17 @@ export const schedulesAPI = {
 
 export const foldersAPI = {
   getAll: () => apiClient.get<any[]>('/folders'),
-  create: (name: string) => apiClient.json<any>('/folders', { method: 'POST', json: { name } }),
+  create: (name: string, parentId?: string) =>
+    apiClient.json<any>('/folders', { method: 'POST', json: { name, parentId } }),
   rename: (id: string, name: string) => apiClient.json<any>(`/folders/${id}`, { method: 'PUT', json: { name } }),
   delete: (id: string) => apiClient.request<{ message: string }>(`/folders/${id}`, { method: 'DELETE' }),
   getTracks: (folderId: string) => apiClient.get<any[]>(`/folders/${folderId}/tracks`),
   attachTracks: (folderId: string, trackIds: string[]) =>
     apiClient.json<{ message: string }>(`/folders/${folderId}/tracks`, { method: 'POST', json: { trackIds } }),
+  moveTracks: (payload: { sourceFolderId: string; targetFolderId: string; trackIds: string[] }) =>
+    apiClient.json<{ message: string }>(`/folders/move-tracks`, { method: 'POST', json: payload }),
+  setParent: (folderId: string, parentId: string) =>
+    apiClient.json<any>(`/folders/${folderId}/parent`, { method: 'PUT', json: { parentId } }),
 };
 
 export const historyAPI = {
@@ -324,7 +329,16 @@ export const historyAPI = {
     fileStatus: string;
     sessionId?: string;
   }) => apiClient.json<any>('/history', { method: 'POST', json: payload }),
+  update: (
+    id: string,
+    payload: {
+      positionStart?: number;
+      positionEnd?: number;
+      completed?: boolean;
+    },
+  ) => apiClient.json<any>(`/history/${id}`, { method: 'PUT', json: payload }),
   delete: (id: string) => apiClient.request<{ message: string }>(`/history/${id}`, { method: 'DELETE' }),
+  clearAll: () => apiClient.request<{ message: string }>('/history', { method: 'DELETE' }),
   action: (id: string, action: 'addToQueue' | 'putBackToLibrary') =>
     apiClient.json<any>(`/history/${id}/actions`, { method: 'POST', json: { action } }),
 };
