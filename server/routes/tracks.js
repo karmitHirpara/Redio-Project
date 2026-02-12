@@ -27,7 +27,7 @@ if (!fs.existsSync(uploadsDir)) {
   fs.mkdirSync(uploadsDir, { recursive: true });
 }
 
-const MAX_UPLOAD_BYTES = 50 * 1024 * 1024;
+const MAX_UPLOAD_BYTES = Number(process.env.MAX_UPLOAD_BYTES || 0);
 
 const ALLOWED_EXTENSIONS = new Set(['.mp3', '.wav', '.ogg', '.m4a', '.flac']);
 
@@ -91,6 +91,53 @@ const resolveUploadPath = (filePathOrName) => {
   return resolved;
 };
 
+const hashingDiskStorage = {
+  _handleFile: (req, file, cb) => {
+    try {
+      const safeExt = normalizeExt(file.originalname, file.mimetype);
+      const uniqueName = `${uuidv4()}${safeExt}`;
+      const finalPath = resolveUploadPath(uniqueName);
+
+      const hash = crypto.createHash('sha256');
+      let size = 0;
+
+      file.stream.on('data', (chunk) => {
+        size += chunk.length;
+        hash.update(chunk);
+      });
+
+      const outStream = fs.createWriteStream(finalPath);
+      outStream.on('error', cb);
+      file.stream.on('error', cb);
+
+      outStream.on('finish', () => {
+        const sha256 = hash.digest('hex');
+        cb(null, {
+          destination: uploadsDir,
+          filename: uniqueName,
+          path: finalPath,
+          size,
+          sha256,
+        });
+      });
+
+      file.stream.pipe(outStream);
+    } catch (err) {
+      cb(err);
+    }
+  },
+  _removeFile: (req, file, cb) => {
+    try {
+      if (file?.path && fs.existsSync(file.path)) {
+        fs.unlinkSync(file.path);
+      }
+    } catch {
+      // ignore
+    }
+    cb(null);
+  },
+};
+
 const sha256File = (absolutePath) =>
   new Promise((resolve, reject) => {
     const hash = crypto.createHash('sha256');
@@ -100,21 +147,8 @@ const sha256File = (absolutePath) =>
     stream.on('end', () => resolve(hash.digest('hex')));
   });
 
-// Configure multer for file uploads
-const storage = multer.diskStorage({
-  destination: (req, file, cb) => {
-    cb(null, uploadsDir);
-  },
-  filename: (req, file, cb) => {
-    const safeExt = normalizeExt(file.originalname, file.mimetype);
-    const uniqueName = `${uuidv4()}${safeExt}`;
-    cb(null, uniqueName);
-  }
-});
-
-const upload = multer({
-  storage,
-  limits: { fileSize: MAX_UPLOAD_BYTES },
+const uploadConfig = {
+  storage: hashingDiskStorage,
   fileFilter: (req, file, cb) => {
     const ext = normalizeExt(file.originalname, file.mimetype);
     if (!ext || !ALLOWED_EXTENSIONS.has(ext) || !isAllowedMime(file.mimetype)) {
@@ -122,8 +156,14 @@ const upload = multer({
       return;
     }
     cb(null, true);
-  }
-});
+  },
+};
+
+if (Number.isFinite(MAX_UPLOAD_BYTES) && MAX_UPLOAD_BYTES > 0) {
+  uploadConfig.limits = { fileSize: MAX_UPLOAD_BYTES };
+}
+
+const upload = multer(uploadConfig);
 
 // Get all tracks
 router.get('/', async (req, res) => {
@@ -329,10 +369,11 @@ router.post('/upload', (req, res, next) => {
       return res.status(400).json({ error: 'No file uploaded' });
     }
 
-    const uploadedPath = resolveUploadPath(req.file.filename);
+    const uploadedPath = req.file.path || resolveUploadPath(req.file.filename);
 
-    // Calculate file hash without loading the entire file into memory.
-    const hash = await sha256File(uploadedPath);
+    // Hash is computed during streaming upload when using hashingDiskStorage.
+    // Fallback to a streaming read if it is not available.
+    const hash = req.file.sha256 || (await sha256File(uploadedPath));
 
     // Check if file already exists
     const existing = await get('SELECT * FROM tracks WHERE hash = ?', [hash]);

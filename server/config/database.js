@@ -17,6 +17,8 @@ const dbPath = path.isAbsolute(rawDbPath)
   ? rawDbPath
   : join(dirname(__dirname), rawDbPath);
 
+export const resolvedDbPath = dbPath;
+
 // Ensure the directory for the SQLite file exists (important in packaged
 // Electron builds where DATABASE_PATH points to the userData folder).
 const dbDir = dirname(dbPath);
@@ -26,155 +28,177 @@ if (!fs.existsSync(dbDir)) {
 
 console.log('SQLite DB path:', dbPath);
 
-const db = new sqlite3.Database(dbPath, (err) => {
-  if (err) {
-    console.error('Error opening database:', err.message);
-  } else {
-    console.log('Connected to SQLite database');
+function ensureCoreSchema(database) {
+  // Ensure core tables exist for a fresh database (used by the packaged
+  // Electron app) and then create helpful indexes. This is safe to run on
+  // every startup.
+  database.serialize(() => {
+    database.run(`
+      CREATE TABLE IF NOT EXISTS tracks (
+        id TEXT PRIMARY KEY,
+        name TEXT,
+        artist TEXT,
+        duration INTEGER,
+        size INTEGER,
+        file_path TEXT,
+        original_filename TEXT,
+        hash TEXT,
+        date_added DATETIME DEFAULT CURRENT_TIMESTAMP
+      )
+    `);
 
-    // Ensure core tables exist for a fresh database (used by the packaged
-    // Electron app) and then create helpful indexes. This is safe to run on
-    // every startup.
-    db.serialize(() => {
-      db.run(`
-        CREATE TABLE IF NOT EXISTS tracks (
-          id TEXT PRIMARY KEY,
-          name TEXT,
-          artist TEXT,
-          duration INTEGER,
-          size INTEGER,
-          file_path TEXT,
-          original_filename TEXT,
-          hash TEXT,
-          date_added DATETIME DEFAULT CURRENT_TIMESTAMP
-        )
-      `);
+    database.run(`
+      CREATE TABLE IF NOT EXISTS playlists (
+        id TEXT PRIMARY KEY,
+        name TEXT NOT NULL,
+        locked INTEGER DEFAULT 0,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+      )
+    `);
 
-      db.run(`
-        CREATE TABLE IF NOT EXISTS playlists (
-          id TEXT PRIMARY KEY,
-          name TEXT NOT NULL,
-          locked INTEGER DEFAULT 0,
-          created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-        )
-      `);
+    database.run(`
+      CREATE TABLE IF NOT EXISTS playlist_tracks (
+        playlist_id TEXT NOT NULL,
+        track_id TEXT NOT NULL,
+        position INTEGER NOT NULL,
+        FOREIGN KEY (playlist_id) REFERENCES playlists(id) ON DELETE CASCADE,
+        FOREIGN KEY (track_id) REFERENCES tracks(id) ON DELETE CASCADE,
+        PRIMARY KEY (playlist_id, track_id)
+      )
+    `);
 
-      db.run(`
-        CREATE TABLE IF NOT EXISTS playlist_tracks (
-          playlist_id TEXT NOT NULL,
-          track_id TEXT NOT NULL,
-          position INTEGER NOT NULL,
-          FOREIGN KEY (playlist_id) REFERENCES playlists(id) ON DELETE CASCADE,
-          FOREIGN KEY (track_id) REFERENCES tracks(id) ON DELETE CASCADE,
-          PRIMARY KEY (playlist_id, track_id)
-        )
-      `);
+    database.run(`
+      CREATE TABLE IF NOT EXISTS queue (
+        id TEXT PRIMARY KEY,
+        track_id TEXT NOT NULL,
+        from_playlist TEXT,
+        order_position INTEGER NOT NULL,
+        added_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY (track_id) REFERENCES tracks(id) ON DELETE CASCADE
+      )
+    `);
 
-      db.run(`
-        CREATE TABLE IF NOT EXISTS queue (
-          id TEXT PRIMARY KEY,
-          track_id TEXT NOT NULL,
-          from_playlist TEXT,
-          order_position INTEGER NOT NULL,
-          added_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-          FOREIGN KEY (track_id) REFERENCES tracks(id) ON DELETE CASCADE
-        )
-      `);
+    database.run(`
+      CREATE TABLE IF NOT EXISTS schedules (
+        id TEXT PRIMARY KEY,
+        playlist_id TEXT NOT NULL,
+        type TEXT NOT NULL,
+        date_time DATETIME,
+        queue_song_id TEXT,
+        trigger_position TEXT,
+        lock_playlist INTEGER DEFAULT 0,
+        status TEXT DEFAULT 'pending',
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        updated_at DATETIME,
+        fired_at DATETIME,
+        completed_at DATETIME,
+        FOREIGN KEY (playlist_id) REFERENCES playlists(id) ON DELETE CASCADE
+      )
+    `);
 
-      db.run(`
-        CREATE TABLE IF NOT EXISTS schedules (
-          id TEXT PRIMARY KEY,
-          playlist_id TEXT NOT NULL,
-          type TEXT NOT NULL,
-          date_time DATETIME,
-          queue_song_id TEXT,
-          trigger_position TEXT,
-          lock_playlist INTEGER DEFAULT 0,
-          status TEXT DEFAULT 'pending',
-          created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-          updated_at DATETIME,
-          fired_at DATETIME,
-          completed_at DATETIME,
-          FOREIGN KEY (playlist_id) REFERENCES playlists(id) ON DELETE CASCADE
-        )
-      `);
+    // Lightweight migration: older installs may not have lock_playlist on schedules.
+    database.all(`PRAGMA table_info(schedules)`, (pragmaErr, cols) => {
+      if (pragmaErr) {
+        console.error('Failed to inspect schedules table for migrations', pragmaErr.message);
+        return;
+      }
 
-      // Lightweight migration: older installs may not have lock_playlist on schedules.
-      db.all(`PRAGMA table_info(schedules)`, (pragmaErr, cols) => {
-        if (pragmaErr) {
-          console.error('Failed to inspect schedules table for migrations', pragmaErr.message);
-          return;
-        }
+      const hasLockPlaylist = Array.isArray(cols) && cols.some((c) => c.name === 'lock_playlist');
+      if (!hasLockPlaylist) {
+        database.run(`ALTER TABLE schedules ADD COLUMN lock_playlist INTEGER DEFAULT 0`, (alterErr) => {
+          if (alterErr) {
+            console.error('Failed to add schedules.lock_playlist column', alterErr.message);
+          }
+        });
+      }
+    });
 
-        const hasLockPlaylist = Array.isArray(cols) && cols.some((c) => c.name === 'lock_playlist');
-        if (!hasLockPlaylist) {
-          db.run(`ALTER TABLE schedules ADD COLUMN lock_playlist INTEGER DEFAULT 0`, (alterErr) => {
-            if (alterErr) {
-              console.error('Failed to add schedules.lock_playlist column', alterErr.message);
-            }
-          });
-        }
-      });
+    database.run(`
+      CREATE TABLE IF NOT EXISTS playback_history (
+        id TEXT PRIMARY KEY,
+        track_id TEXT NOT NULL,
+        played_at DATETIME NOT NULL,
+        position_start INTEGER NOT NULL,
+        position_end INTEGER NOT NULL,
+        completed BOOLEAN NOT NULL,
+        source TEXT NOT NULL,
+        file_status TEXT NOT NULL,
+        session_id TEXT,
+        updated_at DATETIME,
+        FOREIGN KEY (track_id) REFERENCES tracks(id) ON DELETE SET NULL
+      )
+    `);
 
-      db.run(`
-        CREATE TABLE IF NOT EXISTS playback_history (
-          id TEXT PRIMARY KEY,
-          track_id TEXT NOT NULL,
-          played_at DATETIME NOT NULL,
-          position_start INTEGER NOT NULL,
-          position_end INTEGER NOT NULL,
-          completed BOOLEAN NOT NULL,
-          source TEXT NOT NULL,
-          file_status TEXT NOT NULL,
-          session_id TEXT,
-          updated_at DATETIME,
-          FOREIGN KEY (track_id) REFERENCES tracks(id) ON DELETE SET NULL
-        )
-      `);
+    database.run(`
+      CREATE TABLE IF NOT EXISTS folders (
+        id TEXT PRIMARY KEY,
+        name TEXT NOT NULL UNIQUE
+      )
+    `);
 
-      db.run(`
-        CREATE TABLE IF NOT EXISTS folders (
-          id TEXT PRIMARY KEY,
-          name TEXT NOT NULL UNIQUE
-        )
-      `);
+    database.run(`
+      CREATE TABLE IF NOT EXISTS folder_tracks (
+        folder_id TEXT NOT NULL,
+        track_id TEXT NOT NULL,
+        PRIMARY KEY (folder_id, track_id)
+      )
+    `);
 
-      db.run(`
-        CREATE TABLE IF NOT EXISTS folder_tracks (
-          folder_id TEXT NOT NULL,
-          track_id TEXT NOT NULL,
-          PRIMARY KEY (folder_id, track_id)
-        )
-      `);
+    const indexSpecs = [
+      { sql: 'CREATE INDEX IF NOT EXISTS idx_playlists_created_at ON playlists (created_at)', table: 'playlists' },
+      { sql: 'CREATE INDEX IF NOT EXISTS idx_playlist_tracks_playlist_position ON playlist_tracks (playlist_id, position)', table: 'playlist_tracks' },
+      { sql: 'CREATE INDEX IF NOT EXISTS idx_queue_track_id ON queue (track_id)', table: 'queue' },
+      { sql: 'CREATE INDEX IF NOT EXISTS idx_queue_order ON queue (order_position)', table: 'queue' },
+      { sql: 'CREATE INDEX IF NOT EXISTS idx_history_played_at ON playback_history (played_at)', table: 'playback_history' },
+      { sql: 'CREATE INDEX IF NOT EXISTS idx_schedules_status_date_time ON schedules (status, date_time)', table: 'schedules' },
+      { sql: 'CREATE INDEX IF NOT EXISTS idx_schedules_queue_song ON schedules (queue_song_id)', table: 'schedules' },
+    ];
 
-      const indexSpecs = [
-        { sql: 'CREATE INDEX IF NOT EXISTS idx_playlists_created_at ON playlists (created_at)', table: 'playlists' },
-        { sql: 'CREATE INDEX IF NOT EXISTS idx_playlist_tracks_playlist_position ON playlist_tracks (playlist_id, position)', table: 'playlist_tracks' },
-        { sql: 'CREATE INDEX IF NOT EXISTS idx_queue_track_id ON queue (track_id)', table: 'queue' },
-        { sql: 'CREATE INDEX IF NOT EXISTS idx_queue_order ON queue (order_position)', table: 'queue' },
-        { sql: 'CREATE INDEX IF NOT EXISTS idx_history_played_at ON playback_history (played_at)', table: 'playback_history' },
-        { sql: 'CREATE INDEX IF NOT EXISTS idx_schedules_status_date_time ON schedules (status, date_time)', table: 'schedules' },
-        { sql: 'CREATE INDEX IF NOT EXISTS idx_schedules_queue_song ON schedules (queue_song_id)', table: 'schedules' },
-      ];
-
-      db.all("SELECT name FROM sqlite_master WHERE type='table'", (e, rows) => {
-        if (e) {
-          console.error('Failed to inspect database tables for index creation', e.message);
-          return;
-        }
-        const existingTables = new Set(rows.map((r) => r.name));
-        indexSpecs.forEach(({ sql, table }) => {
-          if (!existingTables.has(table)) return;
-          db.run(sql, (err2) => {
-            if (err2) {
-              console.error('Failed to ensure index:', sql, err2.message);
-            }
-          });
+    database.all("SELECT name FROM sqlite_master WHERE type='table'", (e, rows) => {
+      if (e) {
+        console.error('Failed to inspect database tables for index creation', e.message);
+        return;
+      }
+      const existingTables = new Set(rows.map((r) => r.name));
+      indexSpecs.forEach(({ sql, table }) => {
+        if (!existingTables.has(table)) return;
+        database.run(sql, (err2) => {
+          if (err2) {
+            console.error('Failed to ensure index:', sql, err2.message);
+          }
         });
       });
     });
-  }
+  });
+}
+
+function openDatabaseConnection() {
+  return new Promise((resolve, reject) => {
+    const connection = new sqlite3.Database(dbPath, (err) => {
+      if (err) {
+        reject(err);
+        return;
+      }
+      resolve(connection);
+    });
+  });
+}
+
+export let db = await openDatabaseConnection().catch((err) => {
+  console.error('Error opening database:', err.message);
+  return new sqlite3.Database(dbPath);
 });
+
+console.log('Connected to SQLite database');
+ensureCoreSchema(db);
+
+export async function reconnectDatabase() {
+  const previous = db;
+  await new Promise((resolve) => previous.close(() => resolve()));
+  db = await openDatabaseConnection();
+  ensureCoreSchema(db);
+  return db;
+}
 
 // Promisify database operations
 export const query = (sql, params = []) => {

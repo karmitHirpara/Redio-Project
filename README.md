@@ -25,6 +25,21 @@ This system delivers complete radio-style automation: audio library management, 
 - Auto-named alias handling (e.g. `Song`, `Song (1)`, `Song (2)`)
 - Smart folder imports without overwriting existing tracks
 
+### Upload constraints
+
+- Max size: configurable (defaults to **unlimited**)
+- Allowed extensions: `.mp3`, `.wav`, `.ogg`, `.m4a`, `.flac`
+- Duplicate detection uses **SHA-256 hashing**.
+- All filesystem access is guarded against path traversal.
+
+Optional backend env vars for large uploads:
+
+- `MAX_UPLOAD_BYTES`
+  - `0` (default) = unlimited
+  - set to a number of bytes to enforce a cap
+- `REQUEST_TIMEOUT_MS`
+  - `0` disables Node request timeout (recommended for multi-GB uploads)
+
 ### Playlists
 
 - Create, rename, lock/unlock, duplicate
@@ -364,6 +379,14 @@ node scripts/init-db.js
 mkdir -p server/uploads
 chmod 755 server/uploads
 ```
+
+### Very large uploads (2GB+)
+
+If you deploy behind a reverse proxy (Nginx/Caddy), ensure it allows large request bodies and long-running uploads:
+
+- Increase/disable body size limits.
+- Increase proxy timeouts.
+- Consider disabling proxy request buffering for streaming uploads.
 
 ### CORS issues
 

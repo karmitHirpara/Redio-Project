@@ -73,8 +73,14 @@ export function useAudioDevices(): UseAudioDevicesResult {
       // If all devices are anonymous (no labels and empty ids), try to request
       // audio permission once to unlock richer device information, then
       // re-enumerate.
+      const audioOutputs = list.filter((d) => d.kind === 'audiooutput');
       const allAnonymous = list.every((d) => !d.label && !d.deviceId);
-      if (allAnonymous && !hasRequestedAudioPermission && navigator.mediaDevices.getUserMedia) {
+      const outputLabelsHidden =
+        audioOutputs.length > 0 &&
+        audioOutputs.every((d) => !d.label) &&
+        audioOutputs.some((d) => !!d.deviceId);
+
+      if ((allAnonymous || outputLabelsHidden) && !hasRequestedAudioPermission && navigator.mediaDevices.getUserMedia) {
         try {
           hasRequestedAudioPermission = true;
           await navigator.mediaDevices.getUserMedia({ audio: true });
@@ -91,7 +97,10 @@ export function useAudioDevices(): UseAudioDevicesResult {
         // id "default" in the UI so we do not collapse everything into the
         // same sink.
         .filter((d) => d.kind === 'audiooutput' && d.deviceId)
-        .map((d) => ({ deviceId: d.deviceId, label: d.label || 'Audio output' }))
+        .map((d) => {
+          const fallback = d.deviceId === 'default' ? 'System default (OS)' : `Audio output (${d.deviceId.slice(0, 6)})`;
+          return { deviceId: d.deviceId, label: d.label || fallback };
+        })
         .map((d) => ({ ...d, label: normalizeDeviceLabel(d.label) }))
         .filter((d) => d.label)
         .filter((d) => !isNoiseOutputDevice(d.label));
@@ -100,7 +109,8 @@ export function useAudioDevices(): UseAudioDevicesResult {
       // variants) while still keeping stable deviceIds.
       const byLabel: Record<string, AudioOutputDevice> = {};
       for (const d of outputs) {
-        const key = d.label.toLowerCase();
+        const generic = d.label.toLowerCase().startsWith('audio output');
+        const key = generic ? `${d.label.toLowerCase()}::${d.deviceId}` : d.label.toLowerCase();
         if (!byLabel[key]) byLabel[key] = d;
       }
 

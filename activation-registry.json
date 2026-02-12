@@ -3,15 +3,15 @@
     "REDIO-123": {
       "maxActivations": 2,
       "activations": {
-        "0976963a944e2e95cd5864ce924d2959cb39933225193c37e73955746525d7d1": {
-          "fingerprint": "0976963a944e2e95cd5864ce924d2959cb39933225193c37e73955746525d7d1",
-          "firstIssuedAt": "2026-01-17T10:03:29.938Z",
-          "lastIssuedAt": "2026-01-17T10:03:29.938Z",
-          "requestPath": "D:\\Redio Project\\activation-request.json"
+        "0e7ccc7af417ca92aaa927e5dcc8f5f05c2f79b4567e3285d44db903c9737b15": {
+          "fingerprint": "0e7ccc7af417ca92aaa927e5dcc8f5f05c2f79b4567e3285d44db903c9737b15",
+          "firstIssuedAt": "2026-02-11T07:09:37.332Z",
+          "lastIssuedAt": "2026-02-11T07:12:19.158Z",
+          "requestPath": "/Users/karmithirpara/Desktop/Redio Project/activation-request.json"
         }
       },
-      "ownerFingerprint": "0976963a944e2e95cd5864ce924d2959cb39933225193c37e73955746525d7d1",
-      "updatedAt": "2026-01-17T10:03:29.938Z",
+      "ownerFingerprint": "0e7ccc7af417ca92aaa927e5dcc8f5f05c2f79b4567e3285d44db903c9737b15",
+      "updatedAt": "2026-02-11T07:12:19.162Z",
       "product": "Redio"
     }
   }

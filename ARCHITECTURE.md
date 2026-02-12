@@ -72,7 +72,7 @@ Frontend: Upload via FormData
     ↓
 Backend: Multer middleware
     ↓
-Validate file type & size
+Validate file type (size limits are configurable)
     ↓
 Calculate SHA256 hash
     ↓
@@ -218,7 +218,7 @@ CREATE TABLE schedules (
 
 ### Current Implementation
 - File type validation (audio only)
-- File size limits (50MB)
+- File size limits are configurable (defaults to unlimited)
 - Duplicate detection via hash
 - SQL injection prevention (parameterized queries)
 - CORS protection

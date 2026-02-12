@@ -102,7 +102,6 @@ async function request<T>(endpoint: string, options: ApiRequestOptions = {}): Pr
   const url = buildUrl(endpoint);
   const method = (options.method || 'GET').toUpperCase();
   const responseType: ApiResponseType = options.responseType || 'json';
-  const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
   const allowedStatuses = options.allowedStatuses || [];
 
   const headers = new Headers(options.headers);
@@ -119,6 +118,8 @@ async function request<T>(endpoint: string, options: ApiRequestOptions = {}): Pr
   }
 
   const isFormData = typeof FormData !== 'undefined' && options.body instanceof FormData;
+  const timeoutMs =
+    options.timeoutMs ?? (isFormData ? 0 : DEFAULT_TIMEOUT_MS);
   const hasJson = Object.prototype.hasOwnProperty.call(options, 'json');
   const body: BodyInit | null | undefined = hasJson ? JSON.stringify(options.json) : options.body;
 
@@ -131,7 +132,7 @@ async function request<T>(endpoint: string, options: ApiRequestOptions = {}): Pr
 
   const doAttempt = async (): Promise<Response> => {
     const controller = new AbortController();
-    const id = window.setTimeout(() => controller.abort(), timeoutMs);
+    const id = timeoutMs > 0 ? window.setTimeout(() => controller.abort(), timeoutMs) : null;
     try {
       return await fetch(url, {
         ...options,
@@ -142,7 +143,7 @@ async function request<T>(endpoint: string, options: ApiRequestOptions = {}): Pr
         signal: controller.signal,
       });
     } finally {
-      window.clearTimeout(id);
+      if (id != null) window.clearTimeout(id);
     }
   };
 
@@ -321,8 +322,215 @@ export const historyAPI = {
     completed: boolean;
     source: string;
     fileStatus: string;
+    sessionId?: string;
   }) => apiClient.json<any>('/history', { method: 'POST', json: payload }),
   delete: (id: string) => apiClient.request<{ message: string }>(`/history/${id}`, { method: 'DELETE' }),
   action: (id: string, action: 'addToQueue' | 'putBackToLibrary') =>
     apiClient.json<any>(`/history/${id}/actions`, { method: 'POST', json: { action } }),
+};
+
+// Enhanced backup types for professional features
+export type BackupType = 'full' | 'incremental' | 'selective';
+export type DataCategory = 'library' | 'playlists' | 'queue' | 'scheduler' | 'history' | 'configs';
+export type StorageType = 'local' | 'external' | 'network';
+export type ConflictResolution = 'overwrite' | 'merge' | 'skip';
+
+export type StorageLocation = {
+  name: string;
+  type: StorageType;
+  path?: string;
+  networkPath?: string;
+  credentials?: {
+    username?: string;
+    password?: string;
+  };
+};
+
+export type BackupMetadata = {
+  id: string;
+  type: BackupType;
+  categories: DataCategory[];
+  size: number;
+  checksum: string;
+  createdAt: string;
+  version: string;
+  appVersion: string;
+  location: string;
+  compressed: boolean;
+  includesAudio: boolean;
+  description?: string;
+  uploadedAt?: string;
+  originalFilename?: string;
+  forceFullBackup?: boolean;
+};
+
+export type BackupFile = {
+  filename: string;
+  bytes: number;
+  modifiedAt: string;
+  location: string;
+  metadata?: BackupMetadata;
+  isValid: boolean;
+};
+
+export type BackupJob = {
+  id: string;
+  type: BackupType;
+  categories: DataCategory[];
+  status: 'running' | 'completed' | 'failed' | 'cancelled';
+  startedAt: string;
+  completedAt?: string;
+  progress: number;
+  currentStep: string;
+  error?: string;
+};
+
+export type BackupStatus = {
+  status: 'idle' | 'running';
+  currentJob: BackupJob | null;
+};
+
+export type BackupPreview = {
+  tracks?: number;
+  playlists?: number;
+  queueItems?: number;
+  schedules?: number;
+};
+
+export type BackupConfig = {
+  storageLocations: StorageLocation[];
+  retentionPolicy: {
+    keepDaily: number;
+    keepWeekly: number;
+    keepMonthly: number;
+  };
+  compressionEnabled: boolean;
+  includeAudioFiles: boolean;
+  defaultBackupType: BackupType;
+};
+
+export type CreateBackupOptions = {
+  type?: BackupType;
+  categories?: DataCategory[];
+  location?: string;
+  description?: string;
+};
+
+export type RestoreOptions = {
+  location?: string;
+  validateOnly?: boolean;
+  conflictResolution?: ConflictResolution;
+  createRestorePoint?: boolean;
+  selectiveRestore?: {
+    categories: DataCategory[];
+    mode: 'include' | 'exclude';
+  };
+};
+
+export type UploadResult = {
+  ok: true;
+  filename: string;
+  originalName: string;
+  size: number;
+  checksum: string;
+  metadata: BackupMetadata;
+};
+
+export type RestoreResult = {
+  ok: boolean;
+  restartRequired: boolean;
+  metadata: BackupMetadata;
+  selectiveRestore?: boolean;
+  restoredCategories?: DataCategory[];
+  fullRestore?: boolean;
+};
+
+export const backupAPI = {
+  // Basic operations
+  list: (location?: string) => apiClient.get<{ backups: BackupFile[] }>(location ? `/backups?location=${location}` : '/backups'),
+  create: (options?: CreateBackupOptions) => 
+    apiClient.request<{ ok: true; backup: { filename: string; path: string; bytes: number; checksum: string } }>('/backup', { 
+      method: 'POST',
+      json: options || {} 
+    }),
+  
+  // Status and job management
+  getStatus: (jobId?: string) => apiClient.get<BackupStatus>(jobId ? `/backup/status?jobId=${jobId}` : '/backup/status'),
+  cancelJob: (jobId: string) => apiClient.request<{ ok: true; message: string }>(`/backup/${jobId}`, { method: 'DELETE' }),
+  
+  // Validation and preview
+  preview: (filename: string, location?: string) =>
+    apiClient.json<{ ok: true; metadata: BackupMetadata; preview: BackupPreview }>('/backup/preview', {
+      method: 'POST',
+      json: { filename, location }
+    }),
+  
+  // Validate database structure
+  validate: (filename: string) =>
+    apiClient.json<{ isValid: boolean; errors?: string[]; filename: string }>('/backup/validate', {
+      method: 'POST',
+      json: { filename }
+    }),
+  
+  // Restore with options
+  restore: (filename: string, options?: RestoreOptions) =>
+    apiClient.json<RestoreResult>('/backup/restore', { 
+      method: 'POST', 
+      json: { filename, ...options } 
+    }),
+  
+  // Configuration
+  getConfig: () => apiClient.get<{ config: BackupConfig }>('/backup/config'),
+  updateConfig: (config: Partial<BackupConfig>) =>
+    apiClient.json<{ ok: true; config: BackupConfig }>('/backup/config', {
+      method: 'PUT',
+      json: config
+    }),
+  
+  // Storage location testing
+  testLocation: (type: StorageType, path: string) =>
+    apiClient.json<{ ok: boolean; error?: string }>('/backup/location/test', {
+      method: 'POST',
+      json: { type, path }
+    }),
+  
+  // Cleanup and management
+  delete: (filename: string, location?: string) =>
+    apiClient.request<{ ok: true }>(`/backups/${filename}${location ? `?location=${location}` : ''}`, { method: 'DELETE' }),
+  cleanup: (policy?: BackupConfig['retentionPolicy']) =>
+    apiClient.json<{ ok: true; deleted: number; remaining: number }>('/backups/cleanup', {
+      method: 'POST',
+      json: { policy }
+    }),
+  
+  // Upload and download
+  upload: (file: File) => {
+    const formData = new FormData();
+    formData.append('backupFile', file);
+    
+    return apiClient.request<UploadResult>('/backup/upload', {
+      method: 'POST',
+      body: formData,
+    });
+  },
+  
+  download: (filename: string, location?: string) => {
+    const url = location ? `/api/backup/download/${filename}?location=${location}` : `/api/backup/download/${filename}`;
+    
+    // Create download link
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = filename;
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    
+    return Promise.resolve();
+  },
+  getSchedule: () => apiClient.get<{ enabled: boolean; intervalMinutes: number }>('/backup/schedule'),
+  setSchedule: (enabled: boolean, intervalMinutes: number) =>
+    apiClient.json<{ ok: boolean; enabled: boolean; intervalMinutes: number }>('/backup/schedule', {
+      method: 'POST',
+      json: { enabled, intervalMinutes },
+    }),
 };

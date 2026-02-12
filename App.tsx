@@ -9,9 +9,10 @@ import { ResizeHandle } from './components/ResizeHandle';
 import { FloatingQueueDialog, FloatingDialogRect } from './components/FloatingQueueDialog';
 import { SchedulePlaylistDialog, ScheduleConfig } from './components/SchedulePlaylistDialog';
 import { HistoryDialog } from './components/HistoryDialog';
+import { SimpleBackupDialog } from './components/SimpleBackupDialog';
 import { ConfirmDialog } from './components/ConfirmDialog';
 import { ErrorBoundary } from './components/ErrorBoundary';
-import { Clock, ListMusic, ListOrdered, Music2, Speaker } from 'lucide-react';
+import { Clock, HardDriveDownload, ListMusic, ListOrdered, Music2, Speaker, Database, Settings, Shield } from 'lucide-react';
 import { Button } from './components/ui/button';
 import { useTheme } from './hooks/useTheme';
 import { useResizable } from './hooks/useResizable';
@@ -37,6 +38,8 @@ import {
   resolveUploadsUrl,
   schedulesAPI,
   tracksAPI,
+  backupAPI,
+  BackupConfig,
 } from './services/api';
 import { Input } from './components/ui/input';
 import { AnimatePresence, motion, useReducedMotion } from 'framer-motion';
@@ -60,6 +63,7 @@ export default function App() {
   const datetimeWarnedRef = useRef<Set<string>>(new Set());
   const [scheduleDialogOpen, setScheduleDialogOpen] = useState(false);
   const [historyOpen, setHistoryOpen] = useState(false);
+  const [showBackupDialog, setShowBackupDialog] = useState(false);
   const [selectedPlaylistForSchedule, setSelectedPlaylistForSchedule] = useState<Playlist | null>(null);
   const [trackToRemove, setTrackToRemove] = useState<string | null>(null);
   const [duplicatePrompt, setDuplicatePrompt] = useState<{
@@ -177,6 +181,22 @@ export default function App() {
     await handleAddToPlaylist(track, playlistId, true);
   };
 
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    if (window.location?.protocol === 'file:') return;
+
+    const handler = (e: BeforeUnloadEvent) => {
+      e.preventDefault();
+      e.returnValue = '';
+      return '';
+    };
+
+    window.addEventListener('beforeunload', handler);
+    return () => {
+      window.removeEventListener('beforeunload', handler);
+    };
+  }, []);
+
   // Keep a lightweight clock for display in the top bar
   useEffect(() => {
     const update = () => {
@@ -209,12 +229,28 @@ export default function App() {
     return () => window.clearTimeout(timeoutId);
   }, [scheduledPlaylists]);
 
-  // Load tracks from backend so library reflects database
-  useEffect(() => {
-    (async () => {
-      try {
-        const serverTracks = await tracksAPI.getAll();
-        const mapped: Track[] = (serverTracks as any[]).map((t: any) => ({
+  const resyncAll = async () => {
+    try {
+      const serverTracks = await tracksAPI.getAll();
+      const mapped: Track[] = (serverTracks as any[]).map((t: any) => ({
+        id: t.id,
+        name: t.name,
+        artist: t.artist,
+        duration: t.duration,
+        size: t.size,
+        filePath: resolveUploadsUrl(t.filePath || t.file_path),
+        hash: t.hash,
+        dateAdded: t.date_added ? new Date(t.date_added) : new Date(),
+      }));
+      setTracks(mapped);
+    } catch (error: any) {
+      console.error('Failed to resync tracks', error);
+    }
+
+    try {
+      const serverPlaylists = await playlistsAPI.getAll();
+      const mapped: Playlist[] = (serverPlaylists as any[]).map((p: any) => {
+        const mappedTracks: Track[] = (p.tracks || []).map((t: any) => ({
           id: t.id,
           name: t.name,
           artist: t.artist,
@@ -222,14 +258,80 @@ export default function App() {
           size: t.size,
           filePath: resolveUploadsUrl(t.filePath || t.file_path),
           hash: t.hash,
-          dateAdded: t.date_added ? new Date(t.date_added) : new Date(),
+          dateAdded: t.date_added
+            ? new Date(t.date_added)
+            : t.created_at
+              ? new Date(t.created_at)
+              : new Date(),
         }));
-        setTracks(mapped);
-      } catch (error: any) {
-        console.error('Failed to load tracks', error);
-        toast.error(error.message || 'Failed to load tracks');
-      }
-    })();
+
+        return {
+          id: p.id,
+          name: p.name,
+          tracks: mappedTracks,
+          locked: Boolean(p.locked),
+          createdAt: p.created_at ? new Date(p.created_at) : new Date(),
+          duration: p.duration ?? mappedTracks.reduce((sum, t) => sum + t.duration, 0),
+        } as Playlist;
+      });
+      setPlaylists(mapped);
+    } catch (error: any) {
+      console.error('Failed to resync playlists', error);
+    }
+
+    try {
+      const serverQueue = await queueAPI.get();
+      const normalized: QueueItem[] = (serverQueue as any[]).map((item) => {
+        const track = item?.track;
+        if (!track) return item;
+        return {
+          ...item,
+          track: {
+            ...track,
+            filePath: resolveUploadsUrl(track.filePath || track.file_path),
+          },
+        };
+      });
+      setQueue(normalized);
+
+      const headId = normalized[0]?.id ?? null;
+      setCurrentQueueItemId((prev) => {
+        if (!prev) return headId;
+        return normalized.some((q) => q.id === prev) ? prev : headId;
+      });
+    } catch (error) {
+      console.error('Failed to resync queue', error);
+    }
+
+    try {
+      const serverSchedules = await schedulesAPI.getAll();
+      const mapped: ScheduledPlaylist[] = (serverSchedules as any[]).map((s: any) => ({
+        id: s.id,
+        playlistId: s.playlist_id ?? s.playlistId,
+        playlistName: String(s.playlist_name ?? s.playlistName ?? ''),
+        type: s.type,
+        dateTime: s.date_time ? new Date(s.date_time) : s.dateTime ? new Date(s.dateTime) : undefined,
+        queueSongId: s.queue_song_id ?? s.queueSongId ?? undefined,
+        triggerPosition: (s.trigger_position ?? s.triggerPosition) as any,
+        lockPlaylist: Boolean(s.lock_playlist ?? s.lockPlaylist),
+        status: s.status as ScheduledPlaylist['status'],
+      }));
+      setScheduledPlaylists(mapped);
+    } catch (error) {
+      console.error('Failed to resync schedules', error);
+    }
+  };
+
+  // Load tracks from backend so library reflects database
+  useEffect(() => {
+    void resyncAll();
+  }, []);
+
+  // Allow other components to request a resync (e.g. after restore)
+  useEffect(() => {
+    const onResync = () => void resyncAll();
+    window.addEventListener('redio:resync', onResync);
+    return () => window.removeEventListener('redio:resync', onResync);
   }, []);
 
 
@@ -247,130 +349,221 @@ export default function App() {
   // so that scheduler-driven queue updates still reach the frontend.
   useEffect(() => {
     const envUrl = import.meta.env.VITE_WS_URL as string | undefined;
-    const wsUrl = envUrl || 'ws://localhost:3001/ws';
+    const wsUrl = envUrl || 'ws://127.0.0.1:3001/ws';
 
-    const socket = new WebSocket(wsUrl);
+    let socket: WebSocket | null = null;
+    let reconnectTimer: number | null = null;
+    let reconnectAttempt = 0;
+    let stopped = false;
 
-    socket.onopen = () => {
-      console.log('WebSocket connected:', wsUrl);
-      hasLiveQueueRef.current = true;
-    };
-
-    socket.onmessage = (event) => {
+    const resync = async () => {
       try {
-        const data = JSON.parse(event.data);
-        if (data.type === 'playlist-locked' && data.playlistId) {
-          const locked = Boolean(data.locked);
-          setPlaylists((prev) =>
-            prev.map((p) => (p.id === data.playlistId ? { ...p, locked } : p)),
-          );
-          return;
-        }
-        if (data.type === 'queue-updated' && Array.isArray(data.queue)) {
-          const newQueue: QueueItem[] = (data.queue as any[]).map((item) => {
-            const track = item?.track;
-            if (!track) return item;
-            return {
-              ...item,
-              track: {
-                ...track,
-                filePath: resolveUploadsUrl(track.filePath || track.file_path),
-              },
-            };
-          });
+        const serverQueue = await queueAPI.get();
+        const normalized: QueueItem[] = (serverQueue as any[]).map((item) => {
+          const track = item?.track;
+          if (!track) return item;
+          return {
+            ...item,
+            track: {
+              ...track,
+              filePath: resolveUploadsUrl(track.filePath || track.file_path),
+            },
+          };
+        });
+        setQueue(normalized);
 
-          const previousCurrentId = currentQueueItemIdRef.current;
-          const wasCurrentStillPresent = previousCurrentId
-            ? newQueue.some((item) => item.id === previousCurrentId)
-            : false;
+        const headId = normalized[0]?.id ?? null;
+        setCurrentQueueItemId((prev) => {
+          if (!prev) return headId;
+          return normalized.some((q) => q.id === prev) ? prev : headId;
+        });
+      } catch (error) {
+        console.error('Failed to resync queue', error);
+      }
 
-          setQueue(newQueue);
-
-          const firstQueueItemId = newQueue[0]?.id ?? null;
-
-          if (data.reason === 'schedule-preempt' && firstQueueItemId) {
-            const interruptedTrack = currentTrackRef.current;
-            if (interruptedTrack) {
-              const now = Date.now();
-              const wallClockStart = nowPlayingStartRef.current;
-              const wallClockElapsedSeconds = wallClockStart
-                ? Math.max(0, Math.round((now - wallClockStart.getTime()) / 1000))
-                : 0;
-              const playheadSeconds = Math.max(0, Math.round(playbackPositionSecondsRef.current || 0));
-              const interruptedSeconds = Math.max(playheadSeconds, wallClockElapsedSeconds);
-              const playedAtOverride = new Date(Date.now() - interruptedSeconds * 1000).toISOString();
-              logPlaybackHistory(interruptedTrack, {
-                completed: false,
-                source: 'queue',
-                playedAtOverride,
-                positionEndOverrideSeconds: interruptedSeconds,
-              });
-            }
-
-            // Mark any due pending datetime schedules as completed and
-            // dismiss them from the Scheduled panel so the notification
-            // auto-closes once the schedule time is reached.
-            const now = new Date();
-            const completedIds: string[] = [];
-            setScheduledPlaylists((prev) =>
-              prev.map((s) => {
-                if (
-                  s.type === 'datetime' &&
-                  s.status === 'pending' &&
-                  s.dateTime &&
-                  s.dateTime.getTime() <= now.getTime()
-                ) {
-                  completedIds.push(s.id);
-                  return { ...s, status: 'completed' };
-                }
-                return s;
-              }),
-            );
-
-            if (completedIds.length > 0) {
-              setDismissedScheduleIds((prev) =>
-                Array.from(new Set([...prev, ...completedIds])),
-              );
-            }
-
-            setCurrentQueueItemId(firstQueueItemId);
-            setIsPlaying(true);
-            setNowPlayingStart(new Date());
-            return;
-          }
-
-          // Generic preemption detection: previously playing track has
-          // disappeared from the queue but there is still a head item.
-          if (previousCurrentId && !wasCurrentStillPresent && firstQueueItemId) {
-            const interruptedTrack = currentTrackRef.current;
-            if (interruptedTrack) {
-              logPlaybackHistory(interruptedTrack, { completed: false, source: 'queue' });
-            }
-            setCurrentQueueItemId(firstQueueItemId);
-            setIsPlaying(true);
-            setNowPlayingStart(new Date());
-          } else {
-            // If nothing is currently selected, select the first track for
-            // playback context (non-preemption updates).
-            setCurrentQueueItemId((prev: string | null) => prev ?? firstQueueItemId);
-          }
-        }
-      } catch (err) {
-        console.error('Error parsing WebSocket message', err);
+      try {
+        const serverSchedules = await schedulesAPI.getAll();
+        const mapped: ScheduledPlaylist[] = (serverSchedules as any[]).map((s: any) => ({
+          id: s.id,
+          playlistId: s.playlist_id ?? s.playlistId,
+          playlistName: String(s.playlist_name ?? s.playlistName ?? ''),
+          type: s.type,
+          dateTime: s.date_time ? new Date(s.date_time) : s.dateTime ? new Date(s.dateTime) : undefined,
+          queueSongId: s.queue_song_id ?? s.queueSongId ?? undefined,
+          triggerPosition: (s.trigger_position ?? s.triggerPosition) as any,
+          lockPlaylist: Boolean(s.lock_playlist ?? s.lockPlaylist),
+          status: s.status as ScheduledPlaylist['status'],
+        }));
+        setScheduledPlaylists(mapped);
+      } catch (error) {
+        console.error('Failed to resync schedules', error);
       }
     };
 
-    socket.onclose = () => {
-      console.log('WebSocket disconnected');
-      hasLiveQueueRef.current = false;
+    const scheduleReconnect = () => {
+      if (stopped) return;
+      if (reconnectTimer != null) return;
+      const delay = Math.min(10000, 500 * Math.pow(2, reconnectAttempt));
+      reconnectTimer = window.setTimeout(() => {
+        reconnectTimer = null;
+        reconnectAttempt = Math.min(reconnectAttempt + 1, 6);
+        connect();
+      }, delay);
     };
 
-    socket.onerror = (err) => {
-      console.error('WebSocket error', err);
+    const connect = () => {
+      if (stopped) return;
+      try {
+        socket?.close();
+      } catch {}
+
+      socket = new WebSocket(wsUrl);
+
+      socket.onopen = () => {
+        reconnectAttempt = 0;
+        console.log('WebSocket connected:', wsUrl);
+        hasLiveQueueRef.current = true;
+        void resync();
+      };
+
+      socket.onmessage = (event) => {
+        try {
+          const data = JSON.parse(event.data);
+          if (data.type === 'database-restored') {
+            void resyncAll();
+            window.dispatchEvent(new Event('redio:library-resync'));
+            return;
+          }
+          if (data.type === 'playlist-locked' && data.playlistId) {
+            const locked = Boolean(data.locked);
+            setPlaylists((prev) =>
+              prev.map((p) => (p.id === data.playlistId ? { ...p, locked } : p)),
+            );
+            return;
+          }
+          if (data.type === 'queue-updated' && Array.isArray(data.queue)) {
+            const newQueue: QueueItem[] = (data.queue as any[]).map((item) => {
+              const track = item?.track;
+              if (!track) return item;
+              return {
+                ...item,
+                track: {
+                  ...track,
+                  filePath: resolveUploadsUrl(track.filePath || track.file_path),
+                },
+              };
+            });
+
+            const previousCurrentId = currentQueueItemIdRef.current;
+            const wasCurrentStillPresent = previousCurrentId
+              ? newQueue.some((item) => item.id === previousCurrentId)
+              : false;
+
+            setQueue(newQueue);
+
+            const firstQueueItemId = newQueue[0]?.id ?? null;
+
+            if (data.reason === 'schedule-preempt' && firstQueueItemId) {
+              const interruptedTrack = currentTrackRef.current;
+              if (interruptedTrack) {
+                const now = Date.now();
+                const wallClockStart = nowPlayingStartRef.current;
+                const wallClockElapsedSeconds = wallClockStart
+                  ? Math.max(0, Math.round((now - wallClockStart.getTime()) / 1000))
+                  : 0;
+                const playheadSeconds = Math.max(0, Math.round(playbackPositionSecondsRef.current || 0));
+                const interruptedSeconds = Math.max(playheadSeconds, wallClockElapsedSeconds);
+                const playedAtOverride = new Date(Date.now() - interruptedSeconds * 1000).toISOString();
+                logPlaybackHistory(interruptedTrack, {
+                  completed: false,
+                  source: 'queue',
+                  playedAtOverride,
+                  positionEndOverrideSeconds: interruptedSeconds,
+                });
+              }
+
+              const now = new Date();
+              const completedIds: string[] = [];
+              setScheduledPlaylists((prev) =>
+                prev.map((s) => {
+                  if (
+                    s.type === 'datetime' &&
+                    s.status === 'pending' &&
+                    s.dateTime &&
+                    s.dateTime.getTime() <= now.getTime()
+                  ) {
+                    completedIds.push(s.id);
+                    return { ...s, status: 'completed' };
+                  }
+                  return s;
+                }),
+              );
+
+              if (completedIds.length > 0) {
+                setDismissedScheduleIds((prev) =>
+                  Array.from(new Set([...prev, ...completedIds])),
+                );
+              }
+
+              setCurrentQueueItemId(firstQueueItemId);
+              setIsPlaying(true);
+              setNowPlayingStart(new Date());
+              return;
+            }
+
+            if (previousCurrentId && !wasCurrentStillPresent && firstQueueItemId) {
+              const interruptedTrack = currentTrackRef.current;
+              if (interruptedTrack) {
+                logPlaybackHistory(interruptedTrack, { completed: false, source: 'queue' });
+              }
+              setCurrentQueueItemId(firstQueueItemId);
+              setIsPlaying(true);
+              setNowPlayingStart(new Date());
+            } else {
+              setCurrentQueueItemId((prev: string | null) => prev ?? firstQueueItemId);
+            }
+          }
+        } catch (err) {
+          console.error('Error parsing WebSocket message', err);
+        }
+      };
+
+      socket.onclose = () => {
+        console.log('WebSocket disconnected');
+        hasLiveQueueRef.current = false;
+        scheduleReconnect();
+      };
+
+      socket.onerror = (err) => {
+        console.error('WebSocket error', err);
+      };
     };
+
+    const onVisibility = () => {
+      if (document.hidden) return;
+      const state = socket?.readyState;
+      if (state == null || state === WebSocket.CLOSED) {
+        connect();
+      }
+      void resync();
+    };
+
+    window.addEventListener('focus', onVisibility);
+    document.addEventListener('visibilitychange', onVisibility);
+    connect();
 
     return () => {
-      socket.close();
+      stopped = true;
+      window.removeEventListener('focus', onVisibility);
+      document.removeEventListener('visibilitychange', onVisibility);
+      if (reconnectTimer != null) {
+        window.clearTimeout(reconnectTimer);
+        reconnectTimer = null;
+      }
+      try {
+        socket?.close();
+      } catch {}
+      socket = null;
     };
   }, []);
 
@@ -666,7 +859,6 @@ export default function App() {
     }
   }, [isPlaying, nowPlayingStart]);
 
-  const MAX_UPLOAD_BYTES = 50 * 1024 * 1024;
   const ALLOWED_UPLOAD_EXTENSIONS = new Set(['.mp3', '.wav', '.ogg', '.m4a', '.flac']);
   const ALLOWED_UPLOAD_MIME_TYPES = new Set([
     'audio/mpeg',
@@ -684,7 +876,6 @@ export default function App() {
 
   const isValidUploadFile = (file: File) => {
     if (!file) return { ok: false as const, reason: 'Invalid file' };
-    if (file.size > MAX_UPLOAD_BYTES) return { ok: false as const, reason: 'File too large' };
     const lower = String(file.name || '').toLowerCase();
     const dot = lower.lastIndexOf('.');
     const ext = dot >= 0 ? lower.slice(dot) : '';
@@ -2076,6 +2267,18 @@ export default function App() {
             </Button>
 
             <Button
+              variant="ghost"
+              size="sm"
+              className="gap-2 text-xs bg-muted/10 hover:bg-muted/20 text-foreground/80 hover:text-foreground border border-transparent hover:border-border/60"
+              onClick={() => setShowBackupDialog(true)}
+              title="Backup & Restore"
+            >
+              <Shield className="w-4 h-4" />
+              <span>Backup & Restore</span>
+            </Button>
+
+            
+            <Button
               variant={queueDialogOpen ? 'default' : 'ghost'}
               size="sm"
               className={
@@ -2234,6 +2437,8 @@ export default function App() {
       )}
 
       <HistoryDialog open={historyOpen} onOpenChange={setHistoryOpen} />
+
+      <SimpleBackupDialog open={showBackupDialog} onOpenChange={setShowBackupDialog} />
 
       <ConfirmDialog
         open={trackToRemove !== null}

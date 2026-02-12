@@ -143,6 +143,22 @@ To move the license to another PC:
 2. Open `http://localhost:3001/health` – should return `{ "status": "ok" }`.  
 3. Open `http://localhost:5173` – the app should load with demo tracks and playlists.
 
+## Large Uploads (2GB+)
+
+The backend supports very large uploads, but your environment must allow long-running requests.
+
+Optional backend env vars (in `server/.env`):
+
+```env
+# 0 (default) = unlimited
+MAX_UPLOAD_BYTES=0
+
+# 0 disables Node request timeout (recommended for multi-GB uploads)
+REQUEST_TIMEOUT_MS=0
+```
+
+If deploying behind a reverse proxy (Nginx/Caddy), ensure it allows large request bodies and long timeouts.
+
 ## Common Issues
 
 ### Port 3001 already in use

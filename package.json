@@ -14,7 +14,7 @@
     "license:gen": "node scripts/generate-license.cjs",
     "license:gen-activation": "node scripts/generate-activation.cjs",
     "init-db": "npm run init-db --prefix server",
-    "rebuild:electron": "electron-rebuild -f -w sqlite3",
+    "rebuild:electron": "electron-rebuild -f -w sqlite3 && electron-rebuild -f -w sqlite3 --module-dir server",
     "typecheck": "tsc --noEmit",
     "build:web": "vite build",
     "verify": "npm run typecheck && npm run build:web",
@@ -50,6 +50,7 @@
     "@radix-ui/react-toggle": "^1.1.2",
     "@radix-ui/react-toggle-group": "^1.1.2",
     "@radix-ui/react-tooltip": "^1.2.8",
+    "@types/multer": "^2.0.0",
     "class-variance-authority": "^0.7.1",
     "cmdk": "^1.1.1",
     "crypto": "^1.0.1",
@@ -59,6 +60,7 @@
     "input-otp": "^1.4.2",
     "lucide-react": "^0.487.0",
     "motion": "^12.23.24",
+    "multer": "^2.0.2",
     "react": "^18.3.1",
     "react-day-picker": "^8.10.1",
     "react-dom": "^18.3.1",
@@ -74,7 +76,7 @@
     "@electron/rebuild": "^3.6.0",
     "@types/react": "^18.3.26",
     "@types/react-dom": "^18.3.7",
-    "@vitejs/plugin-react-swc": "^3.11.0",
+    "@vitejs/plugin-react": "^4.7.0",
     "autoprefixer": "^10.4.21",
     "concurrently": "^9.2.1",
     "electron": "^30.5.1",
@@ -88,7 +90,11 @@
   "build": {
     "appId": "com.yourcompany.redio",
     "productName": "Redio",
+    "asarUnpack": [
+      "**/*.node"
+    ],
     "directories": {
+      "buildResources": "electron/assets",
       "output": "release"
     },
     "nsis": {
@@ -106,6 +112,12 @@
         "nsis"
       ],
       "icon": "node_modules/app-builder-lib/templates/icons/proton-native/proton-native.ico"
+    },
+    "mac": {
+      "target": [
+        "dmg"
+      ],
+      "icon": "electron/assets/icon.png"
     }
   }
 }

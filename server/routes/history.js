@@ -9,11 +9,14 @@ router.get('/', async (req, res) => {
   try {
     const limit = parseInt(req.query.limit, 10) || 100;
     const history = await query(
-      `SELECT h.*, t.name as track_name, t.artist as track_artist
-       FROM playback_history h
-       LEFT JOIN tracks t ON h.track_id = t.id
-       ORDER BY h.played_at DESC
-       LIMIT ?`,
+      `SELECT * FROM (
+         SELECT h.*, t.name as track_name, t.artist as track_artist
+         FROM playback_history h
+         LEFT JOIN tracks t ON h.track_id = t.id
+         ORDER BY h.played_at DESC
+         LIMIT ?
+       ) recent
+       ORDER BY played_at ASC`,
       [limit]
     );
     res.json(history);

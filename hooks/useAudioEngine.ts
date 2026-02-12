@@ -39,6 +39,7 @@ export function useAudioEngine({
   const fadeRafRef = useRef<number | null>(null);
   const endDelayTimeoutRef = useRef<number | null>(null);
   const autoAdvanceRef = useRef(false);
+  const pendingAdvanceUntilMsRef = useRef<number | null>(null);
 
   const activeIndexRef = useRef<0 | 1>(0);
 
@@ -94,6 +95,13 @@ export function useAudioEngine({
         activeAudio.play().catch(() => {
           // Playback might be blocked by browser autoplay policies
         });
+
+        if (typeof document !== 'undefined' && document.hidden) {
+          try {
+            activeAudio.volume = 1;
+          } catch {}
+          return;
+        }
 
         // Fade in the first ~0.5s of the newly started track.
         if (fadeRafRef.current !== null) {
@@ -159,6 +167,13 @@ export function useAudioEngine({
         host.play().catch(() => {
           // Playback might be blocked by browser autoplay policies
         });
+
+        if (typeof document !== 'undefined' && document.hidden) {
+          try {
+            host.volume = 1;
+          } catch {}
+          return;
+        }
 
         // Fade in the first ~0.5s of the newly started track.
         if (fadeRafRef.current !== null) {
@@ -285,8 +300,14 @@ export function useAudioEngine({
       // configurable silence between songs before advancing to the next
       // track.
       const delayMs = Math.max(0, (crossfadeSeconds ?? 0) * 1000);
+      pendingAdvanceUntilMsRef.current = Date.now() + delayMs;
       endDelayTimeoutRef.current = window.setTimeout(() => {
         endDelayTimeoutRef.current = null;
+        const until = pendingAdvanceUntilMsRef.current;
+        if (until != null && Date.now() < until) {
+          return;
+        }
+        pendingAdvanceUntilMsRef.current = null;
         autoAdvanceRef.current = true;
         onNext();
       }, delayMs);
@@ -324,6 +345,64 @@ export function useAudioEngine({
       audio.currentTime = newTime;
     }
   };
+
+  // Some environments may suspend media/timers when backgrounded. When the
+  // user returns to the app, try to resume playback if it should be playing.
+  useEffect(() => {
+    if (typeof document === 'undefined' || typeof window === 'undefined') return;
+
+    const tryResume = () => {
+      if (!isPlaying || !currentTrack) return;
+      const audio = getActiveAudio();
+      if (!audio) return;
+
+      const pendingUntil = pendingAdvanceUntilMsRef.current;
+      if (pendingUntil != null && Date.now() >= pendingUntil) {
+        pendingAdvanceUntilMsRef.current = null;
+        autoAdvanceRef.current = true;
+        onNext();
+        return;
+      }
+
+      if (!audio.paused) return;
+      audio.play().catch(() => {
+        // Ignore: browser autoplay policies may still require user gesture.
+      });
+
+      // Always re-sync UI timing from the media element when returning to the
+      // foreground. Background throttling can pause timeupdate events, which
+      // would otherwise leave the UI and scheduling logic stale.
+      try {
+        if (Number.isFinite(audio.currentTime)) {
+          setCurrentTime(audio.currentTime);
+        }
+        if (Number.isFinite(audio.duration) && audio.duration > 0) {
+          setDuration(audio.duration);
+        }
+      } catch {
+        // ignore
+      }
+
+      if (!audio.paused && audio.volume === 0) {
+        try {
+          audio.volume = 1;
+        } catch {}
+      }
+    };
+
+    const onVisibility = () => {
+      if (!document.hidden) {
+        tryResume();
+      }
+    };
+
+    window.addEventListener('focus', tryResume);
+    document.addEventListener('visibilitychange', onVisibility);
+    return () => {
+      window.removeEventListener('focus', tryResume);
+      document.removeEventListener('visibilitychange', onVisibility);
+    };
+  }, [isPlaying, currentTrack]);
 
   return {
     primaryAudioRef,

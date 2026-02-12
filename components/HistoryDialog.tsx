@@ -159,8 +159,11 @@ export function HistoryDialog({ open, onOpenChange }: HistoryDialogProps) {
       if (!groups.has(key)) groups.set(key, []);
       groups.get(key)!.push(entry);
     }
-    // Sort dates descending (most recent first)
-    return Array.from(groups.entries()).sort(([a], [b]) => (a < b ? 1 : -1));
+    for (const [, dayEntries] of groups) {
+      dayEntries.sort((a, b) => new Date(a.played_at).getTime() - new Date(b.played_at).getTime());
+    }
+    // Sort dates ascending (oldest first)
+    return Array.from(groups.entries()).sort(([a], [b]) => (a > b ? 1 : -1));
   }, [entries]);
 
   const [expandedDates, setExpandedDates] = useState<Set<string>>(new Set());
@@ -171,7 +174,7 @@ export function HistoryDialog({ open, onOpenChange }: HistoryDialogProps) {
       setExpandedDates(prev => {
         if (prev.size > 0) return prev;
         const next = new Set(prev);
-        next.add(groupedByDate[0][0]);
+        next.add(groupedByDate[groupedByDate.length - 1][0]);
         return next;
       });
     }

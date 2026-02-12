@@ -198,6 +198,22 @@ export function LibraryPanel({
   }, []);
 
   useEffect(() => {
+    const load = async () => {
+      try {
+        const data = await foldersAPI.getAll();
+        setFolders(data as any);
+        setFolderTracks({});
+      } catch (err) {
+        console.error('Failed to load folders', err);
+      }
+    };
+
+    const onResync = () => void load();
+    window.addEventListener('redio:library-resync', onResync);
+    return () => window.removeEventListener('redio:library-resync', onResync);
+  }, []);
+
+  useEffect(() => {
     if (folders.length === 0) return;
     const firstFolderId = folders[0]?.id;
     if (!firstFolderId) return;

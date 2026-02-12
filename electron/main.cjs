@@ -1,5 +1,5 @@
 // electron/main.cjs
-const { app, BrowserWindow, shell, dialog, clipboard } = require('electron');
+const { app, BrowserWindow, shell, dialog, clipboard, powerSaveBlocker } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const { pathToFileURL } = require('url');
@@ -17,6 +17,17 @@ let licenseInfo = null;
 let expiryTimeout = null;
 let expiryInterval = null;
 let expiryHandled = false;
+let powerBlockerId = null;
+let mainWindow = null;
+let isQuitting = false;
+
+// Keep renderer timers/audio responsive even when the window is minimized.
+// This is important for uninterrupted playback during scheduled preemptions.
+try {
+  app.commandLine.appendSwitch('disable-renderer-backgrounding');
+} catch {
+  // ignore
+}
 
 async function startBackend() {
   // Resolve runtime data directories in the per-user application data folder.
@@ -424,11 +435,45 @@ function createWindow() {
     },
   });
 
+  try {
+    win.webContents.setBackgroundThrottling(false);
+  } catch {
+    // ignore
+  }
+
   if (app.isPackaged && process.env.REDIO_DEVTOOLS !== '1') {
     win.webContents.on('devtools-opened', () => {
       win.webContents.closeDevTools();
     });
   }
+
+  win.on('close', async (event) => {
+    if (isQuitting) return;
+
+    event.preventDefault();
+
+    try {
+      const result = await dialog.showMessageBox(win, {
+        type: 'question',
+        buttons: ['Cancel', 'Exit'],
+        defaultId: 0,
+        cancelId: 0,
+        noLink: true,
+        title: 'Exit Redio',
+        message: 'Are you sure you want to exit?',
+        detail: 'Playback and scheduling will stop when you close the app.',
+      });
+
+      if (result.response === 1) {
+        isQuitting = true;
+        app.quit();
+      }
+    } catch {
+      // If prompting fails, do not block exit.
+      isQuitting = true;
+      app.quit();
+    }
+  });
 
   win.webContents.setWindowOpenHandler(({ url }) => {
     maybeOpenExternal(url);
@@ -451,6 +496,8 @@ function createWindow() {
   } else {
     win.loadFile(path.join(__dirname, '..', 'dist', 'index.html'));
   }
+
+  mainWindow = win;
 }
 
 app.whenReady().then(async () => {
@@ -458,6 +505,18 @@ app.whenReady().then(async () => {
     const ok = await ensureLicenseOrQuit();
     if (!ok) return;
     startExpiryWatchdog();
+
+    // In packaged desktop mode, ensure the OS doesn't suspend the app while
+    // minimized/backgrounded, otherwise audio output and scheduled preemptions
+    // can pause unexpectedly.
+    try {
+      if (app.isPackaged && powerBlockerId == null) {
+        powerBlockerId = powerSaveBlocker.start('prevent-app-suspension');
+      }
+    } catch {
+      // ignore
+    }
+
     await startBackend();
     createWindow();
   } catch (e) {
@@ -472,7 +531,16 @@ app.whenReady().then(async () => {
 });
 
 app.on('before-quit', async () => {
+  isQuitting = true;
   try {
+    try {
+      if (powerBlockerId != null && powerSaveBlocker.isStarted(powerBlockerId)) {
+        powerSaveBlocker.stop(powerBlockerId);
+      }
+    } catch {
+      // ignore
+    }
+
     if (backendModule?.stopBackend) {
       await backendModule.stopBackend();
     }

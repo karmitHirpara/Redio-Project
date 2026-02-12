@@ -16,6 +16,7 @@ import queueRouter from './routes/queue.js';
 import schedulesRouter from './routes/schedules.js';
 import historyRouter from './routes/history.js';
 import foldersRouter from './routes/folders.js';
+import backupRouter from './routes/backup.js';
 
 dotenv.config();
 
@@ -121,6 +122,7 @@ app.use('/api/queue', queueRouter);
 app.use('/api/schedules', schedulesRouter);
 app.use('/api/history', historyRouter);
 app.use('/api/folders', foldersRouter);
+app.use('/api', backupRouter);
 
 // Health check
 app.get('/health', (req, res) => {
@@ -160,6 +162,11 @@ app.use((req, res) => {
 
 // HTTP server + WebSocket server
 const server = http.createServer(app);
+
+const requestTimeoutMs = Number(process.env.REQUEST_TIMEOUT_MS || 0);
+if (Number.isFinite(requestTimeoutMs) && requestTimeoutMs >= 0) {
+  server.requestTimeout = requestTimeoutMs;
+}
 
 const wss = new WebSocketServer({ server, path: '/ws' });
 
