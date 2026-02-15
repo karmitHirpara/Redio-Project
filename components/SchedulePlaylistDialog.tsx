@@ -1,5 +1,5 @@
 import { useMemo, useState, useEffect } from 'react';
-import { Calendar, Clock, Lock, Music } from 'lucide-react';
+import { Calendar, Clock, Lock, Music, Info, History } from 'lucide-react';
 import { AnimatePresence, motion, useReducedMotion } from 'framer-motion';
 import {
   Dialog,
@@ -11,7 +11,6 @@ import {
 } from './ui/dialog';
 import { Button } from './ui/button';
 import { Label } from './ui/label';
-import { RadioGroup, RadioGroupItem } from './ui/radio-group';
 import {
   Select,
   SelectContent,
@@ -20,7 +19,9 @@ import {
   SelectValue,
 } from './ui/select';
 import { Input } from './ui/input';
+import { Tabs, TabsList, TabsTrigger, TabsContent } from './ui/tabs';
 import { QueueItem } from '../types';
+import { cn } from './ui/utils';
 
 interface SchedulePlaylistDialogProps {
   open: boolean;
@@ -126,7 +127,7 @@ export function SchedulePlaylistDialog({
 
   const scheduleSummary = useMemo(() => {
     if (mode === 'datetime') {
-      if (!computedDateTime) return 'Pick a date and time.';
+      if (!computedDateTime) return 'Pick a date and time for automation.';
       return `Will start on ${computedDateTime.toLocaleString('en-IN', {
         timeZone: 'Asia/Kolkata',
         weekday: 'short',
@@ -139,7 +140,7 @@ export function SchedulePlaylistDialog({
       })} (IST)`;
     }
 
-    if (!selectedSong) return 'Select a queue song to use as a trigger.';
+    if (!selectedSong) return 'Select a queue song to use as a trigger point.';
 
     const position = triggerPosition === 'after' ? 'after' : 'before';
     return `Will start ${position} “${selectedSong.track.name}”. Queue will resume after the playlist completes.`;
@@ -157,7 +158,6 @@ export function SchedulePlaylistDialog({
     setDateTimeFrom(new Date(base.getTime() + mins * 60 * 1000));
   };
 
-  // Reset form state whenever the dialog is closed so it reopens cleanly
   useEffect(() => {
     if (!open) {
       setMode('datetime');
@@ -169,8 +169,6 @@ export function SchedulePlaylistDialog({
       return;
     }
 
-    // When opening: set a sensible default for Date & Time.
-    // (now + 5 minutes) so the user can schedule quickly without typing.
     if (open) {
       const base = new Date(Date.now() + 5 * 60 * 1000);
       setDateTimeFrom(base);
@@ -196,231 +194,192 @@ export function SchedulePlaylistDialog({
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="sm:max-w-[500px]">
-        <DialogHeader>
-          <DialogTitle>Schedule Playlist</DialogTitle>
-          <DialogDescription>
-            Configure when "{playlistName}" should automatically play
+      <DialogContent className="sm:max-w-[540px] border-none shadow-2xl bg-slate-950 text-white p-0 overflow-hidden">
+        <DialogHeader className="p-6 pb-0">
+          <DialogTitle className="text-xl font-bold flex items-center gap-2 text-white">
+            <History className="w-5 h-5 text-sky-400" />
+            Schedule Playlist
+          </DialogTitle>
+          <DialogDescription className="text-slate-400">
+            Set up precise automation for <span className="text-sky-300 font-medium">"{playlistName}"</span>
           </DialogDescription>
         </DialogHeader>
 
-        <div className="space-y-6 py-4">
-          {/* Scheduling Mode Selection */}
-          <div className="space-y-3">
-            <Label>Scheduling Method</Label>
-            <RadioGroup value={mode} onValueChange={(value) => setMode(value as 'datetime' | 'song-trigger')}>
-              <div className="flex items-center space-x-2">
-                <RadioGroupItem value="datetime" id="datetime" />
-                <Label htmlFor="datetime" className="flex items-center gap-2 cursor-pointer">
-                  <Calendar className="w-4 h-4" />
-                  Date & Time
-                </Label>
-              </div>
-              <div className="flex items-center space-x-2">
-                <RadioGroupItem value="song-trigger" id="song-trigger" />
-                <Label htmlFor="song-trigger" className="flex items-center gap-2 cursor-pointer">
-                  <Music className="w-4 h-4" />
-                  Song Trigger
-                </Label>
-              </div>
-            </RadioGroup>
-          </div>
+        <div className="p-6 space-y-6">
+          <Tabs value={mode} onValueChange={(v) => setMode(v as any)} className="w-full">
+            <TabsList className="grid w-full grid-cols-2 bg-slate-900 border border-slate-800">
+              <TabsTrigger value="datetime" className="data-[state=active]:bg-sky-600 data-[state=active]:text-white gap-2">
+                <Calendar className="w-4 h-4" />
+                Time-Based
+              </TabsTrigger>
+              <TabsTrigger value="song-trigger" className="data-[state=active]:bg-sky-600 data-[state=active]:text-white gap-2">
+                <Music className="w-4 h-4" />
+                Song-Triggered
+              </TabsTrigger>
+            </TabsList>
 
-          {/* Mode Content */}
-          <AnimatePresence mode="wait" initial={false}>
-            <motion.div
-              key={mode}
-              initial={reduceMotion ? false : { opacity: 0, height: 0 }}
-              animate={reduceMotion ? undefined : { opacity: 1, height: 'auto' }}
-              exit={reduceMotion ? undefined : { opacity: 0, height: 0 }}
-              transition={
-                reduceMotion
-                  ? undefined
-                  : {
-                      type: 'spring',
-                      stiffness: 320,
-                      damping: 30,
-                      mass: 0.9,
-                    }
-              }
-              className="overflow-hidden"
-            >
-              <div className="space-y-4">
-                {mode === 'datetime' ? (
-                  <>
-                    <div className="flex flex-wrap gap-2">
-                  <Button
-                    type="button"
-                    size="sm"
-                    variant="outline"
-                    className="h-7 px-2 text-[11px]"
-                    onClick={() => setDateTimeFrom(new Date())}
-                  >
-                    Today
-                  </Button>
-                  <Button
-                    type="button"
-                    size="sm"
-                    variant="outline"
-                    className="h-7 px-2 text-[11px]"
-                    onClick={() => {
-                      const d = new Date();
-                      d.setDate(d.getDate() + 1);
-                      setDateTimeFrom(d);
-                    }}
-                  >
-                    Tomorrow
-                  </Button>
-                  <Button
-                    type="button"
-                    size="sm"
-                    variant="outline"
-                    className="h-7 px-2 text-[11px]"
-                    onClick={() => addMinutes(15)}
-                  >
-                    +15m
-                  </Button>
-                  <Button
-                    type="button"
-                    size="sm"
-                    variant="outline"
-                    className="h-7 px-2 text-[11px]"
-                    onClick={() => addMinutes(30)}
-                  >
-                    +30m
-                  </Button>
-                  <Button
-                    type="button"
-                    size="sm"
-                    variant="outline"
-                    className="h-7 px-2 text-[11px]"
-                    onClick={() => addMinutes(60)}
-                  >
-                    +1h
-                  </Button>
+            <div className="mt-6">
+              <TabsContent value="datetime" className="space-y-6 mt-0">
+                <div className="flex flex-wrap gap-2">
+                  {[
+                    { label: 'Now', action: () => setDateTimeFrom(new Date()) },
+                    { label: 'Tomorrow', action: () => { const d = new Date(); d.setDate(d.getDate() + 1); setDateTimeFrom(d); } },
+                    { label: '+15m', action: () => addMinutes(15) },
+                    { label: '+1h', action: () => addMinutes(60) },
+                    { label: '+4h', action: () => addMinutes(240) },
+                  ].map((btn) => (
+                    <Button
+                      key={btn.label}
+                      type="button"
+                      size="sm"
+                      variant="outline"
+                      className="h-8 px-3 text-xs bg-slate-900 border-slate-800 hover:bg-slate-800 text-slate-300 transition-all duration-200"
+                      onClick={btn.action}
+                    >
+                      {btn.label}
+                    </Button>
+                  ))}
                 </div>
 
-                <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                <div className="grid grid-cols-2 gap-4">
                   <div className="space-y-2">
-                    <Label htmlFor="date">Date</Label>
+                    <Label className="text-xs font-semibold text-slate-400 uppercase tracking-wider">Date</Label>
                     <Input
-                      id="date"
                       type="date"
-                      className="schedule-datetime-input font-semibold text-base"
+                      className="bg-slate-900 border-slate-800 text-white focus-visible:ring-sky-500 h-11 text-base font-medium"
                       value={date}
                       onChange={(e) => setDate(e.target.value)}
                     />
                   </div>
                   <div className="space-y-2">
-                    <Label htmlFor="time">Time</Label>
+                    <Label className="text-xs font-semibold text-slate-400 uppercase tracking-wider">Time</Label>
                     <Input
-                      id="time"
                       type="time"
-                      value={time}
                       step={1}
-                      className="schedule-datetime-input font-semibold text-base"
+                      className="bg-slate-900 border-slate-800 text-white focus-visible:ring-sky-500 h-11 text-base font-medium"
+                      value={time}
                       onChange={(e) => setTime(e.target.value)}
                     />
                   </div>
                 </div>
 
                 {isDateTimeInPast && (
-                  <div className="text-[12px] text-destructive">
-                    Selected time is in the past. Please choose a future time.
-                  </div>
+                  <motion.div
+                    initial={{ opacity: 0, y: -5 }} animate={{ opacity: 1, y: 0 }}
+                    className="flex items-center gap-2 p-3 rounded-lg bg-red-500/10 border border-red-500/20 text-red-400 text-sm"
+                  >
+                    <Info className="w-4 h-4 flex-shrink-0" />
+                    <span>Warning: Selected time has already passed.</span>
+                  </motion.div>
                 )}
-                  </>
-                ) : (
-                  <>
-                    <div className="space-y-2">
-                      <Label>Select Song in Queue</Label>
-                      <Select value={selectedSongId} onValueChange={setSelectedSongId}>
-                        <SelectTrigger>
-                          <SelectValue placeholder="Choose a queue song..." />
-                        </SelectTrigger>
-                        <SelectContent>
-                          {queue.length === 0 ? (
-                            <div className="p-2 text-sm text-muted-foreground">
-                              No songs in queue
-                            </div>
-                          ) : (
-                            queue.map((item, index) => (
-                              <SelectItem key={item.id} value={item.id}>
-                                {index + 1}. {item.track.name} - {item.track.artist}
-                              </SelectItem>
-                            ))
-                          )}
-                        </SelectContent>
-                      </Select>
-                    </div>
+              </TabsContent>
 
-                    <div className="space-y-2">
-                      <Label>Trigger Position</Label>
-                      <RadioGroup
-                        value={triggerPosition}
-                        onValueChange={(value) => setTriggerPosition(value as 'before' | 'after')}
-                      >
-                        <div className="flex items-center space-x-2">
-                          <RadioGroupItem value="after" id="after" />
-                          <Label htmlFor="after" className="cursor-pointer">
-                            After selected song finishes
-                          </Label>
-                        </div>
-                        <div className="flex items-center space-x-2">
-                          <RadioGroupItem value="before" id="before" />
-                          <Label htmlFor="before" className="cursor-pointer">
-                            Before selected song plays
-                          </Label>
-                        </div>
-                      </RadioGroup>
-                    </div>
+              <TabsContent value="song-trigger" className="space-y-6 mt-0">
+                <div className="space-y-2">
+                  <Label className="text-xs font-semibold text-slate-400 uppercase tracking-wider">Trigger Track</Label>
+                  <Select value={selectedSongId} onValueChange={setSelectedSongId}>
+                    <SelectTrigger className="bg-slate-900 border-slate-800 h-11 text-white focus:ring-sky-500">
+                      <SelectValue placeholder="Select a song from the queue..." />
+                    </SelectTrigger>
+                    <SelectContent className="bg-slate-900 border-slate-800 text-white">
+                      {queue.length === 0 ? (
+                        <div className="p-3 text-center text-slate-500 text-sm italic">Queue is currently empty</div>
+                      ) : (
+                        queue.map((item, idx) => (
+                          <SelectItem key={item.id} value={item.id} className="focus:bg-sky-600 focus:text-white">
+                            <span className="opacity-50 mr-2 tabular-nums">{idx + 1}.</span>
+                            {item.track.name}
+                          </SelectItem>
+                        ))
+                      )}
+                    </SelectContent>
+                  </Select>
+                </div>
 
-                    {selectedSongId && (
-                      <div className="p-3 bg-accent/20 rounded-md text-sm text-muted-foreground">
-                        {triggerPosition === 'after'
-                          ? `Playlist will start automatically after the selected song finishes playing.`
-                          : `Playlist will start automatically before the selected song begins.`}
-                        {' '}Queue will resume after the playlist completes.
+                <div className="space-y-3">
+                  <Label className="text-xs font-semibold text-slate-400 uppercase tracking-wider">Positioning</Label>
+                  <div className="grid grid-cols-2 gap-3">
+                    <Button
+                      variant="outline"
+                      className={cn(
+                        "h-14 border-slate-800 bg-slate-900 text-sm justify-start px-4 gap-3 transition-all",
+                        triggerPosition === 'before' ? "border-sky-500 bg-sky-500/10 text-sky-400 ring-1 ring-sky-500" : "hover:bg-slate-800"
+                      )}
+                      onClick={() => setTriggerPosition('before')}
+                    >
+                      <div className={cn("w-4 h-4 rounded-full border-2 flex items-center justify-center", triggerPosition === 'before' ? "border-sky-500 bg-sky-500" : "border-slate-600")}>
+                        {triggerPosition === 'before' && <div className="w-1.5 h-1.5 bg-white rounded-full" />}
                       </div>
-                    )}
-                  </>
-                )}
-              </div>
-            </motion.div>
-          </AnimatePresence>
+                      <div className="text-left">
+                        <div className="font-semibold">Before</div>
+                        <div className="text-[11px] opacity-70">Pre-empt selection</div>
+                      </div>
+                    </Button>
+                    <Button
+                      variant="outline"
+                      className={cn(
+                        "h-14 border-slate-800 bg-slate-900 text-sm justify-start px-4 gap-3 transition-all",
+                        triggerPosition === 'after' ? "border-sky-500 bg-sky-500/10 text-sky-400 ring-1 ring-sky-500" : "hover:bg-slate-800"
+                      )}
+                      onClick={() => setTriggerPosition('after')}
+                    >
+                      <div className={cn("w-4 h-4 rounded-full border-2 flex items-center justify-center", triggerPosition === 'after' ? "border-sky-500 bg-sky-500" : "border-slate-600")}>
+                        {triggerPosition === 'after' && <div className="w-1.5 h-1.5 bg-white rounded-full" />}
+                      </div>
+                      <div className="text-left">
+                        <div className="font-semibold">After</div>
+                        <div className="text-[11px] opacity-70">Follow selection</div>
+                      </div>
+                    </Button>
+                  </div>
+                </div>
+              </TabsContent>
+            </div>
+          </Tabs>
 
-          <div className="rounded-md border border-border/60 bg-accent/10 px-3 py-2">
-            <div className="text-[11px] text-muted-foreground">Summary</div>
-            <div className="text-sm text-foreground mt-0.5">{scheduleSummary}</div>
+          <div className="p-4 rounded-xl bg-gradient-to-br from-slate-900 to-slate-950 border border-slate-800/50 shadow-inner">
+            <div className="flex items-center gap-2 mb-2">
+              <div className="px-2 py-0.5 rounded-full bg-sky-500/10 text-sky-400 text-[10px] font-bold uppercase tracking-tighter">Plan</div>
+            </div>
+            <div className="text-sm font-medium leading-relaxed text-slate-200">
+              {scheduleSummary}
+            </div>
           </div>
         </div>
 
-        <DialogFooter className="w-full">
-          <div className="flex w-full items-center justify-between gap-3">
+        <DialogFooter className="p-6 bg-slate-900/50 border-t border-slate-800/50">
+          <div className="flex w-full items-center justify-between">
             <Button
               type="button"
-              variant={lockPlaylist ? 'secondary' : 'ghost'}
+              variant="ghost"
               size="icon"
-              onClick={() => setLockPlaylist((v) => !v)}
-              aria-pressed={lockPlaylist}
-              title={lockPlaylist ? 'Auto-lock enabled' : 'Enable auto-lock'}
-              className="h-9 w-9"
+              onClick={() => setLockPlaylist(!lockPlaylist)}
+              className={cn(
+                "h-10 w-10 rounded-full transition-all",
+                lockPlaylist ? "bg-amber-500/10 text-amber-500 hover:bg-amber-500/20" : "text-slate-500 hover:bg-slate-800"
+              )}
+              title={lockPlaylist ? "Auto-lock enabled" : "Enable auto-lock for this playlist"}
             >
-              <Lock className={lockPlaylist ? 'h-4 w-4 text-foreground' : 'h-4 w-4 text-muted-foreground'} />
+              <Lock className={cn("w-5 h-5", lockPlaylist ? "fill-current" : "")} />
             </Button>
 
             <div className="flex items-center gap-3">
-              <Button variant="outline" onClick={() => onOpenChange(false)}>
+              <Button
+                variant="ghost"
+                className="text-slate-400 hover:text-white hover:bg-slate-800"
+                onClick={() => onOpenChange(false)}
+              >
                 Cancel
               </Button>
               <Button
+                className="bg-sky-600 hover:bg-sky-500 text-white px-6 font-bold shadow-lg shadow-sky-900/40"
                 onClick={handleSchedule}
                 disabled={
                   (mode === 'datetime' && (!date || !time || !computedDateTime || isDateTimeInPast)) ||
                   (mode === 'song-trigger' && !selectedSongId)
                 }
               >
-                Schedule Playlist
+                Schedule Now
               </Button>
             </div>
           </div>

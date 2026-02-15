@@ -7,6 +7,8 @@ interface UseQueueTimingInput {
   currentQueueItemId: string | null;
   isPlaying: boolean;
   nowPlayingStart: Date | null;
+  transitionMode: 'gap' | 'crossfade';
+  gapSeconds: number;
   crossfadeSeconds: number;
   seekAnchor?: { seconds: number; at: Date } | null;
 }
@@ -29,11 +31,23 @@ export interface QueueTimingResult {
   queueTimings: QueueItemTiming[];
 }
 
-function adjustedDurationSeconds(track: Track | null, crossfadeSeconds: number): number {
+function adjustedDurationSeconds(
+  track: Track | null,
+  transitionMode: 'gap' | 'crossfade',
+  gapSeconds: number,
+  crossfadeSeconds: number
+): number {
   if (!track || !track.duration || track.duration <= 0) return 0;
   const base = track.duration;
-  const adjusted = base - crossfadeSeconds;
-  return adjusted > 0 ? adjusted : base; // never go below original duration completely
+
+  if (transitionMode === 'gap') {
+    const gap = Number.isFinite(gapSeconds) ? Math.max(0, gapSeconds) : 0;
+    return base + gap;
+  }
+
+  const cf = Number.isFinite(crossfadeSeconds) ? Math.max(0, crossfadeSeconds) : 0;
+  const adjusted = base - cf;
+  return adjusted > 0 ? adjusted : base;
 }
 
 export function useQueueTiming({
@@ -42,6 +56,8 @@ export function useQueueTiming({
   currentQueueItemId,
   isPlaying,
   nowPlayingStart,
+  transitionMode,
+  gapSeconds,
   crossfadeSeconds,
   seekAnchor,
 }: UseQueueTimingInput): QueueTimingResult {
@@ -67,7 +83,7 @@ export function useQueueTiming({
       // the expected end time (and therefore the timing of subsequent
       // queue items), not rewrite the displayed start.
       const baseStart = nowPlayingStart ?? now;
-      const total = adjustedDurationSeconds(currentTrack, crossfadeSeconds);
+      const total = adjustedDurationSeconds(currentTrack, transitionMode, gapSeconds, crossfadeSeconds);
       const effectiveTotal = Math.max(0, total);
 
       let remaining: number;
@@ -114,7 +130,7 @@ export function useQueueTiming({
 
     for (let index = startIndex; index < queue.length; index += 1) {
       const item = queue[index];
-      const adj = adjustedDurationSeconds(item.track, crossfadeSeconds);
+      const adj = adjustedDurationSeconds(item.track, transitionMode, gapSeconds, crossfadeSeconds);
       const start = cursor;
       const end = adj > 0 ? new Date(start.getTime() + adj * 1000) : start;
       qTimings.push({ item, index, start, end });
@@ -129,6 +145,8 @@ export function useQueueTiming({
     currentQueueItemId,
     isPlaying,
     nowPlayingStart,
+    transitionMode,
+    gapSeconds,
     crossfadeSeconds,
     seekAnchor,
     tick,

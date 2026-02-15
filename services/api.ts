@@ -343,6 +343,19 @@ export const historyAPI = {
     apiClient.json<any>(`/history/${id}/actions`, { method: 'POST', json: { action } }),
 };
 
+export type SettingsPayload = {
+  settings: Record<string, string>;
+};
+
+export const settingsAPI = {
+  getAll: () => apiClient.get<SettingsPayload>('/settings'),
+  update: (updates: Record<string, string | number | boolean>) =>
+    apiClient.json<{ ok: true; settings: Record<string, string> }>('/settings', {
+      method: 'PUT',
+      json: { updates },
+    }),
+};
+
 // Enhanced backup types for professional features
 export type BackupType = 'full' | 'incremental' | 'selective';
 export type DataCategory = 'library' | 'playlists' | 'queue' | 'scheduler' | 'history' | 'configs';

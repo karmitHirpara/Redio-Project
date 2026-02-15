@@ -17,6 +17,7 @@ import schedulesRouter from './routes/schedules.js';
 import historyRouter from './routes/history.js';
 import foldersRouter from './routes/folders.js';
 import backupRouter from './routes/backup.js';
+import settingsRouter from './routes/settings.js';
 
 dotenv.config();
 
@@ -122,6 +123,7 @@ app.use('/api/queue', queueRouter);
 app.use('/api/schedules', schedulesRouter);
 app.use('/api/history', historyRouter);
 app.use('/api/folders', foldersRouter);
+app.use('/api', settingsRouter);
 app.use('/api', backupRouter);
 
 // Health check

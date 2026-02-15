@@ -1,0 +1,22 @@
+{
+  "id": "265d0252-ec64-4717-b5ed-3760b8650f3a",
+  "type": "full",
+  "categories": [
+    "library",
+    "playlists",
+    "queue",
+    "scheduler",
+    "history",
+    "configs"
+  ],
+  "size": 143360,
+  "checksum": "4095a788afe615a81a186993d633e391e6859a127f907b0842cb386bfa824f94",
+  "createdAt": "2026-02-14T05:29:12.246Z",
+  "version": "1.0.0",
+  "appVersion": "1.0.0",
+  "location": "default",
+  "compressed": false,
+  "includesAudio": false,
+  "description": "Manual backup",
+  "forceFullBackup": true
+}

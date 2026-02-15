@@ -1,6 +1,14 @@
 import { useEffect, useState } from 'react';
 import type React from 'react';
-import { Lock as LockIcon, Pause, Play, Radio, SkipForward, Unlock as UnlockIcon } from 'lucide-react';
+import {
+  Lock as LockIcon,
+  Pause,
+  Play,
+  Radio,
+  SkipForward,
+  SlidersHorizontal,
+  Unlock as UnlockIcon,
+} from 'lucide-react';
 import { Button } from './ui/button';
 import { Slider } from './ui/slider';
 import { Track } from '../types';
@@ -8,6 +16,14 @@ import { formatDuration } from '../lib/utils';
 import { useAudioEngine } from '../hooks/useAudioEngine';
 import type { UseAudioDevicesResult } from '../hooks/useAudioDevices';
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from './ui/tooltip';
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from './ui/select';
+import { StepperInput } from './ui/stepper-input';
 import {
   AlertDialog,
   AlertDialogAction,
@@ -30,8 +46,12 @@ interface PlaybackBarProps {
   onNext: () => void;
   onPrevious: () => void;
   isLive: boolean;
+  transitionMode: 'gap' | 'crossfade';
+  onTransitionModeChange: (value: 'gap' | 'crossfade') => void;
+  gapSeconds: number;
+  onGapSecondsChange: (value: number) => void;
   crossfadeSeconds: number;
-  onCrossfadeChange: (value: number) => void;
+  onCrossfadeSecondsChange: (value: number) => void;
   audioDevices: UseAudioDevicesResult;
   onSeek?: (seconds: number) => void;
   onProgress?: (seconds: number) => void;
@@ -45,19 +65,28 @@ export function PlaybackBar({
   onNext,
   onPrevious,
   isLive,
+  transitionMode,
+  onTransitionModeChange,
+  gapSeconds,
+  onGapSecondsChange,
   crossfadeSeconds,
-  onCrossfadeChange,
+  onCrossfadeSecondsChange,
   audioDevices,
   onSeek,
   onProgress,
 }: PlaybackBarProps) {
   const [showPauseConfirm, setShowPauseConfirm] = useState(false);
+  const [adjustOpen, setAdjustOpen] = useState(false);
   const [volume, setVolume] = useState(1);
   const SEEK_LOCK_KEY = 'redio.playback.seekLocked';
   const [seekLocked, setSeekLocked] = useState(false);
+
   const { primaryAudioRef, secondaryAudioRef, currentTime, duration, handleSeek } = useAudioEngine({
     currentTrack,
+    nextTrack,
     isPlaying,
+    transitionMode,
+    gapSeconds,
     crossfadeSeconds,
     onNext,
   });
@@ -91,6 +120,8 @@ export function PlaybackBar({
     if (b) b.volume = v;
   }, [volume, primaryAudioRef, secondaryAudioRef]);
 
+  const volumePercent = Math.round(volume * 100);
+
   useEffect(() => {
     if (!onProgress) return;
     onProgress(currentTime);
@@ -120,7 +151,7 @@ export function PlaybackBar({
     <>
       <audio ref={primaryAudioRef} className="hidden" />
       <audio ref={secondaryAudioRef} className="hidden" />
-      <div className="h-20 bg-background border-t border-border flex items-center px-5 gap-5">
+      <div className="h-20 bg-background border-t border-border flex items-center px-5 gap-5 relative">
         {/* Current Track Info */}
         <div className="flex items-center gap-3 w-64 min-w-[12rem]">
           {currentTrack ? (
@@ -166,7 +197,7 @@ export function PlaybackBar({
                 onValueCommit={
                   seekLocked
                     ? undefined
-                    : (vals) => {
+                    : (vals: number[]) => {
                         const seconds = vals[0] ?? 0;
                         if (onSeek) {
                           onSeek(seconds);
@@ -209,28 +240,69 @@ export function PlaybackBar({
           </div>
         </div>
 
-        {/* Additional Controls */}
-        <div className="rounded-md border border-border/60 bg-muted/20 px-3 py-2">
-          <div className="grid grid-cols-[2.25rem,7rem,3rem] items-center gap-x-2 gap-y-2">
-            <span className="text-[11px] text-muted-foreground">Gap</span>
-            <Slider
-              value={[crossfadeSeconds]}
-              max={12}
-              step={1}
-              onValueChange={(vals) => onCrossfadeChange(vals[0] ?? 0)}
-              className="h-1.5"
-            />
-            <span className="text-[11px] text-muted-foreground text-right tabular-nums">{crossfadeSeconds}s</span>
+        {/* Compact settings */}
+        <div className="flex items-center gap-2">
 
-            <span className="text-[11px] text-muted-foreground">Vol</span>
-            <Slider
-              value={[Math.round(volume * 100)]}
-              max={100}
-              step={1}
-              onValueChange={(vals) => setVolume((vals[0] ?? 100) / 100)}
-              className="h-1.5"
-            />
-            <span className="text-[11px] text-muted-foreground text-right tabular-nums">{Math.round(volume * 100)}%</span>
+          <div className="relative">
+            <Button
+              type="button"
+              size="sm"
+              variant="outline"
+              className="h-9 gap-2"
+              onClick={() => setAdjustOpen((v) => !v)}
+            >
+              <SlidersHorizontal className="h-4 w-4" />
+              Adjust
+            </Button>
+
+            {adjustOpen && (
+              <div
+                className="absolute right-0 bottom-[calc(100%+10px)] z-[1000] w-[18rem] rounded-md border bg-popover p-2 shadow-md"
+                onMouseDown={(e) => e.stopPropagation()}
+              >
+                <div className="px-1">
+                  <div className="text-xs font-medium">Playback Adjust</div>
+                </div>
+                <div className="my-2 h-px bg-border" />
+                <div className="grid grid-cols-[1fr,auto] items-center gap-x-3 gap-y-3 px-1 py-1">
+                  <div className="text-xs text-muted-foreground">Gap</div>
+                  <StepperInput
+                    value={gapSeconds}
+                    min={0}
+                    max={8}
+                    step={1}
+                    showButtons={false}
+                    onChange={(v) => {
+                      onGapSecondsChange(v);
+                      onTransitionModeChange('gap');
+                    }}
+                  />
+
+                  <div className="text-xs text-muted-foreground">Crossfade</div>
+                  <StepperInput
+                    value={crossfadeSeconds}
+                    min={0}
+                    max={10}
+                    step={1}
+                    showButtons={false}
+                    onChange={(v) => {
+                      onCrossfadeSecondsChange(v);
+                      onTransitionModeChange('crossfade');
+                    }}
+                  />
+
+                  <div className="text-xs text-muted-foreground">Sound</div>
+                  <StepperInput
+                    value={volumePercent}
+                    min={0}
+                    max={100}
+                    step={1}
+                    showButtons={false}
+                    onChange={(v) => setVolume(Math.min(1, Math.max(0, v / 100)))}
+                  />
+                </div>
+              </div>
+            )}
           </div>
         </div>
       </div>

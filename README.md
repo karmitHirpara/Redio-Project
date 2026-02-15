@@ -20,6 +20,9 @@ This system delivers complete radio-style automation: audio library management, 
 
 ### Library
 
+- **VS Code-like Selection**: Shift+Click (range), Cmd/Ctrl+Click (toggle), Drag Selection.
+- **Batch Operations**: Multi-delete, multi-drag & drop.
+- **Folder Management**: Nested folders, drag-to-restructure.
 - Upload audio into folders
 - Duplicate detection via file hashing
 - Auto-named alias handling (e.g. `Song`, `Song (1)`, `Song (2)`)
@@ -56,9 +59,11 @@ Optional backend env vars for large uploads:
 
 ### Scheduling
 
+- **UI Overhaul**: Modern "Plan" view with timeline summary.
 - Datetime schedules interrupt playback at exact IST time, prepend playlist tracks, and resume remaining queue
 - Song-trigger schedules fire before/after a specific queue item
 - Automatic 1-minute warning toast before datetime schedules
+- **Quick Selects**: "Now", "Tomorrow", +15m, +1h buttons.
 
 ### Playback
 
@@ -70,7 +75,8 @@ Optional backend env vars for large uploads:
 
 - Logs every play instance (including duplicates and scheduled plays)
 - Tracks start/end times and completion status
-- Exportable history view
+- **Enhanced UI**: Grouped by date (descending), sticky headers, Excel export.
+- **State Retention**: Remembers expanded days and scroll position.
 
 ### UI / Theme
 

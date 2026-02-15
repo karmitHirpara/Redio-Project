@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react';
-import { Clock, AlertCircle, ChevronDown, ChevronRight, Download, Trash } from 'lucide-react';
+import { Clock, AlertCircle, ChevronDown, ChevronRight, Download, Trash, History, Music } from 'lucide-react';
 import type { Cell, Row } from 'exceljs';
 import {
   Dialog,
@@ -38,6 +38,10 @@ interface HistoryDialogProps {
   open: boolean;
   onOpenChange: (open: boolean) => void;
 }
+
+// Module-level persistence to survive dialog unmounts within the same app session
+let persistentExpandedDates = new Set<string>();
+let persistentScrollTop = 0;
 
 export function HistoryDialog({ open, onOpenChange }: HistoryDialogProps) {
   const [entries, setEntries] = useState<HistoryEntry[]>([]);
@@ -145,10 +149,27 @@ export function HistoryDialog({ open, onOpenChange }: HistoryDialogProps) {
   const formatDateLabel = (dateKey: string) => {
     const [year, month, day] = dateKey.split('-').map(Number);
     const d = new Date(year, (month || 1) - 1, day || 1);
-    return d.toLocaleDateString(undefined, {
-      year: 'numeric',
-      month: 'short',
+
+    // Safari style: "Today", "Yesterday", or "October 12, 2023"
+    const today = new Date();
+    const isToday = d.getDate() === today.getDate() &&
+      d.getMonth() === today.getMonth() &&
+      d.getFullYear() === today.getFullYear();
+
+    const yesterday = new Date(today);
+    yesterday.setDate(yesterday.getDate() - 1);
+    const isYesterday = d.getDate() === yesterday.getDate() &&
+      d.getMonth() === yesterday.getMonth() &&
+      d.getFullYear() === yesterday.getFullYear();
+
+    if (isToday) return 'Today';
+    if (isYesterday) return 'Yesterday';
+
+    return d.toLocaleDateString('en-US', {
+      weekday: 'long',
+      month: 'long',
       day: 'numeric',
+      year: 'numeric'
     });
   };
 
@@ -159,24 +180,41 @@ export function HistoryDialog({ open, onOpenChange }: HistoryDialogProps) {
       if (!groups.has(key)) groups.set(key, []);
       groups.get(key)!.push(entry);
     }
+    // Sort entries within each day: Descending (Newest first)
     for (const [, dayEntries] of groups) {
-      dayEntries.sort((a, b) => new Date(a.played_at).getTime() - new Date(b.played_at).getTime());
+      dayEntries.sort((a, b) => new Date(b.played_at).getTime() - new Date(a.played_at).getTime());
     }
-    // Sort dates ascending (oldest first)
-    return Array.from(groups.entries()).sort(([a], [b]) => (a > b ? 1 : -1));
+    // Sort dates Descending (Newest day first) - "Today" at the top
+    return Array.from(groups.entries()).sort(([a], [b]) => (a < b ? 1 : -1));
   }, [entries]);
 
-  const [expandedDates, setExpandedDates] = useState<Set<string>>(new Set());
+  const [expandedDates, setExpandedDates] = useState<Set<string>>(persistentExpandedDates);
+
+  // Synchronize local state to persistent variable
+  useEffect(() => {
+    persistentExpandedDates = expandedDates;
+  }, [expandedDates]);
+
+  // Restore and save scroll position
+  const handleScroll = (e: React.UIEvent<HTMLDivElement>) => {
+    persistentScrollTop = e.currentTarget.scrollTop;
+  };
+
+  useEffect(() => {
+    if (open) {
+      // Small delay to ensure content is rendered before scrolling
+      const timer = setTimeout(() => {
+        const viewport = document.querySelector('[data-history-viewport]');
+        if (viewport) viewport.scrollTop = persistentScrollTop;
+      }, 50);
+      return () => clearTimeout(timer);
+    }
+  }, [open]);
 
   useEffect(() => {
     // When entries load, auto-expand the most recent date for convenience
-    if (groupedByDate.length > 0) {
-      setExpandedDates(prev => {
-        if (prev.size > 0) return prev;
-        const next = new Set(prev);
-        next.add(groupedByDate[groupedByDate.length - 1][0]);
-        return next;
-      });
+    if (groupedByDate.length > 0 && expandedDates.size === 0) {
+      setExpandedDates(new Set([groupedByDate[0][0]]));
     }
   }, [groupedByDate.length]);
 
@@ -190,25 +228,6 @@ export function HistoryDialog({ open, onOpenChange }: HistoryDialogProps) {
       }
       return next;
     });
-  };
-
-  const downloadJson = (filename: string, payload: any) => {
-    try {
-      const blob = new Blob([JSON.stringify(payload, null, 2)], {
-        type: 'application/json',
-      });
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement('a');
-      a.href = url;
-      a.download = filename;
-      document.body.appendChild(a);
-      a.click();
-      a.remove();
-      URL.revokeObjectURL(url);
-    } catch (err: any) {
-      console.error('Failed to download history log', err);
-      toast.error(err?.message || 'Failed to download history log');
-    }
   };
 
   const downloadXlsx = async (filename: string, rows: HistoryEntry[]) => {
@@ -225,9 +244,10 @@ export function HistoryDialog({ open, onOpenChange }: HistoryDialogProps) {
 
       sheet.columns = [
         { header: 'No.', key: 'no', width: 6 },
-        { header: 'Programs File', key: 'programFile', width: 44 },
+        { header: 'Program Files', key: 'programFile', width: 44 },
         { header: 'Start Time', key: 'startTime', width: 18 },
         { header: 'End Time', key: 'endTime', width: 18 },
+        { header: 'Status', key: 'status', width: 15 },
       ];
 
       const headerRow = sheet.getRow(1);
@@ -257,7 +277,10 @@ export function HistoryDialog({ open, onOpenChange }: HistoryDialogProps) {
           hour12: true,
         });
 
-      rows.forEach((r, index) => {
+      // Sort specifically for Excel: Oldest -> Newest
+      const sortedRows = [...rows].sort((a, b) => new Date(a.played_at).getTime() - new Date(b.played_at).getTime());
+
+      sortedRows.forEach((r, index) => {
         const durationSeconds = (r.position_end ?? 0) - (r.position_start ?? 0);
         const start = new Date(r.played_at);
         const end = new Date(start.getTime() + Math.max(0, durationSeconds) * 1000);
@@ -267,6 +290,7 @@ export function HistoryDialog({ open, onOpenChange }: HistoryDialogProps) {
           programFile: r.track_name || 'Unknown track',
           startTime: formatTimeOnly(start),
           endTime: formatTimeOnly(end),
+          status: r.completed ? 'Completed' : 'Skipped',
         });
         row.height = 18;
       });
@@ -301,7 +325,7 @@ export function HistoryDialog({ open, onOpenChange }: HistoryDialogProps) {
       // Auto filter across all columns
       sheet.autoFilter = {
         from: { row: 1, column: 1 },
-        to: { row: Math.max(1, sheet.rowCount), column: 4 },
+        to: { row: Math.max(1, sheet.rowCount), column: 5 },
       };
 
       const buffer = await workbook.xlsx.writeBuffer();
@@ -344,197 +368,153 @@ export function HistoryDialog({ open, onOpenChange }: HistoryDialogProps) {
     }
   };
 
-  const clearAllHistory = async () => {
-    if (!window.confirm('Are you sure you want to clear all playback history? This action cannot be undone.')) {
-      return;
-    }
-
-    try {
-      await historyAPI.clearAll();
-      setEntries([]);
-      toast.success('All history cleared');
-    } catch (err: any) {
-      toast.error(err.message || 'Failed to clear history');
-    }
-  };
+  // Calculate stats for the header
+  const totalEntries = entries.length;
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="sm:max-w-3xl w-[96vw] max-w-3xl sm:p-6 p-4">
-        <DialogHeader>
-          <DialogTitle className="flex items-center gap-2">
-            <Clock className="w-4 h-4" />
-            Playback History
-          </DialogTitle>
-          <DialogDescription>
-            Recently played tracks with source and status.
-          </DialogDescription>
+      <DialogContent className="sm:max-w-2xl w-[95vw] gap-0 p-0 overflow-hidden bg-background border-border shadow-xl rounded-lg">
+        <DialogHeader className="px-5 py-3.5 border-b border-border bg-muted/40 flex flex-row items-center justify-between space-y-0">
+          <div className="flex flex-col">
+            <DialogTitle className="flex items-center gap-2 text-base font-semibold tracking-tight text-foreground">
+              <History className="w-4 h-4 text-primary" />
+              History
+            </DialogTitle>
+          </div>
+          <div className="flex items-center gap-2 px-6">
+            <span className="text-[10px] text-muted-foreground bg-muted px-2 py-0.5 rounded-full border border-border">
+              {totalEntries} tracks
+            </span>
+            
+          </div>
         </DialogHeader>
 
-        <div className="mt-4 flex flex-col gap-3 text-sm">
+        <div className="flex-1 overflow-hidden bg-background">
           {error && (
-            <div className="flex items-start gap-2 rounded-md border border-destructive/40 bg-destructive/5 px-3 py-2 text-destructive text-xs">
-              <AlertCircle className="w-4 h-4 mt-0.5 flex-shrink-0" />
+            <div className="m-4 flex items-center gap-2 rounded-lg border border-red-200 bg-red-50 p-3 text-sm text-red-600 dark:border-red-900/50 dark:bg-red-950/20 dark:text-red-400">
+              <AlertCircle className="w-4 h-4" />
               <span>{error}</span>
             </div>
           )}
 
-          {loading ? (
-            <div className="py-8 text-center text-muted-foreground text-sm">
-              Loading history...
+          {loading && entries.length === 0 ? (
+            <div className="py-12 text-center text-sm text-muted-foreground animate-pulse">
+              Loading your history...
             </div>
           ) : entries.length === 0 ? (
-            <div className="py-8 text-center text-muted-foreground text-sm">
-              No playback history yet.
+            <div className="py-12 text-center text-sm text-muted-foreground">
+              No playback history found.
             </div>
           ) : (
-            <ScrollArea className="max-h-[26rem] mt-1">
-              <div className="space-y-2 pr-1.5">
+            <ScrollArea
+              className="h-[60vh]"
+              viewportProps={{
+                onScroll: handleScroll,
+                'data-history-viewport': ''
+              } as any}
+            >
+              <div className="flex flex-col pb-10">
                 {groupedByDate.map(([dateKey, dayEntries]) => {
                   const expanded = expandedDates.has(dateKey);
                   const label = formatDateLabel(dateKey);
-                  const total = dayEntries.length;
+
                   return (
-                    <div
-                      key={dateKey}
-                      className="rounded-lg border border-border/70 bg-background/60 overflow-hidden"
-                    >
+                    <div key={dateKey} className="group">
                       <div
-                        role="button"
-                        tabIndex={0}
-                        className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2 px-3 py-2 text-xs hover:bg-accent/40 focus:outline-none focus-visible:ring-1 focus-visible:ring-accent cursor-pointer"
+                        className="sticky top-0 z-10 flex items-center justify-between px-4 py-2 bg-muted/90 backdrop-blur-sm border-b border-border/60 text-xs font-medium text-muted-foreground cursor-pointer hover:bg-muted transition-colors"
                         onClick={() => toggleDate(dateKey)}
-                        onKeyDown={(e) => {
-                          if (e.key === 'Enter' || e.key === ' ') {
-                            e.preventDefault();
-                            toggleDate(dateKey);
-                          }
-                        }}
                       >
-                        <div className="flex items-center gap-2 min-w-0">
-                          {expanded ? (
-                            <ChevronDown className="w-3 h-3 text-muted-foreground" />
-                          ) : (
-                            <ChevronRight className="w-3 h-3 text-muted-foreground" />
-                          )}
-                          <span className="truncate font-medium text-foreground select-text">
-                            {label}
+                        <div className="flex items-center gap-2">
+                          <span className={cn("transition-transform duration-200 text-muted-foreground/60", expanded ? "rotate-90" : "")}>
+                            <ChevronRight className="w-3.5 h-3.5" />
                           </span>
-                          <span className="text-[10px] text-muted-foreground whitespace-nowrap">
-                            {total} item{total === 1 ? '' : 's'}
-                          </span>
+                          <span className="font-semibold text-foreground uppercase tracking-wide text-[11px]">{label}</span>
                         </div>
-                        <div className="flex items-center gap-1.5 sm:self-auto self-start">
-                          <button
-                            type="button"
-                            onClick={(e) => {
-                              e.stopPropagation();
-                              const filename = `history-${dateKey}.xlsx`;
-                              void downloadXlsx(filename, dayEntries);
-                            }}
-                            className="inline-flex items-center gap-1 rounded-md border border-border/70 bg-background/80 px-2 py-1 text-[11px] text-muted-foreground hover:bg-accent/60 hover:text-foreground transition-colors"
-                          >
-                            <Download className="w-3 h-3" />
-                            <span>Download</span>
-                          </button>
-                        </div>
+
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          className="h-5 gap-1.5 px-2 text-[10px] text-muted-foreground/70 hover:text-primary hover:bg-primary/5"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            void downloadXlsx(`History ${label}.xlsx`, dayEntries);
+                          }}
+                        >
+                          <Download className="w-3 h-3" />
+                          <span className="">Download Excel</span>
+                        </Button>
                       </div>
 
                       <AnimatePresence initial={false}>
                         {expanded && (
                           <motion.div
-                            initial={{ opacity: 0, height: 0 }}
-                            animate={{ opacity: 1, height: 'auto' }}
-                            exit={{ opacity: 0, height: 0 }}
-                            transition={{ duration: 0.16, ease: 'easeOut' }}
-                            className="border-t border-border/60 bg-background/40"
+                            initial={{ height: 0, opacity: 0 }}
+                            animate={{ height: "auto", opacity: 1 }}
+                            exit={{ height: 0, opacity: 0 }}
+                            transition={{ duration: 0.2, ease: "easeInOut" }}
+                            className="overflow-hidden"
                           >
-                            <div className="py-1.5 space-y-1.5">
-                              {/* Column header */}
-                              <div className="px-3 pb-1 pt-0.5 text-[11px] text-muted-foreground border-b border-border/40 hidden sm:grid sm:grid-cols-[40px,minmax(0,2fr),minmax(0,1.4fr),minmax(0,1.4fr)] gap-2">
-                                <span className="uppercase tracking-wide">No</span>
-                                <span className="uppercase tracking-wide">Song</span>
-                                <span className="uppercase tracking-wide">Start</span>
-                                <span className="uppercase tracking-wide">End</span>
-                              </div>
-
-                              {dayEntries.map((entry, idx) => {
-                                const durationSeconds = (entry.position_end ?? 0) - (entry.position_start ?? 0);
+                            <div className="divide-y divide-border/40">
+                              {dayEntries.map((entry) => {
                                 const start = new Date(entry.played_at);
                                 const startTime = start.toLocaleTimeString('en-IN', {
-                                  timeZone: 'Asia/Kolkata',
                                   hour: '2-digit',
                                   minute: '2-digit',
-                                  second: '2-digit',
-                                  hour12: true,
+                                  hour12: true
                                 });
 
-                                // Only show '-' while a track is still in progress (no finalized duration yet).
-                                // Interrupted tracks should still show an end time once position_end is updated.
+                                const durationSeconds = (entry.position_end ?? 0) - (entry.position_start ?? 0);
                                 const endTime = durationSeconds > 0
                                   ? new Date(start.getTime() + Math.max(0, durationSeconds) * 1000).toLocaleTimeString(
-                                      'en-IN',
-                                      {
-                                        timeZone: 'Asia/Kolkata',
-                                        hour: '2-digit',
-                                        minute: '2-digit',
-                                        second: '2-digit',
-                                        hour12: true,
-                                      },
-                                    )
+                                    'en-IN',
+                                    {
+                                      hour: '2-digit',
+                                      minute: '2-digit',
+                                      hour12: true,
+                                    },
+                                  )
                                   : '-';
 
                                 return (
                                   <ContextMenu key={entry.id}>
-                                    <ContextMenuTrigger asChild>
-                                      <div className="px-3 py-1.5 hover:bg-accent/40 cursor-default">
-                                        <div className="hidden sm:grid sm:grid-cols-[40px,minmax(0,2fr),minmax(0,1.4fr),minmax(0,1.4fr)] gap-2 items-center text-[12px]">
-                                          <div className="flex items-center gap-1 text-muted-foreground">
-                                            <Clock className="w-3.5 h-3.5" />
-                                            <span className="tabular-nums">{idx + 1}</span>
+                                    <ContextMenuTrigger>
+                                      <div className="flex items-center gap-3 px-4 py-2.5 hover:bg-accent/40 dark:hover:bg-accent/20 transition-colors text-sm group/item">
+                                        <div className="flex-1 min-w-0">
+                                          <div className="font-medium text-foreground truncate text-[13px] leading-tight group-hover/item:text-primary transition-colors">
+                                            {entry.track_name || 'Unknown Track'}
                                           </div>
-                                          <div className="truncate">
-                                            <div className="text-xs font-medium text-foreground truncate select-text">
-                                              {entry.track_name || 'Unknown track'}
-                                            </div>
-                                          </div>
-                                          <div className="text-[11px] text-muted-foreground truncate select-text tabular-nums">
-                                            {startTime}
-                                          </div>
-                                          <div className="text-[11px] text-muted-foreground truncate select-text tabular-nums">
-                                            {endTime}
+                                          <div className="text-[11px] text-muted-foreground truncate mt-0.5">
+                                            {entry.track_artist || 'Unknown Artist'}
                                           </div>
                                         </div>
 
-                                        {/* Mobile-friendly stacked layout */}
-                                        <div className="sm:hidden flex items-start gap-3">
-                                          <div className="mt-1">
-                                            <Clock className="w-3.5 h-3.5 text-muted-foreground" />
-                                          </div>
-                                          <div className="flex-1 min-w-0">
-                                            <div className="text-xs font-medium text-foreground truncate select-text">
-                                              {idx + 1}. {entry.track_name || 'Unknown track'}
-                                            </div>
-                                            <div className="mt-0.5 flex flex-col gap-0.5 text-[11px] text-muted-foreground">
-                                              <span className="select-text">Start: {startTime}</span>
-                                              <span className="select-text">End: {endTime}</span>
-                                            </div>
-                                          </div>
+                                        <div className="flex flex-col items-end gap-0.5 text-[10px] font-mono text-muted-foreground/60 min-w-[5.5rem]">
+                                          <span className="flex items-center justify-end gap-1.5 w-full" title="Start Time">
+                                            <span>{startTime}</span>
+                                            <div className="w-1.5 h-1.5 rounded-full bg-emerald-500/70" />
+                                          </span>
+                                          <span className="flex items-center justify-end gap-1.5 w-full opacity-70" title="End Time">
+                                            <span>{endTime}</span>
+                                            <div className="w-1.5 h-1.5 rounded-full bg-rose-500/70" />
+                                          </span>
                                         </div>
                                       </div>
                                     </ContextMenuTrigger>
                                     <ContextMenuContent>
-                                      <ContextMenuItem onClick={() => handleAction(entry, 'putBackToLibrary')}>
-                                        Put back into library
+                                      <ContextMenuItem onClick={() => handleAction(entry, 'addToQueue')} className="gap-2">
+                                        <History className="w-4 h-4" />
+                                        Play Again
                                       </ContextMenuItem>
-                                      <ContextMenuItem onClick={() => handleAction(entry, 'addToQueue')}>
-                                        Put back into queue
+                                      <ContextMenuItem onClick={() => handleAction(entry, 'putBackToLibrary')} className="gap-2">
+                                        <Music className="w-4 h-4" />
+                                        Show in Library
                                       </ContextMenuItem>
                                       <ContextMenuItem
                                         onClick={() => handleAction(entry, 'delete')}
-                                        className="text-destructive"
+                                        className="text-destructive focus:text-destructive gap-2"
                                       >
-                                        Remove from history
+                                        <Trash className="w-4 h-4" />
+                                        Remove
                                       </ContextMenuItem>
                                     </ContextMenuContent>
                                   </ContextMenu>
@@ -552,18 +532,8 @@ export function HistoryDialog({ open, onOpenChange }: HistoryDialogProps) {
           )}
         </div>
 
-        <div className="mt-4 flex justify-between items-center">
-          <Button
-            variant="destructive"
-            size="sm"
-            onClick={clearAllHistory}
-            disabled={entries.length === 0}
-            className="flex items-center gap-2"
-          >
-            <Trash className="w-4 h-4" />
-            Clear History
-          </Button>
-          <Button variant="outline" size="sm" onClick={() => onOpenChange(false)}>
+        <div className="p-3 bg-muted/30 border-t border-border flex justify-end">
+          <Button variant="outline" size="sm" onClick={() => onOpenChange(false)} className="h-7 text-xs">
             Close
           </Button>
         </div>

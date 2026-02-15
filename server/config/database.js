@@ -130,6 +130,20 @@ function ensureCoreSchema(database) {
     `);
 
     database.run(`
+      CREATE TABLE IF NOT EXISTS settings (
+        key TEXT PRIMARY KEY,
+        value TEXT NOT NULL,
+        updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+      )
+    `);
+    database.run(
+      `INSERT OR IGNORE INTO settings (key, value) VALUES
+        ('playback.transition_mode', 'gap'),
+        ('playback.gap_seconds', '2'),
+        ('playback.crossfade_seconds', '2')`,
+    );
+
+    database.run(`
       CREATE TABLE IF NOT EXISTS folders (
         id TEXT PRIMARY KEY,
         name TEXT NOT NULL,

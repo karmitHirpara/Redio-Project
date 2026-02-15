@@ -40,6 +40,7 @@ import {
   tracksAPI,
   backupAPI,
   BackupConfig,
+  settingsAPI,
 } from './services/api';
 import { Input } from './components/ui/input';
 import { AnimatePresence, motion, useReducedMotion } from 'framer-motion';
@@ -54,7 +55,10 @@ export default function App() {
   const [isPlaying, setIsPlaying] = useState(false);
   const [isLive, setIsLive] = useState(true);
   const [scheduledPlaylists, setScheduledPlaylists] = useState<ScheduledPlaylist[]>([]);
+  const [transitionMode, setTransitionMode] = useState<'gap' | 'crossfade'>('gap');
+  const [gapSeconds, setGapSeconds] = useState(2);
   const [crossfadeSeconds, setCrossfadeSeconds] = useState(2);
+  const effectiveTransitionSeconds = transitionMode === 'gap' ? gapSeconds : crossfadeSeconds;
   const [nowPlayingStart, setNowPlayingStart] = useState<Date | null>(null);
   const [seekAnchor, setSeekAnchor] = useState<{ seconds: number; at: Date } | null>(null);
   const playbackPositionSecondsRef = useRef(0);
@@ -71,7 +75,7 @@ export default function App() {
   const [historyOpen, setHistoryOpen] = useState(false);
   const [showBackupDialog, setShowBackupDialog] = useState(false);
   const [selectedPlaylistForSchedule, setSelectedPlaylistForSchedule] = useState<Playlist | null>(null);
-  const [trackToRemove, setTrackToRemove] = useState<string | null>(null);
+  const [tracksToRemove, setTracksToRemove] = useState<Set<string> | null>(null);
   const [duplicatePrompt, setDuplicatePrompt] = useState<{
     existingName: string;
     fileName: string;
@@ -214,7 +218,7 @@ export default function App() {
 
       // Use the top-center clock for end time, or override if provided
       const endTimestamp = options?.endTimestampOverride ?? (nowIst ?? new Date());
-      
+
       // Get the original start timestamp from when we created the history entry
       const baseStart = options?.playedAtOverride
         ? new Date(options.playedAtOverride)
@@ -225,7 +229,7 @@ export default function App() {
       // Calculate elapsed time based on the actual elapsed time from the top-center clock
       const elapsedMs = endTimestamp.getTime() - baseStart.getTime();
       const elapsedSeconds = Math.max(0, Math.round(elapsedMs / 1000));
-      
+
       // Prefer playhead seconds if available, but ensure it's not greater than elapsed time.
       // NOTE: For naturally completed tracks we intentionally include the configured
       // Gap (silence) time before advancing, so history reflects the broadcast clock.
@@ -321,9 +325,60 @@ export default function App() {
     currentQueueItemId,
     isPlaying,
     nowPlayingStart,
-    crossfadeSeconds,
+    transitionMode,
+    gapSeconds,
+    crossfadeSeconds: effectiveTransitionSeconds,
     seekAnchor,
   });
+
+  useEffect(() => {
+    let cancelled = false;
+
+    (async () => {
+      try {
+        const payload = await settingsAPI.getAll();
+        if (cancelled) return;
+
+        const modeRaw = String(payload?.settings?.['playback.transition_mode'] || 'gap');
+        const mode = modeRaw === 'crossfade' ? 'crossfade' : 'gap';
+
+        const gapRaw = Number(payload?.settings?.['playback.gap_seconds'] ?? 2);
+        const cfRaw = Number(payload?.settings?.['playback.crossfade_seconds'] ?? 2);
+
+        setTransitionMode(mode);
+        setGapSeconds(Number.isFinite(gapRaw) ? Math.min(12, Math.max(0, Math.round(gapRaw))) : 2);
+        setCrossfadeSeconds(Number.isFinite(cfRaw) ? Math.min(12, Math.max(0, Math.round(cfRaw))) : 2);
+      } catch {
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  const settingsSaveTimerRef = useRef<number | null>(null);
+  useEffect(() => {
+    if (settingsSaveTimerRef.current != null) {
+      window.clearTimeout(settingsSaveTimerRef.current);
+    }
+
+    settingsSaveTimerRef.current = window.setTimeout(() => {
+      settingsSaveTimerRef.current = null;
+      void settingsAPI.update({
+        'playback.transition_mode': transitionMode,
+        'playback.gap_seconds': gapSeconds,
+        'playback.crossfade_seconds': crossfadeSeconds,
+      });
+    }, 400);
+
+    return () => {
+      if (settingsSaveTimerRef.current != null) {
+        window.clearTimeout(settingsSaveTimerRef.current);
+        settingsSaveTimerRef.current = null;
+      }
+    };
+  }, [transitionMode, gapSeconds, crossfadeSeconds]);
 
   const handleDropTrackOnPlaylistHeader = async (playlistId: string, trackIds: string[]) => {
     for (const trackId of trackIds) {
@@ -361,13 +416,13 @@ export default function App() {
     };
 
     window.addEventListener('beforeunload', handler);
-    
+
     // Also handle pagehide event for better mobile support
     const handlePageHide = () => {
       finalizeHistoryOnUnload();
     };
     window.addEventListener('pagehide', handlePageHide);
-    
+
     return () => {
       window.removeEventListener('beforeunload', handler);
       window.removeEventListener('pagehide', handlePageHide);
@@ -592,7 +647,7 @@ export default function App() {
       if (stopped) return;
       try {
         socket?.close();
-      } catch {}
+      } catch { }
 
       socket = new WebSocket(wsUrl);
 
@@ -697,8 +752,8 @@ export default function App() {
               const interruptionTime = nowIst ?? new Date();
               const interruptedTrack = currentTrackRef.current;
               if (interruptedTrack) {
-                void finalizePlaybackHistory(interruptedTrack, { 
-                  completed: false, 
+                void finalizePlaybackHistory(interruptedTrack, {
+                  completed: false,
                   source: 'queue',
                   endTimestampOverride: interruptionTime,
                 });
@@ -718,7 +773,7 @@ export default function App() {
       socket.onclose = () => {
         console.log('WebSocket disconnected');
         hasLiveQueueRef.current = false;
-        
+
         // Finalize history for currently playing track when server disconnects
         if (historyEntryIdRef.current && currentTrackRef.current) {
           const disconnectionTime = new Date();
@@ -728,7 +783,7 @@ export default function App() {
             endTimestampOverride: disconnectionTime,
           });
         }
-        
+
         scheduleReconnect();
       };
 
@@ -760,7 +815,7 @@ export default function App() {
       }
       try {
         socket?.close();
-      } catch {}
+      } catch { }
       socket = null;
     };
   }, []);
@@ -979,12 +1034,12 @@ export default function App() {
       const rawItem = await queueAPI.add(track.id);
       const newItem: QueueItem = rawItem?.track
         ? {
-            ...rawItem,
-            track: {
-              ...rawItem.track,
-              filePath: resolveUploadsUrl(rawItem.track.filePath || (rawItem.track as any).file_path),
-            },
-          }
+          ...rawItem,
+          track: {
+            ...rawItem.track,
+            filePath: resolveUploadsUrl(rawItem.track.filePath || (rawItem.track as any).file_path),
+          },
+        }
         : (rawItem as any);
 
       const wasEmpty = queue.length === 0;
@@ -1052,14 +1107,14 @@ export default function App() {
   useEffect(() => {
     // Skip if no previous track to finalize
     if (!historyEntryTrackIdRef.current || !historyEntryIdRef.current) return;
-    
+
     // Skip if the track hasn't actually changed
     if (currentTrack && historyEntryTrackIdRef.current === currentTrack.id) return;
-    
+
     // Finalize the previous track's history
     const previousTrackId = historyEntryTrackIdRef.current;
     const previousTrack = tracks.find(t => t.id === previousTrackId);
-    
+
     if (previousTrack) {
       const changeTime = nowIst ?? new Date();
       void finalizePlaybackHistory(previousTrack, {
@@ -1344,7 +1399,7 @@ export default function App() {
     }
 
     // Check if removed song had any scheduled playlists
-    setScheduledPlaylists(prev => 
+    setScheduledPlaylists(prev =>
       prev.filter(schedule => schedule.queueSongId !== id)
     );
 
@@ -1522,7 +1577,7 @@ export default function App() {
 
       const tracksToAttach: Track[] = [];
       for (const track of tracksToAdd) {
-        const baseName = track.name.replace(/ \((\d+)\)$/,'');
+        const baseName = track.name.replace(/ \((\d+)\)$/, '');
         const desiredName = getNextSequentialName(baseName, existingNames);
 
         const namePattern = new RegExp(`^${escapeRegExp(baseName)}(?: \\((\\d+)\\))?$`);
@@ -1887,12 +1942,12 @@ export default function App() {
         const item = await queueAPI.add(track.id, playlist.name);
         const normalized: QueueItem = item?.track
           ? {
-              ...item,
-              track: {
-                ...item.track,
-                filePath: resolveUploadsUrl(item.track.filePath || (item.track as any).file_path),
-              },
-            }
+            ...item,
+            track: {
+              ...item.track,
+              filePath: resolveUploadsUrl(item.track.filePath || (item.track as any).file_path),
+            },
+          }
           : (item as any);
         createdItems.push(normalized);
       }
@@ -2112,7 +2167,7 @@ export default function App() {
   const handleSchedulePlaylist = (playlistId: string) => {
     const playlist = playlists.find(p => p.id === playlistId);
     if (!playlist) return;
-    
+
     setSelectedPlaylistForSchedule(playlist);
     setScheduleDialogOpen(true);
   };
@@ -2260,20 +2315,45 @@ export default function App() {
   }, [nowIst]);
 
   const handleRemoveTrack = (trackId: string) => {
-    setTrackToRemove(trackId);
+    setTracksToRemove(new Set([trackId]));
   };
 
-  const confirmRemoveTrack = async () => {
-    if (!trackToRemove) return;
-    const id = trackToRemove;
-    setTrackToRemove(null);
+  const handleRemoveTracks = (trackIds: string[]) => {
+    if (trackIds.length > 0) {
+      setTracksToRemove(new Set(trackIds));
+    }
+  };
 
+  const confirmRemoveTracks = async () => {
+    if (!tracksToRemove || tracksToRemove.size === 0) return;
+    const ids = Array.from(tracksToRemove);
+    setTracksToRemove(null);
+
+    // Optimistic update
+    const previousTracks = tracks;
+    setTracks(prev => prev.filter(t => !tracksToRemove.has(t.id)));
+
+    let failedCount = 0;
     try {
-      await tracksAPI.delete(id);
-      setTracks(prev => prev.filter(track => track.id !== id));
+      // Process in batches or parallel? Parallel is fine for reasonable numbers
+      await Promise.all(ids.map(id => tracksAPI.delete(id).catch(err => {
+        console.error(`Failed to delete track ${id}`, err);
+        failedCount++;
+        return null; // Don't throw to stop others
+      })));
+
+      if (failedCount > 0) {
+        toast.warning(`Deleted ${ids.length - failedCount} tracks. Failed to delete ${failedCount} tracks.`);
+        // If some failed, we might want to re-fetch or revert. 
+        // Re-fetching is safer than complex logic to revert specific ones.
+        void resyncAll();
+      } else {
+        toast.success(ids.length === 1 ? 'Track removed' : `${ids.length} tracks removed`);
+      }
     } catch (error) {
       console.error(error);
-      toast.error('Failed to remove track');
+      setTracks(previousTracks);
+      toast.error('Failed to remove tracks');
     }
   };
 
@@ -2305,8 +2385,8 @@ export default function App() {
 
     // Log history entry for the track we are leaving with precise end time
     const completionTime = nowIst ?? new Date();
-    void finalizePlaybackHistory(finishedItem.track, { 
-      completed: true, 
+    void finalizePlaybackHistory(finishedItem.track, {
+      completed: true,
       source: 'queue',
       endTimestampOverride: completionTime,
     });
@@ -2493,7 +2573,7 @@ export default function App() {
               <span>Backup & Restore</span>
             </Button>
 
-            
+
             <Button
               variant={queueDialogOpen ? 'default' : 'ghost'}
               size="sm"
@@ -2531,12 +2611,14 @@ export default function App() {
               playlists={playlists}
               onAddToQueue={handleAddToQueue}
               onAddToPlaylist={handleAddToPlaylist}
-              onSelectPlaylist={() => {}}
+              onSelectPlaylist={() => { }}
               onCreatePlaylist={handleCreatePlaylist}
               onRenamePlaylist={handleRenamePlaylist}
               onDeletePlaylist={handleDeletePlaylist}
               onToggleLockPlaylist={handleToggleLockPlaylist}
               onRemoveTrack={handleRemoveTrack}
+
+              onRemoveTracks={handleRemoveTracks}
               onImportTracks={handleImportTracks}
             />
           </ErrorBoundary>
@@ -2632,8 +2714,12 @@ export default function App() {
           onNext={handleNext}
           onPrevious={handlePrevious}
           isLive={isLive}
+          transitionMode={transitionMode}
+          onTransitionModeChange={setTransitionMode}
+          gapSeconds={gapSeconds}
+          onGapSecondsChange={setGapSeconds}
           crossfadeSeconds={crossfadeSeconds}
-          onCrossfadeChange={setCrossfadeSeconds}
+          onCrossfadeSecondsChange={setCrossfadeSeconds}
           audioDevices={audioDevices}
           onSeek={handleSeekWithTiming}
           onProgress={handlePlaybackProgress}
@@ -2656,14 +2742,15 @@ export default function App() {
 
       <SimpleBackupDialog open={showBackupDialog} onOpenChange={setShowBackupDialog} />
 
+
       <ConfirmDialog
-        open={trackToRemove !== null}
-        title="Remove track from library?"
-        description="This will delete the track from your library. Playlists that use it may be affected."
+        open={tracksToRemove !== null}
+        title={tracksToRemove && tracksToRemove.size > 1 ? `Remove ${tracksToRemove.size} tracks?` : "Remove track from library?"}
+        description="This will delete the selected tracks from your library. Playlists that use them may be affected."
         confirmLabel="Remove"
         cancelLabel="Cancel"
-        onConfirm={confirmRemoveTrack}
-        onCancel={() => setTrackToRemove(null)}
+        onConfirm={confirmRemoveTracks}
+        onCancel={() => setTracksToRemove(null)}
       />
 
       <AnimatePresence>
@@ -2804,7 +2891,7 @@ export default function App() {
 
                 <div className="space-y-2">
                   <div className="text-xs text-muted-foreground">
-                    
+
                   </div>
                   <Input
                     autoFocus

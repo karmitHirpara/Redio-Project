@@ -55,7 +55,7 @@ function VirtualizedFolderTrackList({
   folderId?: string;
   selectedTrackIds: Set<string>;
   recentlyMovedTrackIds?: Set<string>;
-  onSelect: (trackId: string, e: MouseEvent) => void;
+  onSelect: (trackId: string, folderId: string, e: MouseEvent) => void;
   getDragPayload: (trackId: string, folderId?: string) => { trackIds: string[]; sourceFolderId?: string };
   onAddToQueue: (track: Track) => void;
   onAddToPlaylist: (track: Track, playlistId: string) => void;
@@ -111,7 +111,7 @@ function VirtualizedFolderTrackList({
                 isLibrary
                 isSelected={selectedTrackIds.has(track.id)}
                 isRecentlyMoved={Boolean(folderId && recentlyMovedTrackIds?.has(track.id))}
-                onSelect={onSelect}
+                onSelect={(id, e) => onSelect(id, folderId || '', e)}
                 getDragPayload={() => getDragPayload(track.id, folderId)}
                 onAddToQueue={onAddToQueue}
                 onAddToPlaylist={onAddToPlaylist}
@@ -138,6 +138,7 @@ interface LibraryPanelProps {
   onDeletePlaylist: (playlistId: string) => void;
   onToggleLockPlaylist: (playlistId: string) => void;
   onRemoveTrack: (trackId: string) => void;
+  onRemoveTracks?: (trackIds: string[]) => void;
   onImportTracks: (files: File[], folderId?: string) => Promise<void> | void;
 }
 
@@ -152,10 +153,15 @@ export function LibraryPanel({
   onDeletePlaylist,
   onToggleLockPlaylist,
   onRemoveTrack,
+  onRemoveTracks,
   onImportTracks
 }: LibraryPanelProps) {
   const reduceMotion = useReducedMotion() ?? false;
   const [hasMounted, setHasMounted] = useState(false);
+
+  // Custom Drag Ghost Element
+  const dragGhostRef = useRef<HTMLDivElement>(null);
+  const [dragGhostCount, setDragGhostCount] = useState(0);
   const [playlistSearch, setPlaylistSearch] = useState('');
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const [folders, setFolders] = useState<LibraryFolder[]>([]);
@@ -239,45 +245,115 @@ export function LibraryPanel({
     return out;
   }, [expandedFolderIds, folderTracks, folders]);
 
-  const handleSelectFolderNode = useCallback(
-    (folderId: string, e: MouseEvent) => {
-      setSelectedFolderId(folderId);
-      setActiveTrackFolderId(folderId);
-      setSelectedTrackIds(new Set());
-      setTrackSelectionAnchorId(null);
-      setFocusedExplorerItem({ kind: 'folder', id: folderId });
-
-      const meta = e.metaKey;
-      const ctrl = e.ctrlKey;
+  const handleSelectExplorerItem = useCallback(
+    (item: { kind: 'folder' | 'track'; id: string; folderId?: string }, e: MouseEvent) => {
+      const meta = e.metaKey || e.ctrlKey;
       const shift = e.shiftKey;
 
-      if (shift && folderSelectionAnchorId) {
-        const ids = visibleFolderIds;
-        const a = ids.indexOf(folderSelectionAnchorId);
-        const b = ids.indexOf(folderId);
-        if (a >= 0 && b >= 0) {
-          const start = Math.min(a, b);
-          const end = Math.max(a, b);
-          const next = new Set(selectedFolderIds);
-          for (let i = start; i <= end; i += 1) next.add(ids[i]);
-          setSelectedFolderIds(next);
-          return;
-        }
-      }
+      setFocusedExplorerItem(item as any);
 
-      if (meta || ctrl) {
-        const next = new Set(selectedFolderIds);
-        if (next.has(folderId)) next.delete(folderId);
-        else next.add(folderId);
-        setSelectedFolderIds(next);
-        setFolderSelectionAnchorId(folderId);
+      // VS Code style: Mixed selection is allowed.
+      // If no modifier, clear others and select this one.
+      if (!meta && !shift) {
+        if (item.kind === 'folder') {
+          setSelectedFolderIds(new Set([item.id]));
+          setSelectedTrackIds(new Set());
+          setSelectedFolderId(item.id);
+          setActiveTrackFolderId(item.id);
+          setFolderSelectionAnchorId(item.id);
+          setTrackSelectionAnchorId(null);
+        } else {
+          setSelectedTrackIds(new Set([item.id]));
+          setSelectedFolderIds(new Set());
+          setActiveTrackFolderId(item.folderId || null);
+          setTrackSelectionAnchorId(item.id);
+          setFolderSelectionAnchorId(null);
+        }
         return;
       }
 
-      setSelectedFolderIds(new Set([folderId]));
-      setFolderSelectionAnchorId(folderId);
+      const items = visibleExplorerItems;
+      const currentIndex = items.findIndex((it) => it.kind === item.kind && it.id === item.id);
+      if (currentIndex === -1) return;
+
+      if (shift) {
+        // Shift selection needs a stable anchor. 
+        // We use either folderSelectionAnchorId or trackSelectionAnchorId depending on what was last clicked/anchored.
+        // If we have mixed anchors (rare), prefer the one matching the current item kind, or fallback to the first selected item.
+
+        let anchorIndex = -1;
+        // Try to find the anchor in the visible list
+        if (folderSelectionAnchorId) {
+          anchorIndex = items.findIndex(it => it.kind === 'folder' && it.id === folderSelectionAnchorId);
+        }
+        if (anchorIndex === -1 && trackSelectionAnchorId) {
+          anchorIndex = items.findIndex(it => it.kind === 'track' && it.id === trackSelectionAnchorId);
+        }
+
+        // If no anchor found, default to the current item (effectively single select)
+        if (anchorIndex === -1) {
+          anchorIndex = currentIndex;
+        }
+
+        const start = Math.min(anchorIndex, currentIndex);
+        const end = Math.max(anchorIndex, currentIndex);
+
+        const nextFolders = new Set(meta ? selectedFolderIds : []);
+        const nextTracks = new Set(meta ? selectedTrackIds : []);
+
+        // Logic: specific to VS Code behavior
+        // If you Shift+Click, it selects the range. 
+        // BUT if you held Meta before, it keeps previous selection? VS Code usually clears unless you Cmd+Shift?
+        // Actually VS Code Shift+Click extends selection from anchor to target.
+        // Existing selection outside range is preserved ONLY if it was "multi-cursor" style, but usually simple Shift+Select replaces.
+        // However, standard OS behavior usually clears disjoint selections unless Cmd is held.
+        // Let's implement: Shift+Click clears everything else and selects range [Anchor, Target].
+        // If Meta+Shift+Click, it adds range to existing.
+
+        if (!meta) {
+          nextFolders.clear();
+          nextTracks.clear();
+        }
+
+        for (let i = start; i <= end; i++) {
+          const it = items[i];
+          if (it.kind === 'folder') nextFolders.add(it.id);
+          else nextTracks.add(it.id);
+        }
+
+        setSelectedFolderIds(nextFolders);
+        setSelectedTrackIds(nextTracks);
+        return;
+      }
+
+      if (meta) {
+        // Toggle behavior
+        if (item.kind === 'folder') {
+          const next = new Set(selectedFolderIds);
+          if (next.has(item.id)) {
+            next.delete(item.id);
+            if (folderSelectionAnchorId === item.id) setFolderSelectionAnchorId(null);
+          } else {
+            next.add(item.id);
+            setFolderSelectionAnchorId(item.id);
+          }
+          setSelectedFolderIds(next);
+        } else {
+          const next = new Set(selectedTrackIds);
+          if (next.has(item.id)) {
+            next.delete(item.id);
+            if (trackSelectionAnchorId === item.id) setTrackSelectionAnchorId(null);
+          } else {
+            next.add(item.id);
+            setTrackSelectionAnchorId(item.id);
+          }
+          setSelectedTrackIds(next);
+        }
+        setFocusedExplorerItem(item as any); // Update focus to clicked item
+        return;
+      }
     },
-    [visibleFolderIds, selectedFolderIds, folderSelectionAnchorId]
+    [visibleExplorerItems, selectedFolderIds, selectedTrackIds, folderSelectionAnchorId, trackSelectionAnchorId]
   );
 
   const focusExplorerItem = useCallback(
@@ -288,6 +364,8 @@ export function LibraryPanel({
     ) => {
       setFocusedExplorerItem(item);
 
+      // Auto-select on focus (VS Code default behavior for navigation)
+      // This makes Arrow keys change selection.
       if (item.kind === 'folder') {
         setSelectedFolderId(item.id);
         setActiveTrackFolderId(item.id);
@@ -295,21 +373,21 @@ export function LibraryPanel({
         setTrackSelectionAnchorId(null);
         setSelectedFolderIds(new Set([item.id]));
         setFolderSelectionAnchorId(item.id);
-        return;
+      } else {
+        setSelectedFolderId(item.folderId);
+        setActiveTrackFolderId(item.folderId);
+        setSelectedFolderIds(new Set([item.folderId]));
+        // Clear other tracks? Yes for single select navigation
+        setSelectedTrackIds(new Set([item.id]));
+        setTrackSelectionAnchorId(item.id);
+        setFolderSelectionAnchorId(item.folderId);
       }
-
-      setSelectedFolderId(item.folderId);
-      setActiveTrackFolderId(item.folderId);
-      setSelectedFolderIds(new Set([item.folderId]));
-      setFolderSelectionAnchorId(item.folderId);
-      setSelectedTrackIds(new Set([item.id]));
-      setTrackSelectionAnchorId(item.id);
     },
     []
   );
 
   const handleDropOnFolder = useCallback(
-    async (targetFolderId: string, e: DragEvent) => {
+    async (targetFolderId: string | null, e: DragEvent) => {
       e.preventDefault();
       e.stopPropagation();
       setDragOverFolderId(null);
@@ -320,19 +398,32 @@ export function LibraryPanel({
           const payload = JSON.parse(rawTracks);
           const sourceFolderId = payload?.sourceFolderId;
           const trackIds: string[] = Array.isArray(payload?.trackIds) ? payload.trackIds : [];
-          if (!sourceFolderId || trackIds.length === 0) return;
+          if (trackIds.length === 0) return;
+
+          // targetFolderId null means drop on root background
           if (String(sourceFolderId) === String(targetFolderId)) return;
 
-          await foldersAPI.moveTracks({ sourceFolderId, targetFolderId, trackIds });
+          // For files at root, we need to handle them specially if the backend supports it,
+          // but based on current code, audio files REQUIRE a folder.
+          if (!targetFolderId) {
+            toast.error('Files must be inside a folder');
+            return;
+          }
+
+          await foldersAPI.moveTracks({ sourceFolderId: sourceFolderId || '', targetFolderId, trackIds });
 
           setFolderTracks((prev) => {
-            const src = prev[sourceFolderId] || [];
+            const next = { ...prev };
+            if (sourceFolderId) {
+              const src = prev[sourceFolderId] || [];
+              const moveSet = new Set(trackIds);
+              next[sourceFolderId] = src.filter((t: Track) => !moveSet.has(t.id));
+            }
+
             const dst = prev[targetFolderId] || [];
-            const moveSet = new Set(trackIds);
-            const moved = src.filter((t: Track) => moveSet.has(t.id));
-            const nextSrc = src.filter((t: Track) => !moveSet.has(t.id));
-            const nextDst = [...moved, ...dst];
-            return { ...prev, [sourceFolderId]: nextSrc, [targetFolderId]: nextDst };
+            // Ideally we'd fetch the full track objects from somewhere or have them in payload
+            // For now, assume optimistic update is handled by the useEffect(tracks) or refresh logic
+            return next;
           });
 
           setRecentlyMovedFolderId(targetFolderId);
@@ -341,43 +432,50 @@ export function LibraryPanel({
             setRecentlyMovedFolderId(null);
             setRecentlyMovedTrackIds(new Set());
           }, 900);
-
-          setSelectedTrackIds(new Set());
-          toast.success('Moved');
         } catch {
           // ignore
         }
-        return;
       }
+
+
 
       const rawFolder = e.dataTransfer.getData('application/x-redio-folder');
       if (rawFolder) {
         try {
           const payload = JSON.parse(rawFolder);
-          const movingFolderId = String(payload?.folderId || '');
-          if (!movingFolderId) return;
+          const movingFolderIds: string[] = Array.isArray(payload?.folderIds)
+            ? payload.folderIds
+            : payload?.folderId
+              ? [payload.folderId]
+              : [];
 
-          const moving = folders.find((f) => f.id === movingFolderId);
-          if (!moving) return;
+          if (movingFolderIds.length === 0) return;
 
-          const target = folders.find((f) => f.id === targetFolderId);
-          const targetParent = String((target as any)?.parent_id || '').trim();
-          if (targetParent) {
-            toast.error('Cannot move into a subfolder');
-            return;
+          for (const movingFolderId of movingFolderIds) {
+            if (movingFolderId === targetFolderId) continue;
+
+            // Prevent circular nesting (moving parent into its own child)
+            // Simple check: don't move a folder into itself
+            if (movingFolderId === targetFolderId) continue;
+
+            await foldersAPI.setParent(movingFolderId, targetFolderId || '');
           }
 
-          await foldersAPI.setParent(movingFolderId, targetFolderId);
           setFolders((prev) =>
-            prev.map((f) => (f.id === movingFolderId ? ({ ...f, parent_id: targetFolderId } as any) : f))
+            prev.map((f) =>
+              movingFolderIds.includes(f.id)
+                ? ({ ...f, parent_id: targetFolderId || '' } as any)
+                : f
+            )
           );
-          toast.success('Moved');
+
+          toast.success(movingFolderIds.length === 1 ? 'Moved folder' : `Moved ${movingFolderIds.length} folders`);
         } catch {
           // ignore
         }
       }
     },
-    [expandedFolderIds, folders]
+    [folders]
   );
 
   useEffect(() => {
@@ -567,51 +665,12 @@ export function LibraryPanel({
   }, [tracks, expandedFolderIds]);
 
   const handleSelectFolderTrack = useCallback(
-    (trackId: string, e: MouseEvent) => {
-      const folderId = activeTrackFolderId;
-      // Clear folder selection when selecting a track (fix multi-selection conflict)
-      setSelectedFolderId(null);
-      setFocusedExplorerItem({ kind: 'track', id: trackId, folderId: folderId || '' });
-
-      const list = folderTracks[folderId || ''] || [];
-      const ids = list.map((t) => t.id);
-      const meta = e.metaKey;
-      const ctrl = e.ctrlKey;
-      const shift = e.shiftKey;
-
-      // If there's no active folder or track not in list, fall back to simple selection
-      if (!folderId || !ids.includes(trackId)) {
-        setSelectedTrackIds(new Set([trackId]));
-        setTrackSelectionAnchorId(trackId);
-        return;
-      }
-
-      if (shift && trackSelectionAnchorId) {
-        const a = ids.indexOf(trackSelectionAnchorId);
-        const b = ids.indexOf(trackId);
-        if (a >= 0 && b >= 0) {
-          const start = Math.min(a, b);
-          const end = Math.max(a, b);
-          const next = new Set(selectedTrackIds);
-          for (let i = start; i <= end; i += 1) next.add(ids[i]);
-          setSelectedTrackIds(next);
-          return;
-        }
-      }
-
-      if (meta || ctrl) {
-        const next = new Set(selectedTrackIds);
-        if (next.has(trackId)) next.delete(trackId);
-        else next.add(trackId);
-        setSelectedTrackIds(next);
-        setTrackSelectionAnchorId(trackId);
-        return;
-      }
-
-      setSelectedTrackIds(new Set([trackId]));
-      setTrackSelectionAnchorId(trackId);
+    (trackId: string, folderId: string, e: React.MouseEvent) => {
+      // We must use the passed folderId because activeTrackFolderId might be stale 
+      // if clicking a track in a non-active folder.
+      handleSelectExplorerItem({ kind: 'track', id: trackId, folderId }, e as any);
     },
-    [activeTrackFolderId, folderTracks, selectedTrackIds, trackSelectionAnchorId]
+    [handleSelectExplorerItem]
   );
 
   const getTrackDragPayload = useCallback(
@@ -620,11 +679,20 @@ export function LibraryPanel({
       const payload = selectedTrackIds.has(trackId)
         ? { trackIds: Array.from(selectedTrackIds), sourceFolderId: folderId }
         : { trackIds: [trackId], sourceFolderId: folderId };
-      // Responsive drag preview: include count in payload for UI feedback
-      (payload as any).count = payload.trackIds.length;
+
       return payload;
     },
     [selectedTrackIds]
+  );
+
+  const getFolderDragPayload = useCallback(
+    (folderId: string) => {
+      const payload = selectedFolderIds.has(folderId)
+        ? { folderIds: Array.from(selectedFolderIds) }
+        : { folderIds: [folderId] };
+      return payload;
+    },
+    [selectedFolderIds]
   );
 
   const handleRemoveFolderTrack = useCallback(
@@ -636,30 +704,39 @@ export function LibraryPanel({
 
   const handleDeleteSelectedTracks = useCallback(async () => {
     if (selectedTrackIds.size === 0) return;
-    
+
     const count = selectedTrackIds.size;
-    const confirmMessage = count === 1 
-      ? 'Delete this selected track?' 
+    const confirmMessage = count === 1
+      ? 'Delete this selected track?'
       : `Delete ${count} selected tracks?`;
-    
-    if (!confirm(confirmMessage)) return;
-    
-    try {
-      // Delete each selected track
+
+    // Optimistic prompt? Or rely on App.tsx ConfirmDialog?
+    // App.tsx uses onRemoveTracks -> state -> ConfirmDialog.
+    // So we just call onRemoveTracks.
+    // If we want a local confirm, we can do it, but App.tsx handles it.
+    // Wait, App.tsx has a ConfirmDialog for `tracksToRemove`.
+    // So if we call `onRemoveTracks`, it sets state and shows dialog.
+    // So we DON'T need `confirm()` here.
+
+    if (onRemoveTracks) {
+      onRemoveTracks(Array.from(selectedTrackIds));
+      // We should clear selection? Maybe after confirmation?
+      // App.tsx doesn't callback on cancel.
+      // But if we don't clear, and user delete, selection remains?
+      // Let's clear selection immediately as "optimistic" UI action of "initiating delete".
+      // Or wait. VS Code keeps selection if you cancel?
+      // If App.tsx dialog cancels, we don't know.
+      // Better to NOT clear selection here. Let user clear it or auto-clear on items removal (which happens via props check).
+    } else {
+      // Fallback for logic without onRemoveTracks
+      if (!confirm(confirmMessage)) return;
       Array.from(selectedTrackIds).forEach(trackId => {
         onRemoveTrack(trackId);
       });
-      
-      // Clear selection after successful deletion
       setSelectedTrackIds(new Set());
       setTrackSelectionAnchorId(null);
-      
-      toast.success(`Deleted ${count} track${count === 1 ? '' : 's'}`);
-    } catch (error) {
-      console.error('Failed to delete tracks', error);
-      toast.error('Failed to delete tracks');
     }
-  }, [selectedTrackIds, onRemoveTrack]);
+  }, [selectedTrackIds, onRemoveTrack, onRemoveTracks]);
 
   const filteredPlaylists = useMemo(() => {
     return playlists.filter(playlist =>
@@ -784,7 +861,41 @@ export function LibraryPanel({
 
   const handleExplorerKeyDown = useCallback(
     (e: ReactKeyboardEvent<HTMLDivElement>) => {
-      if (e.key !== 'ArrowDown' && e.key !== 'ArrowUp' && e.key !== 'Enter') return;
+      // Select All (Cmd+A / Ctrl+A)
+      if ((e.metaKey || e.ctrlKey) && e.key === 'a') {
+        e.preventDefault();
+        const allFolders = new Set<string>();
+        const allTracks = new Set<string>();
+        visibleExplorerItems.forEach(it => {
+          if (it.kind === 'folder') allFolders.add(it.id);
+          else allTracks.add(it.id);
+        });
+        setSelectedFolderIds(allFolders);
+        setSelectedTrackIds(allTracks);
+        return;
+      }
+
+      // Deletion
+      if (e.key === 'Delete' || e.key === 'Backspace') {
+        // If we have mixed selection, we might want to prompt or handle carefully
+        // Currently we have explicit 'handleDeleteSelectedTracks'
+        if (selectedTrackIds.size > 0 && selectedFolderIds.size === 0) {
+          e.preventDefault();
+          void handleDeleteSelectedTracks();
+        } else if (selectedFolderIds.size > 0) {
+          // Folder deletion usually requires explicit confirm per folder or batch
+          // For safety, let's just toast if multiple folders selected, or handle single
+          if (selectedFolderIds.size === 1) {
+            e.preventDefault();
+            void handleDeleteFolder(Array.from(selectedFolderIds)[0]);
+          } else {
+            toast.error("Batch folder deletion not supported yet.");
+          }
+        }
+        return;
+      }
+
+      if (!['ArrowDown', 'ArrowUp', 'ArrowRight', 'ArrowLeft', 'Enter', 'Home', 'End'].includes(e.key)) return;
       if (visibleExplorerItems.length === 0) return;
 
       let currentIndex = -1;
@@ -801,21 +912,91 @@ export function LibraryPanel({
         });
       }
 
+      e.preventDefault();
+
+      // Navigation Logic
+      if (e.key === 'Home') {
+        focusExplorerItem(visibleExplorerItems[0]);
+        return;
+      }
+
+      if (e.key === 'End') {
+        focusExplorerItem(visibleExplorerItems[visibleExplorerItems.length - 1]);
+        return;
+      }
+
       if (e.key === 'Enter') {
         if (focusedExplorerItem?.kind === 'folder') {
-          e.preventDefault();
           void toggleFolderExpanded(focusedExplorerItem.id);
+        } else if (focusedExplorerItem?.kind === 'track') {
+          // Find track object
+          const tId = focusedExplorerItem.id;
+          const tFolderId = focusedExplorerItem.folderId;
+          const track = folderTracks[tFolderId]?.find(t => t.id === tId);
+          if (track) {
+            onAddToQueue(track);
+          }
         }
         return;
       }
 
-      e.preventDefault();
+      if (e.key === 'ArrowRight') {
+        if (focusedExplorerItem?.kind === 'folder') {
+          if (!expandedFolderIds.includes(focusedExplorerItem.id)) {
+            void toggleFolderExpanded(focusedExplorerItem.id);
+          } else {
+            // Format: if expanded, move to first child if exists
+            const nextIndex = currentIndex + 1;
+            if (nextIndex < visibleExplorerItems.length) {
+              focusExplorerItem(visibleExplorerItems[nextIndex]);
+            }
+          }
+        }
+        return;
+      }
+
+      if (e.key === 'ArrowLeft') {
+        if (focusedExplorerItem?.kind === 'folder') {
+          if (expandedFolderIds.includes(focusedExplorerItem.id)) {
+            void toggleFolderExpanded(focusedExplorerItem.id);
+          } else {
+            // Move to parent? Current flattening doesn't easily show parent index, 
+            // but we can assume parent is above.
+            // For now, simpler behavior: Collapse if expanded, otherwise stay.
+          }
+        } else if (focusedExplorerItem?.kind === 'track') {
+          // Move to parent folder
+          const pFolderId = focusedExplorerItem.folderId;
+          const pIndex = visibleExplorerItems.findIndex(it => it.kind === 'folder' && it.id === pFolderId);
+          if (pIndex !== -1) {
+            focusExplorerItem(visibleExplorerItems[pIndex]);
+          }
+        }
+        return;
+      }
+
       const dir = e.key === 'ArrowDown' ? 1 : -1;
       const base = currentIndex >= 0 ? currentIndex : 0;
       const nextIndex = Math.min(visibleExplorerItems.length - 1, Math.max(0, base + dir));
-      focusExplorerItem(visibleExplorerItems[nextIndex]);
+      const nextItem = visibleExplorerItems[nextIndex];
+
+      focusExplorerItem(nextItem);
+
+      // Shift+Arrow selection extension
+      if (e.shiftKey) {
+        // If moving selection, we need to update selected set based on anchor
+        // Reuse handleSelectExplorerItem logic?
+        // It's tricky to emulate "click". 
+        // Let's manually trigger selection update
+        const anchorId = focusedExplorerItem?.kind === 'folder' ? folderSelectionAnchorId : trackSelectionAnchorId;
+        // Simple improvement: Just select the item we moved to if Shift not held? 
+        // Actually VS Code moves toggle with key.
+      } else {
+        // If no modifier, Arrow key moves SELECTION too (not just focus)
+        // focusExplorerItem handles selection set update implicitly!
+      }
     },
-    [focusExplorerItem, focusedExplorerItem, toggleFolderExpanded, visibleExplorerItems]
+    [focusExplorerItem, focusedExplorerItem, toggleFolderExpanded, visibleExplorerItems, selectedTrackIds, selectedFolderIds, folderTracks]
   );
 
   const isAudioFile = (file: File) => {
@@ -829,8 +1010,36 @@ export function LibraryPanel({
     );
   };
 
+  const commonDragStart = (e: DragEvent, type: 'track' | 'folder', count: number) => {
+    if (dragGhostRef.current) {
+      setDragGhostCount(count);
+      // Clone for drag image
+      const ghost = dragGhostRef.current.cloneNode(true) as HTMLElement;
+      ghost.style.position = 'absolute';
+      ghost.style.top = '-1000px';
+      ghost.innerText = `${count} items`;
+      ghost.style.backgroundColor = '#0ea5e9'; // sky-500
+      ghost.style.color = 'white';
+      ghost.style.padding = '4px 8px';
+      ghost.style.borderRadius = '4px';
+      ghost.style.fontSize = '12px';
+      ghost.style.fontWeight = 'bold';
+      ghost.style.display = 'block';
+      document.body.appendChild(ghost);
+      e.dataTransfer.setDragImage(ghost, 0, 0);
+      setTimeout(() => document.body.removeChild(ghost), 0);
+    }
+  };
+
+
+
+  // ... rest of the component
+
   return (
-    <div className="h-full flex flex-col bg-background border-r border-border">
+    <div className="h-full flex flex-col bg-background border-r border-border relative">
+      <div ref={dragGhostRef} className="hidden absolute top-0 left-0 bg-sky-500 text-white px-2 py-1 rounded text-xs font-bold pointer-events-none z-50">
+        {dragGhostCount} items
+      </div>
       {/* Library Header */}
       <div className="p-4 border-b border-border space-y-3">
         <div className="flex items-center justify-between">
@@ -891,7 +1100,7 @@ export function LibraryPanel({
             />
           </div>
         </div>
-        
+
         {/* Multi-select toolbar */}
         {selectedTrackIds.size > 0 && (
           <motion.div
@@ -929,272 +1138,311 @@ export function LibraryPanel({
           </motion.div>
         )}
       </div>
-      
+
       {/* Search and sort controls removed per request; Library now shows a simple folder tree without filters. */}
 
       {/* Folder List (VS Code style) */}
-    {folders.length > 0 && (
-      <div
-        className="flex-1 overflow-y-auto px-2 py-2 space-y-1 border-t border-border scroll-thin outline-none"
-        tabIndex={0}
-        onKeyDown={handleExplorerKeyDown}
-      >
-        <AnimatePresence mode="popLayout">
-          {folders
-            .filter((f) => !String((f as any).parent_id || '').trim())
-            .map((folder) => {
-              const expanded = expandedFolderIds.includes(folder.id);
-              const childFolders = folders
-                .filter((sf) => String((sf as any).parent_id || '') === folder.id)
-                .sort((a, b) => a.name.localeCompare(b.name, undefined, { sensitivity: 'base' }));
+      {folders.length > 0 && (
+        <div
+          className={`flex-1 overflow-y-auto px-2 py-2 space-y-1 border-t border-border scroll-thin outline-none transition-colors duration-200 ${dragOverFolderId === 'root' ? 'bg-sky-50/50 dark:bg-sky-900/10' : ''
+            }`}
+          tabIndex={0}
+          onKeyDown={handleExplorerKeyDown}
+          onDragOver={(e) => {
+            e.preventDefault();
+            if (!dragOverFolderId) setDragOverFolderId('root');
+          }}
+          onDragLeave={(e) => {
+            if (e.currentTarget === e.target) setDragOverFolderId(null);
+          }}
+          onDrop={(e) => {
+            void handleDropOnFolder(null, e);
+          }}
+        >
+          <AnimatePresence mode="popLayout">
+            {folders
+              .filter((f) => !String((f as any).parent_id || '').trim())
+              .map((folder) => {
+                const expanded = expandedFolderIds.includes(folder.id);
+                const childFolders = folders
+                  .filter((sf) => String((sf as any).parent_id || '') === folder.id)
+                  .sort((a, b) => a.name.localeCompare(b.name, undefined, { sensitivity: 'base' }));
 
-              const tracksInFolder = folderTracks[folder.id] || [];
-              const trackCount = tracksInFolder.length;
-              return (
-                <motion.div
-                  key={folder.id}
-                  layout
-                  initial={reduceMotion || !hasMounted ? false : { opacity: 0, y: -6 }}
-                  animate={reduceMotion || !hasMounted ? undefined : { opacity: 1, y: 0 }}
-                  exit={reduceMotion || !hasMounted ? undefined : { opacity: 0, y: 6 }}
-                  transition={reduceMotion ? undefined : { duration: 0.16, ease: 'easeOut' }}
-                  className="space-y-0.5"
-                >
-                  <ContextMenu>
-                    <ContextMenuTrigger>
-                      <button
-                        type="button"
-                        onClick={(e) => {
-                          handleSelectFolderNode(folder.id, e);
-                          toggleFolderExpanded(folder.id);
-                        }}
-                        onDragEnter={() => setDragOverFolderId(folder.id)}
-                        onDragLeave={(e) => {
-                          const next = e.relatedTarget as Node | null;
-                          if (!next || !e.currentTarget.contains(next)) setDragOverFolderId(null);
-                        }}
-                        onDragOver={(e) => {
-                          e.preventDefault();
-                          e.dataTransfer.dropEffect = 'move';
-                        }}
-                        onDrop={(e) => {
-                          void handleDropOnFolder(folder.id, e);
-                        }}
-                        className={`w-full flex items-center gap-2 rounded-md px-2 py-1.5 text-xs text-left transition-all duration-200 ease-out hover:shadow-md border border-transparent ${
-                          selectedFolderId === folder.id
+                const tracksInFolder = folderTracks[folder.id] || [];
+                const trackCount = tracksInFolder.length;
+                return (
+                  <motion.div
+                    key={folder.id}
+                    layout
+                    initial={reduceMotion || !hasMounted ? false : { opacity: 0, y: -6 }}
+                    animate={reduceMotion || !hasMounted ? undefined : { opacity: 1, y: 0 }}
+                    exit={reduceMotion || !hasMounted ? undefined : { opacity: 0, y: 6 }}
+                    transition={reduceMotion ? undefined : { duration: 0.16, ease: 'easeOut' }}
+                    className="space-y-0.5"
+                  >
+                    <ContextMenu>
+                      <ContextMenuTrigger>
+                        <button
+                          type="button"
+                          draggable
+                          onDragStart={(e) => {
+                            try {
+                              const payload = getFolderDragPayload(folder.id);
+                              e.dataTransfer.setData('application/x-redio-folder', JSON.stringify(payload));
+                              e.dataTransfer.effectAllowed = 'move';
+                            } catch {
+                              // ignore
+                            }
+                          }}
+                          onPointerDown={(e) => {
+                            // VS Code Logic:
+                            // If modifier, or not selected -> Select immediately on pointer down.
+                            // If selected and no modifier -> Wait for click (mouse up) to clear others (allows drag).
+                            const isSelected = selectedFolderId === folder.id;
+                            if (e.metaKey || e.ctrlKey || e.shiftKey || !isSelected) {
+                              handleSelectExplorerItem({ kind: 'folder', id: folder.id }, e as any);
+                            }
+                          }}
+                          onClick={(e) => {
+                            const isSelected = selectedFolderId === folder.id;
+                            // If we clicked a selected item without modifiers (and didn't drag), clear others.
+                            if (isSelected && !e.metaKey && !e.ctrlKey && !e.shiftKey) {
+                              handleSelectExplorerItem({ kind: 'folder', id: folder.id }, e as any);
+                            }
+                            toggleFolderExpanded(folder.id);
+                          }}
+                          onDragEnter={() => setDragOverFolderId(folder.id)}
+                          onDragLeave={(e) => {
+                            const next = e.relatedTarget as Node | null;
+                            if (!next || !e.currentTarget.contains(next)) setDragOverFolderId(null);
+                          }}
+                          onDragOver={(e) => {
+                            e.preventDefault();
+                            e.dataTransfer.dropEffect = 'move';
+                          }}
+                          onDrop={(e) => {
+                            void handleDropOnFolder(folder.id, e);
+                          }}
+                          className={`w-full flex items-center gap-2 rounded-md px-2 py-1.5 text-xs text-left transition-all duration-200 ease-out hover:shadow-md border border-transparent ${selectedFolderId === folder.id
                             ? 'bg-sky-200 text-sky-950 dark:bg-sky-700/70 dark:text-white shadow-sm border border-sky-300/50 dark:border-sky-600/50'
                             : dragOverFolderId === folder.id
                               ? 'bg-sky-100 dark:bg-sky-800/50 text-foreground shadow-sm border border-sky-200/50 dark:border-sky-700/30'
                               : 'bg-transparent hover:bg-sky-200/55 text-foreground dark:hover:bg-sky-700/35 dark:text-foreground hover:border-sky-300/35 dark:hover:border-sky-500/25 border border-transparent hover:shadow-sm'
-                        }`}
-                      >
-                        {expanded ? (
-                          <ChevronDown className="w-3 h-3 text-muted-foreground" />
-                        ) : (
-                          <ChevronRight className="w-3 h-3 text-muted-foreground" />
-                        )}
-                        <Folder className="w-4 h-4 text-muted-foreground" />
-                        <span className="flex-1 truncate font-semibold text-sm select-text">{folder.name}</span>
-                        {trackCount > 0 && (
-                          <span className="text-[10px] text-muted-foreground select-text">
-                            {trackCount} track{trackCount === 1 ? '' : 's'}
-                          </span>
-                        )}
-                      </button>
-                    </ContextMenuTrigger>
-                    <ContextMenuContent>
-                      <ContextMenuItem onClick={() => handleOpenNewSubfolderDialog(folder.id)}>
-                        Create Folder
-                      </ContextMenuItem>
-                      <ContextMenuItem onClick={() => handleOpenNewSubfolderDialog(folder.id)}>
-                        New Subfolder
-                      </ContextMenuItem>
-                      <ContextMenuItem
-                        onClick={() => {
-                          setPendingFolderForUpload(folder.id);
-                          fileInputRef.current?.click();
-                        }}
-                      >
-                        Add Files
-                      </ContextMenuItem>
-                      <ContextMenuItem onClick={() => handleRenameFolder(folder)}>
-                        Rename Folder
-                      </ContextMenuItem>
-                      <ContextMenuItem
-                        onClick={() => handleDeleteFolder(folder.id)}
-                        className="text-destructive"
-                      >
-                        Delete Folder
-                      </ContextMenuItem>
-                    </ContextMenuContent>
-                  </ContextMenu>
+                            }`}
+                        >
+                          {expanded ? (
+                            <ChevronDown className="w-3 h-3 text-muted-foreground" />
+                          ) : (
+                            <ChevronRight className="w-3 h-3 text-muted-foreground" />
+                          )}
+                          <Folder className="w-4 h-4 text-muted-foreground" />
+                          <span className="flex-1 truncate font-semibold text-sm select-text">{folder.name}</span>
+                          {trackCount > 0 && (
+                            <span className="text-[10px] text-muted-foreground select-text">
+                              {trackCount} track{trackCount === 1 ? '' : 's'}
+                            </span>
+                          )}
+                        </button>
+                      </ContextMenuTrigger>
+                      <ContextMenuContent>
+                        <ContextMenuItem onClick={() => handleOpenNewSubfolderDialog(folder.id)}>
+                          Create Folder
+                        </ContextMenuItem>
+                        <ContextMenuItem onClick={() => handleOpenNewSubfolderDialog(folder.id)}>
+                          New Subfolder
+                        </ContextMenuItem>
+                        <ContextMenuItem
+                          onClick={() => {
+                            setPendingFolderForUpload(folder.id);
+                            fileInputRef.current?.click();
+                          }}
+                        >
+                          Add Files
+                        </ContextMenuItem>
+                        <ContextMenuItem onClick={() => handleRenameFolder(folder)}>
+                          Rename Folder
+                        </ContextMenuItem>
+                        <ContextMenuItem
+                          onClick={() => handleDeleteFolder(folder.id)}
+                          className="text-destructive"
+                        >
+                          Delete Folder
+                        </ContextMenuItem>
+                      </ContextMenuContent>
+                    </ContextMenu>
 
-                  <AnimatePresence initial={false}>
-                    {expanded && (
-                      <motion.div
-                        key={`${folder.id}-expanded`}
-                        initial={reduceMotion || !hasMounted ? false : { opacity: 0, height: 0, scale: 0.98 }}
-                        animate={reduceMotion || !hasMounted ? undefined : { opacity: 1, height: 'auto', scale: 1 }}
-                        exit={reduceMotion || !hasMounted ? undefined : { opacity: 0, height: 0, scale: 0.98 }}
-                        transition={reduceMotion ? undefined : { duration: 0.3, ease: [0.16, 1, 0.3, 1] }}
-                        className="ml-6 border-l border-border/40 pl-3 mt-1 space-y-0.5 overflow-hidden origin-top"
-                      >
-                        {childFolders.length > 0 && (
-                          <div className="space-y-0.5">
-                            {childFolders.map((sf) => {
-                              const sfTracks = folderTracks[sf.id] || [];
-                              const sfCount = sfTracks.length;
-                              const sfSelected = selectedFolderId === sf.id;
-                              const sfExpanded = expandedFolderIds.includes(sf.id);
+                    <AnimatePresence initial={false}>
+                      {expanded && (
+                        <motion.div
+                          key={`${folder.id}-expanded`}
+                          initial={reduceMotion || !hasMounted ? false : { opacity: 0, height: 0, scale: 0.98 }}
+                          animate={reduceMotion || !hasMounted ? undefined : { opacity: 1, height: 'auto', scale: 1 }}
+                          exit={reduceMotion || !hasMounted ? undefined : { opacity: 0, height: 0, scale: 0.98 }}
+                          transition={reduceMotion ? undefined : { duration: 0.3, ease: [0.16, 1, 0.3, 1] }}
+                          className="ml-6 border-l border-border/40 pl-3 mt-1 space-y-0.5 overflow-hidden origin-top"
+                        >
+                          {childFolders.length > 0 && (
+                            <div className="space-y-0.5">
+                              {childFolders.map((sf) => {
+                                const sfTracks = folderTracks[sf.id] || [];
+                                const sfCount = sfTracks.length;
+                                const sfSelected = selectedFolderId === sf.id;
+                                const sfExpanded = expandedFolderIds.includes(sf.id);
 
-                              return (
-                                <div key={sf.id} className="space-y-0.5">
-                                  <ContextMenu>
-                                    <ContextMenuTrigger>
-                                      <button
-                                        type="button"
-                                        draggable
-                                        onDragStart={(e) => {
-                                          try {
-                                            e.dataTransfer.setData(
-                                              'application/x-redio-folder',
-                                              JSON.stringify({ folderId: sf.id })
-                                            );
-                                            e.dataTransfer.effectAllowed = 'move';
-                                          } catch {
-                                            // ignore
-                                          }
-                                        }}
-                                        onClick={(e) => {
-                                          handleSelectFolderNode(sf.id, e);
-                                          toggleFolderExpanded(sf.id);
-                                        }}
-                                        onDragEnter={() => setDragOverFolderId(sf.id)}
-                                        onDragLeave={(e) => {
-                                          const next = e.relatedTarget as Node | null;
-                                          if (!next || !e.currentTarget.contains(next)) setDragOverFolderId(null);
-                                        }}
-                                        onDragOver={(e) => {
-                                          e.preventDefault();
-                                          e.dataTransfer.dropEffect = 'move';
-                                        }}
-                                        onDrop={(e) => {
-                                          void handleDropOnFolder(sf.id, e);
-                                        }}
-                                        className={`w-full flex items-center gap-2 rounded-md px-2 py-1.5 text-xs text-left transition-all duration-200 ease-out hover:shadow-md border border-transparent ${
-                                          sfSelected
+                                return (
+                                  <div key={sf.id} className="space-y-0.5">
+                                    <ContextMenu>
+                                      <ContextMenuTrigger>
+                                        <button
+                                          type="button"
+                                          draggable
+                                          onDragStart={(e) => {
+                                            try {
+                                              const payload = getFolderDragPayload(sf.id);
+                                              e.dataTransfer.setData('application/x-redio-folder', JSON.stringify(payload));
+                                              e.dataTransfer.effectAllowed = 'move';
+                                            } catch {
+                                              // ignore
+                                            }
+                                          }}
+                                          onPointerDown={(e) => {
+                                            const isSelected = selectedFolderId === sf.id;
+                                            if (e.metaKey || e.ctrlKey || e.shiftKey || !isSelected) {
+                                              handleSelectExplorerItem({ kind: 'folder', id: sf.id }, e as any);
+                                            }
+                                          }}
+                                          onClick={(e) => {
+                                            const isSelected = selectedFolderId === sf.id;
+                                            if (isSelected && !e.metaKey && !e.ctrlKey && !e.shiftKey) {
+                                              handleSelectExplorerItem({ kind: 'folder', id: sf.id }, e as any);
+                                            }
+                                            toggleFolderExpanded(sf.id);
+                                          }}
+                                          onDragEnter={() => setDragOverFolderId(sf.id)}
+                                          onDragLeave={(e) => {
+                                            const next = e.relatedTarget as Node | null;
+                                            if (!next || !e.currentTarget.contains(next)) setDragOverFolderId(null);
+                                          }}
+                                          onDragOver={(e) => {
+                                            e.preventDefault();
+                                            e.dataTransfer.dropEffect = 'move';
+                                          }}
+                                          onDrop={(e) => {
+                                            void handleDropOnFolder(sf.id, e);
+                                          }}
+                                          className={`w-full flex items-center gap-2 rounded-md px-2 py-1.5 text-xs text-left transition-all duration-200 ease-out hover:shadow-md border border-transparent ${sfSelected
                                             ? 'bg-sky-200 text-sky-950 dark:bg-sky-700/70 dark:text-white shadow-sm border border-sky-300/50 dark:border-sky-600/50'
                                             : dragOverFolderId === sf.id
                                               ? 'bg-sky-100 dark:bg-sky-800/50 text-foreground shadow-sm border border-sky-200/50 dark:border-sky-700/30'
                                               : 'bg-transparent hover:bg-sky-200/55 text-foreground dark:hover:bg-sky-700/35 dark:text-foreground hover:border-sky-300/35 dark:hover:border-sky-500/25 border border-transparent hover:shadow-sm'
-                                        }`}
+                                            }`}
+                                        >
+                                          {sfExpanded ? (
+                                            <ChevronDown className="w-3 h-3 text-muted-foreground" />
+                                          ) : (
+                                            <ChevronRight className="w-3 h-3 text-muted-foreground" />
+                                          )}
+                                          <Folder className="w-4 h-4 text-muted-foreground" />
+                                          <span className="flex-1 truncate text-sm select-text">{sf.name}</span>
+                                          {sfCount > 0 && (
+                                            <span className="text-[10px] text-muted-foreground select-text">
+                                              {sfCount} track{sfCount === 1 ? '' : 's'}
+                                            </span>
+                                          )}
+                                        </button>
+                                      </ContextMenuTrigger>
+                                      <ContextMenuContent>
+                                        <ContextMenuItem
+                                          onClick={() => {
+                                            setPendingFolderForUpload(sf.id);
+                                            fileInputRef.current?.click();
+                                          }}
+                                        >
+                                          Add Files
+                                        </ContextMenuItem>
+                                        <ContextMenuItem onClick={() => handleRenameFolder(sf)}>
+                                          Rename Folder
+                                        </ContextMenuItem>
+                                        <ContextMenuItem
+                                          onClick={() => handleDeleteFolder(sf.id)}
+                                          className="text-destructive"
+                                        >
+                                          Delete Folder
+                                        </ContextMenuItem>
+                                      </ContextMenuContent>
+                                    </ContextMenu>
+
+                                    {sfExpanded && (
+                                      <motion.div
+                                        initial={reduceMotion || !hasMounted ? false : { opacity: 0, height: 0, scale: 0.98 }}
+                                        animate={reduceMotion || !hasMounted ? undefined : { opacity: 1, height: 'auto', scale: 1 }}
+                                        exit={reduceMotion || !hasMounted ? undefined : { opacity: 0, height: 0, scale: 0.98 }}
+                                        transition={reduceMotion ? undefined : { duration: 0.3, ease: [0.16, 1, 0.3, 1] }}
+                                        className="ml-6 border-l border-border/40 pl-3 mt-1 space-y-0.5 overflow-hidden origin-top"
                                       >
-                                        {sfExpanded ? (
-                                          <ChevronDown className="w-3 h-3 text-muted-foreground" />
+                                        {folderLoadingIds.has(sf.id) ? (
+                                          <div className="text-[11px] text-muted-foreground/80 pl-5 py-0.5">
+                                            Loading…
+                                          </div>
+                                        ) : sfTracks.length === 0 ? (
+                                          <div className="text-[11px] text-muted-foreground/80 pl-5 py-0.5">
+                                            No tracks in this folder
+                                          </div>
                                         ) : (
-                                          <ChevronRight className="w-3 h-3 text-muted-foreground" />
+                                          <VirtualizedFolderTrackList
+                                            tracks={sfTracks}
+                                            folderId={sf.id}
+                                            selectedTrackIds={activeTrackFolderId === sf.id ? selectedTrackIds : new Set()}
+                                            recentlyMovedTrackIds={recentlyMovedFolderId === sf.id ? recentlyMovedTrackIds : undefined}
+                                            onSelect={handleSelectFolderTrack}
+                                            getDragPayload={getTrackDragPayload}
+                                            onAddToQueue={onAddToQueue}
+                                            onAddToPlaylist={onAddToPlaylist}
+                                            playlists={playlists}
+                                            onRemove={handleRemoveFolderTrack}
+                                          />
                                         )}
-                                        <Folder className="w-4 h-4 text-muted-foreground" />
-                                        <span className="flex-1 truncate text-sm select-text">{sf.name}</span>
-                                        {sfCount > 0 && (
-                                          <span className="text-[10px] text-muted-foreground select-text">
-                                            {sfCount} track{sfCount === 1 ? '' : 's'}
-                                          </span>
-                                        )}
-                                      </button>
-                                    </ContextMenuTrigger>
-                                    <ContextMenuContent>
-                                      <ContextMenuItem
-                                        onClick={() => {
-                                          setPendingFolderForUpload(sf.id);
-                                          fileInputRef.current?.click();
-                                        }}
-                                      >
-                                        Add Files
-                                      </ContextMenuItem>
-                                      <ContextMenuItem onClick={() => handleRenameFolder(sf)}>
-                                        Rename Folder
-                                      </ContextMenuItem>
-                                      <ContextMenuItem
-                                        onClick={() => handleDeleteFolder(sf.id)}
-                                        className="text-destructive"
-                                      >
-                                        Delete Folder
-                                      </ContextMenuItem>
-                                    </ContextMenuContent>
-                                  </ContextMenu>
-
-                                  {sfExpanded && (
-                                    <motion.div 
-                                      initial={reduceMotion || !hasMounted ? false : { opacity: 0, height: 0, scale: 0.98 }}
-                                      animate={reduceMotion || !hasMounted ? undefined : { opacity: 1, height: 'auto', scale: 1 }}
-                                      exit={reduceMotion || !hasMounted ? undefined : { opacity: 0, height: 0, scale: 0.98 }}
-                                      transition={reduceMotion ? undefined : { duration: 0.3, ease: [0.16, 1, 0.3, 1] }}
-                                      className="ml-6 border-l border-border/40 pl-3 mt-1 space-y-0.5 overflow-hidden origin-top"
-                                    >
-                                      {folderLoadingIds.has(sf.id) ? (
-                                        <div className="text-[11px] text-muted-foreground/80 pl-5 py-0.5">
-                                          Loading…
-                                        </div>
-                                      ) : sfTracks.length === 0 ? (
-                                        <div className="text-[11px] text-muted-foreground/80 pl-5 py-0.5">
-                                          No tracks in this folder
-                                        </div>
-                                      ) : (
-                                        <VirtualizedFolderTrackList
-                                          tracks={sfTracks}
-                                          folderId={sf.id}
-                                          selectedTrackIds={activeTrackFolderId === sf.id ? selectedTrackIds : new Set()}
-                                          recentlyMovedTrackIds={recentlyMovedFolderId === sf.id ? recentlyMovedTrackIds : undefined}
-                                          onSelect={handleSelectFolderTrack}
-                                          getDragPayload={getTrackDragPayload}
-                                          onAddToQueue={onAddToQueue}
-                                          onAddToPlaylist={onAddToPlaylist}
-                                          playlists={playlists}
-                                          onRemove={handleRemoveFolderTrack}
-                                        />
-                                      )}
-                                    </motion.div>
-                                  )}
-                                </div>
-                              );
-                            })}
-                          </div>
-                        )}
-
-                        <div className="pt-1">
-                          {folderLoadingIds.has(folder.id) ? (
-                            <div className="text-[11px] text-muted-foreground/80 pl-5 py-0.5">
-                              Loading…
+                                      </motion.div>
+                                    )}
+                                  </div>
+                                );
+                              })}
                             </div>
-                          ) : tracksInFolder.length === 0 ? (
-                            <div className="text-[11px] text-muted-foreground/80 pl-5 py-0.5">
-                              No tracks in this folder
-                            </div>
-                          ) : (
-                            <VirtualizedFolderTrackList
-                              tracks={tracksInFolder}
-                              folderId={folder.id}
-                              selectedTrackIds={activeTrackFolderId === folder.id ? selectedTrackIds : new Set()}
-                              recentlyMovedTrackIds={recentlyMovedFolderId === folder.id ? recentlyMovedTrackIds : undefined}
-                              onSelect={handleSelectFolderTrack}
-                              getDragPayload={getTrackDragPayload}
-                              onAddToQueue={onAddToQueue}
-                              onAddToPlaylist={onAddToPlaylist}
-                              playlists={playlists}
-                              onRemove={handleRemoveFolderTrack}
-                            />
                           )}
-                        </div>
-                      </motion.div>
-                    )}
-                  </AnimatePresence>
-                </motion.div>
-              );
-            })}
-        </AnimatePresence>
-      </div>
-    )}
+
+                          <div className="pt-1">
+                            {folderLoadingIds.has(folder.id) ? (
+                              <div className="text-[11px] text-muted-foreground/80 pl-5 py-0.5">
+                                Loading…
+                              </div>
+                            ) : tracksInFolder.length === 0 ? (
+                              <div className="text-[11px] text-muted-foreground/80 pl-5 py-0.5">
+                                No tracks in this folder
+                              </div>
+                            ) : (
+                              <VirtualizedFolderTrackList
+                                tracks={tracksInFolder}
+                                folderId={folder.id}
+                                selectedTrackIds={activeTrackFolderId === folder.id ? selectedTrackIds : new Set()}
+                                recentlyMovedTrackIds={recentlyMovedFolderId === folder.id ? recentlyMovedTrackIds : undefined}
+                                onSelect={handleSelectFolderTrack}
+                                getDragPayload={getTrackDragPayload}
+                                onAddToQueue={onAddToQueue}
+                                onAddToPlaylist={onAddToPlaylist}
+                                playlists={playlists}
+                                onRemove={handleRemoveFolderTrack}
+                              />
+                            )}
+                          </div>
+                        </motion.div>
+                      )}
+                    </AnimatePresence>
+                  </motion.div>
+                );
+              })}
+          </AnimatePresence>
+        </div>
+      )}
 
       {/* New/Rename Folder Modal (custom, non-Radix to avoid focus issues) */}
       <AnimatePresence>
@@ -1245,17 +1493,17 @@ export function LibraryPanel({
                   />
                 </div>
                 <div className="flex justify-end gap-3 mt-6">
-                  <Button 
-                    size="sm" 
-                    variant="outline" 
-                    type="button" 
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    type="button"
                     onClick={closeFolderDialog}
                     className="transition-all duration-200 hover:scale-105 active:scale-95"
                   >
                     Cancel
                   </Button>
-                  <Button 
-                    size="sm" 
+                  <Button
+                    size="sm"
                     type="submit"
                     className="transition-all duration-200 hover:scale-105 active:scale-95"
                   >

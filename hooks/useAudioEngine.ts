@@ -5,7 +5,10 @@ import { resolveUploadsUrl } from '../services/api';
 
 interface UseAudioEngineOptions {
   currentTrack: Track | null;
+  nextTrack?: Track | null;
   isPlaying: boolean;
+  transitionMode: 'gap' | 'crossfade';
+  gapSeconds: number;
   crossfadeSeconds: number;
   onNext: () => void;
 }
@@ -23,17 +26,32 @@ interface UseAudioEngineResult {
 // small delay before advancing to the next track on ended.
 export function useAudioEngine({
   currentTrack,
+  nextTrack,
   isPlaying,
+  transitionMode,
+  gapSeconds,
   crossfadeSeconds,
   onNext,
 }: UseAudioEngineOptions): UseAudioEngineResult {
   const [currentTime, setCurrentTime] = useState(0);
   const [duration, setDuration] = useState(0);
 
+  const transitionModeRef = useRef<'gap' | 'crossfade'>(transitionMode);
+  const gapSecondsRef = useRef<number>(gapSeconds);
   const crossfadeSecondsRef = useRef<number>(crossfadeSeconds);
+  const nextTrackRef = useRef<Track | null>(nextTrack ?? null);
+  useEffect(() => {
+    transitionModeRef.current = transitionMode;
+  }, [transitionMode]);
+  useEffect(() => {
+    gapSecondsRef.current = gapSeconds;
+  }, [gapSeconds]);
   useEffect(() => {
     crossfadeSecondsRef.current = crossfadeSeconds;
   }, [crossfadeSeconds]);
+  useEffect(() => {
+    nextTrackRef.current = nextTrack ?? null;
+  }, [nextTrack]);
 
   const primaryAudioRef = useRef<HTMLAudioElement>(null);
   const secondaryAudioRef = useRef<HTMLAudioElement>(null);
@@ -45,6 +63,10 @@ export function useAudioEngine({
   const endDelayTimeoutRef = useRef<number | null>(null);
   const autoAdvanceRef = useRef(false);
   const pendingAdvanceUntilMsRef = useRef<number | null>(null);
+  const crossfadeStateRef = useRef<
+    | { phase: 'idle' }
+    | { phase: 'fading'; startedAtMs: number; durationMs: number; outgoingIndex: 0 | 1; incomingIndex: 0 | 1 }
+  >({ phase: 'idle' });
 
   const activeIndexRef = useRef<0 | 1>(0);
 
@@ -53,6 +75,14 @@ export function useAudioEngine({
 
   const getActiveAudio = () => getAudioByIndex(activeIndexRef.current);
   const getInactiveAudio = () => getAudioByIndex(activeIndexRef.current === 0 ? 1 : 0);
+
+  const clearPendingAdvance = () => {
+    if (endDelayTimeoutRef.current !== null) {
+      window.clearTimeout(endDelayTimeoutRef.current);
+      endDelayTimeoutRef.current = null;
+    }
+    pendingAdvanceUntilMsRef.current = null;
+  };
 
   // Sync audio element with current track. Only reset position when the track
   // actually changes, so pausing and resuming continues from the same spot.
@@ -67,6 +97,8 @@ export function useAudioEngine({
         cancelAnimationFrame(fadeRafRef.current);
         fadeRafRef.current = null;
       }
+
+      clearPendingAdvance();
 
       [primaryAudioRef.current, secondaryAudioRef.current].forEach((audioEl) => {
         if (!audioEl) return;
@@ -86,6 +118,7 @@ export function useAudioEngine({
 
     // First track: just load it on the active element.
     if (!lastTrackIdRef.current && currentTrack && activeAudio) {
+      clearPendingAdvance();
       lastTrackIdRef.current = currentTrack.id;
       activeAudio.src = resolveUploadsUrl(currentTrack.filePath);
       activeAudio.currentTime = 0;
@@ -144,10 +177,18 @@ export function useAudioEngine({
       return;
     }
 
+    // If we already performed an internal crossfade into this track, do NOT
+    // reinitialize playback here; just let the UI props catch up.
+    if (autoAdvanceRef.current && currentTrack.id === lastTrackIdRef.current) {
+      autoAdvanceRef.current = false;
+      return;
+    }
+
     // Any subsequent track change (auto-advance, preempt, manual Next):
     // stop both, clear the inactive, and hard-switch the host element to the
     // new track with full volume and a short fade-in.
     autoAdvanceRef.current = false;
+    clearPendingAdvance();
 
     const host = activeAudio || inactiveAudio;
     const other = host === activeAudio ? inactiveAudio : activeAudio;
@@ -215,7 +256,7 @@ export function useAudioEngine({
     lastTrackIdRef.current = currentTrack.id;
     setCurrentTime(0);
     setDuration(currentTrack.duration || 0);
-  }, [currentTrack, isPlaying, crossfadeSeconds]);
+  }, [currentTrack, isPlaying, transitionMode, gapSeconds, crossfadeSeconds, nextTrack]);
 
   // Play / pause audio when isPlaying changes
   useEffect(() => {
@@ -259,23 +300,126 @@ export function useAudioEngine({
       if (audio !== getActiveAudio()) return;
       setCurrentTime(audio.currentTime);
 
-      // Apply a gentle fade-out over the last ~0.5s of the track so tails
-      // sound smooth and avoid abrupt stops.
       const effectiveDuration = duration || audio.duration || 0;
-      const fadeWindow = 0.5; // seconds
-
       if (!isPlaying) return;
 
+      // True crossfade: start incoming track N seconds before end, fade volumes.
+      const mode = transitionModeRef.current;
+      const cfSeconds = Number.isFinite(crossfadeSecondsRef.current)
+        ? Math.max(0, crossfadeSecondsRef.current)
+        : 0;
+
+      const next = nextTrackRef.current;
+      if (mode === 'crossfade' && cfSeconds > 0 && effectiveDuration > 0 && next && next.filePath) {
+        const remaining = effectiveDuration - audio.currentTime;
+        const state = crossfadeStateRef.current;
+        if (remaining <= cfSeconds && remaining >= 0 && state.phase === 'idle') {
+          const outgoingIndex = activeIndexRef.current;
+          const incomingIndex = outgoingIndex === 0 ? 1 : 0;
+          const incomingAudio = getAudioByIndex(incomingIndex);
+          const outgoingAudio = getAudioByIndex(outgoingIndex);
+          if (incomingAudio && outgoingAudio) {
+            // Cancel any gap timer that might be queued.
+            if (endDelayTimeoutRef.current !== null) {
+              window.clearTimeout(endDelayTimeoutRef.current);
+              endDelayTimeoutRef.current = null;
+            }
+            pendingAdvanceUntilMsRef.current = null;
+
+            // Load + start incoming.
+            incomingAudio.pause();
+            incomingAudio.src = resolveUploadsUrl(next.filePath);
+            incomingAudio.currentTime = 0;
+            try {
+              incomingAudio.volume = 0;
+              outgoingAudio.volume = 1;
+            } catch {}
+            if (isPlaying) {
+              incomingAudio.play().catch(() => {});
+            }
+
+            const durationMs = cfSeconds * 1000;
+            crossfadeStateRef.current = {
+              phase: 'fading',
+              startedAtMs: performance.now(),
+              durationMs,
+              outgoingIndex,
+              incomingIndex,
+            };
+
+            const step = () => {
+              const st = crossfadeStateRef.current;
+              if (st.phase !== 'fading') return;
+              const now = performance.now();
+              const t = Math.min(1, Math.max(0, (now - st.startedAtMs) / st.durationMs));
+              const eased = 1 - Math.cos((t * Math.PI) / 2);
+              const outVol = 1 - eased;
+              const inVol = eased;
+              const outEl = getAudioByIndex(st.outgoingIndex);
+              const inEl = getAudioByIndex(st.incomingIndex);
+              if (outEl) {
+                try {
+                  outEl.volume = outVol;
+                } catch {}
+              }
+              if (inEl) {
+                try {
+                  inEl.volume = inVol;
+                } catch {}
+              }
+
+              if (t < 1 && isPlaying) {
+                fadeRafRef.current = requestAnimationFrame(step);
+                return;
+              }
+
+              // Crossfade complete: swap active audio, stop outgoing, and
+              // advance app queue state.
+              fadeRafRef.current = null;
+              crossfadeStateRef.current = { phase: 'idle' };
+
+              if (outEl) {
+                outEl.pause();
+                outEl.removeAttribute('src');
+                try {
+                  outEl.volume = 1;
+                } catch {}
+              }
+              if (inEl) {
+                try {
+                  inEl.volume = 1;
+                } catch {}
+              }
+
+              activeIndexRef.current = st.incomingIndex;
+              lastTrackIdRef.current = next.id;
+              setCurrentTime(0);
+              setDuration(next.duration || 0);
+
+              autoAdvanceRef.current = true;
+              onNext();
+            };
+
+            if (fadeRafRef.current !== null) {
+              cancelAnimationFrame(fadeRafRef.current);
+            }
+            fadeRafRef.current = requestAnimationFrame(step);
+            return;
+          }
+        }
+      }
+
+      // Fallback gentle tail fade only when not crossfading.
+      const tailFadeWindow = 0.5;
       if (effectiveDuration > 0 && audio.currentTime > 0) {
         const remaining = effectiveDuration - audio.currentTime;
-        if (remaining <= fadeWindow && remaining >= 0) {
-          const linear = Math.max(0, Math.min(1, remaining / fadeWindow));
+        if (remaining <= tailFadeWindow && remaining >= 0) {
+          const linear = Math.max(0, Math.min(1, remaining / tailFadeWindow));
           const eased = Math.sin((linear * Math.PI) / 2);
           try {
             audio.volume = eased;
           } catch {}
-        } else if (fadeRafRef.current === null) {
-          // Only reset volume to 1 when no fade-in is in progress.
+        } else if (fadeRafRef.current === null && crossfadeStateRef.current.phase === 'idle') {
           try {
             audio.volume = 1;
           } catch {}
@@ -293,21 +437,27 @@ export function useAudioEngine({
     const handleEnded = (audio: HTMLAudioElement) => {
       if (audio !== getActiveAudio()) return;
 
-      // Clear any existing end-delay timer
-      if (endDelayTimeoutRef.current !== null) {
-        window.clearTimeout(endDelayTimeoutRef.current);
-        endDelayTimeoutRef.current = null;
+      // If a crossfade is in progress, ended is not authoritative (we may have
+      // already swapped to the incoming track).
+      if (crossfadeStateRef.current.phase !== 'idle') {
+        return;
       }
+
+      clearPendingAdvance();
 
       setCurrentTime(0);
 
-      // Use crossfadeSeconds as a gap duration (in seconds) so there is
-      // configurable silence between songs before advancing to the next
-      // track.
-      const gapSeconds = Number.isFinite(crossfadeSecondsRef.current)
-        ? Math.max(0, crossfadeSecondsRef.current)
-        : 0;
-      const delayMs = Math.max(0, gapSeconds * 1000);
+      const mode = transitionModeRef.current;
+      const gap = Number.isFinite(gapSecondsRef.current) ? Math.max(0, gapSecondsRef.current) : 0;
+      const hasNext = Boolean(nextTrackRef.current);
+      const delayMs = mode === 'gap' && hasNext ? Math.max(0, gap * 1000) : 0;
+
+      if (delayMs <= 0) {
+        autoAdvanceRef.current = true;
+        onNext();
+        return;
+      }
+
       pendingAdvanceUntilMsRef.current = Date.now() + delayMs;
       endDelayTimeoutRef.current = window.setTimeout(() => {
         endDelayTimeoutRef.current = null;

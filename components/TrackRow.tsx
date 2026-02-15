@@ -21,12 +21,12 @@ interface TrackRowProps {
   onRemove?: (trackId: string) => void;
   showRemove?: boolean;
   isLibrary?: boolean;
-  isSelected?: boolean;         
-  isFocused?: boolean;          
+  isSelected?: boolean;
+  isFocused?: boolean;
   isRecentlyMoved?: boolean;
   onSelect?: (trackId: string, e: React.MouseEvent) => void;
-  onFocusRow?: () => void;      
-  onKeyDown?: (e: React.KeyboardEvent) => void; 
+  onFocusRow?: () => void;
+  onKeyDown?: (e: React.KeyboardEvent) => void;
   getDragPayload?: () => { trackIds: string[]; sourceFolderId?: string };
   startTimeLabel?: string; // optional: scheduled start time for this track
 }
@@ -105,11 +105,26 @@ export const TrackRow = memo(function TrackRow({
               // dataTransfer may not be available in some environments; ignore.
             }
           }}
+          onPointerDown={(e) => {
+            if (onSelect) {
+              // If modifier key is pressed, or if item is NOT selected, select immediately.
+              // This allows "Range Select" or "Toggle" or "Select New" to happen on mouse down.
+              // If item IS selected and no modifier, we wait for Click (MouseUp) to clear others,
+              // so that Dragging the selection doesn't clear it.
+              if (e.metaKey || e.ctrlKey || e.shiftKey || !isSelected) {
+                onSelect(track.id, e);
+              }
+            }
+          }}
           onClick={(e) => {
-            if (onSelect) onSelect(track.id, e);
+            // If we clicked a selected item without modifiers (and didn't drag, implicit by onClick),
+            // we now clear the other selections.
+            if (isSelected && !e.metaKey && !e.ctrlKey && !e.shiftKey && onSelect) {
+              onSelect(track.id, e);
+            }
           }}
           onFocus={() => onFocusRow && onFocusRow()}
-          onBlur={() => {}}
+          onBlur={() => { }}
           onKeyDown={onKeyDown}
         >
           <Music className="w-3.5 h-3.5 text-current opacity-70 flex-shrink-0" />
