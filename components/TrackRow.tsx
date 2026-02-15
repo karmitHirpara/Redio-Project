@@ -49,14 +49,14 @@ export const TrackRow = memo(function TrackRow({
   startTimeLabel,
 }: TrackRowProps) {
   const rowClasses = cn(
-    'group flex items-center gap-2 w-full transition-colors duration-150 ease-out outline-none',
-    'px-2 py-1 rounded-sm',
+    'group flex items-center gap-2 w-full transition-all duration-200 ease-out outline-none',
+    'px-2 py-1 rounded-sm hover:shadow-md',
     isSelected
-      ? 'bg-[#094771] dark:bg-[#1a3b5c] text-white'
+      ? 'bg-sky-200 text-sky-950 dark:bg-sky-700/70 dark:text-white shadow-sm border border-sky-300/50 dark:border-sky-600/50'
       : isFocused
-        ? 'bg-[#2a2d2e] dark:bg-[#37373d] text-foreground'
-        : 'bg-transparent hover:bg-[#2a2d2e] dark:hover:bg-[#37373d] text-foreground',
-    isRecentlyMoved && !isSelected && 'bg-[#2a2d2e] dark:bg-[#37373d]'
+        ? 'bg-sky-100 text-foreground dark:bg-sky-800/50 dark:text-foreground shadow-sm border border-sky-200/50 dark:border-sky-700/30'
+        : 'bg-transparent hover:bg-sky-200/55 text-foreground dark:hover:bg-sky-700/35 dark:text-foreground hover:border-sky-300/35 dark:hover:border-sky-500/25 border border-transparent hover:shadow-sm',
+    isRecentlyMoved && !isSelected && 'bg-sky-50 dark:bg-sky-800/30 border border-sky-200/40 dark:border-sky-700/25'
   );
 
   return (
@@ -112,14 +112,14 @@ export const TrackRow = memo(function TrackRow({
           onBlur={() => {}}
           onKeyDown={onKeyDown}
         >
-          <Music className="w-3.5 h-3.5 text-muted-foreground flex-shrink-0" />
+          <Music className="w-3.5 h-3.5 text-current opacity-70 flex-shrink-0" />
 
           <div className="flex-1 min-w-0 grid grid-cols-[minmax(0,1fr)_56px_80px] items-center gap-1.5 select-text">
-            <div className="truncate text-foreground text-xs">{track.name}</div>
-            <div className="text-[10px] text-foreground text-right tabular-nums">
+            <div className="truncate text-current text-xs font-medium">{track.name}</div>
+            <div className="text-[10px] text-current text-right tabular-nums opacity-90">
               {formatDuration(track.duration)}
             </div>
-            <div className="text-[10px] text-foreground text-right tabular-nums opacity-80">
+            <div className="text-[10px] text-current text-right tabular-nums opacity-80">
               {startTimeLabel ? startTimeLabel : formatFileSize(track.size)}
             </div>
           </div>
@@ -129,10 +129,10 @@ export const TrackRow = memo(function TrackRow({
               e.stopPropagation();
               onAddToQueue(track);
             }}
-            className="p-1 hover:bg-accent rounded opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 transition-opacity"
+            className="p-1 hover:bg-accent rounded-sm opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 transition-all duration-200 ease-out hover:scale-105 active:scale-95"
             aria-label={`Add ${track.name} to queue`}
           >
-            <Plus className="w-4 h-4" />
+            <Plus className="w-4 h-4 transition-transform duration-150" />
           </button>
         </div>
       </ContextMenuTrigger>

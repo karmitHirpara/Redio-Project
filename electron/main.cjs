@@ -36,6 +36,7 @@ async function startBackend() {
   const userDataDir = app.getPath('userData');
   const dataDir = path.join(userDataDir, 'data');
   const uploadsDir = path.join(userDataDir, 'uploads');
+  const backupsDir = path.join(userDataDir, 'backups');
 
   if (!fs.existsSync(dataDir)) {
     fs.mkdirSync(dataDir, { recursive: true });
@@ -43,10 +44,14 @@ async function startBackend() {
   if (!fs.existsSync(uploadsDir)) {
     fs.mkdirSync(uploadsDir, { recursive: true });
   }
+  if (!fs.existsSync(backupsDir)) {
+    fs.mkdirSync(backupsDir, { recursive: true });
+  }
 
   // Point backend to writable locations for SQLite and uploads.
   process.env.DATABASE_PATH = path.join(dataDir, 'database.sqlite');
   process.env.UPLOAD_PATH = uploadsDir;
+  process.env.BACKUP_PATH = backupsDir;
 
   const serverPath = path.join(__dirname, '..', 'server', 'server.js');
   // On Windows, dynamic import of absolute paths must use a file:// URL.

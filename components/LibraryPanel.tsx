@@ -634,6 +634,33 @@ export function LibraryPanel({
     [onRemoveTrack]
   );
 
+  const handleDeleteSelectedTracks = useCallback(async () => {
+    if (selectedTrackIds.size === 0) return;
+    
+    const count = selectedTrackIds.size;
+    const confirmMessage = count === 1 
+      ? 'Delete this selected track?' 
+      : `Delete ${count} selected tracks?`;
+    
+    if (!confirm(confirmMessage)) return;
+    
+    try {
+      // Delete each selected track
+      Array.from(selectedTrackIds).forEach(trackId => {
+        onRemoveTrack(trackId);
+      });
+      
+      // Clear selection after successful deletion
+      setSelectedTrackIds(new Set());
+      setTrackSelectionAnchorId(null);
+      
+      toast.success(`Deleted ${count} track${count === 1 ? '' : 's'}`);
+    } catch (error) {
+      console.error('Failed to delete tracks', error);
+      toast.error('Failed to delete tracks');
+    }
+  }, [selectedTrackIds, onRemoveTrack]);
+
   const filteredPlaylists = useMemo(() => {
     return playlists.filter(playlist =>
       playlist.name.toLowerCase().includes(playlistSearch.toLowerCase())
@@ -811,10 +838,10 @@ export function LibraryPanel({
           <div className="flex items-center gap-2">
             <Button
               size="sm"
-              className="gap-2"
+              className="gap-2 transition-all duration-200 hover:scale-105 active:scale-95 shadow-sm hover:shadow-md"
               onClick={handleOpenNewFolderDialog}
             >
-              <Plus className="w-4 h-4" />
+              <Plus className="w-4 h-4 transition-transform duration-150" />
               <span>New Folder</span>
             </Button>
             <input
@@ -862,13 +889,50 @@ export function LibraryPanel({
                 e.target.value = '';
               }}
             />
+          </div>
         </div>
+        
+        {/* Multi-select toolbar */}
+        {selectedTrackIds.size > 0 && (
+          <motion.div
+            initial={{ opacity: 0, y: -10, scale: 0.98 }}
+            animate={{ opacity: 1, y: 0, scale: 1 }}
+            exit={{ opacity: 0, y: -10, scale: 0.98 }}
+            transition={{ duration: 0.25, ease: [0.16, 1, 0.3, 1] }}
+            className="flex items-center justify-between p-3 bg-gradient-to-r from-sky-50 to-blue-50 dark:from-sky-800/40 dark:to-blue-800/40 border border-sky-200/60 dark:border-sky-600/50 rounded-lg shadow-sm backdrop-blur-sm"
+          >
+            <span className="text-sm font-medium text-sky-900 dark:text-sky-100 flex items-center gap-2">
+              <span className="w-2 h-2 bg-sky-500 rounded-full animate-pulse"></span>
+              {selectedTrackIds.size} track{selectedTrackIds.size === 1 ? '' : 's'} selected
+            </span>
+            <div className="flex items-center gap-2">
+              <Button
+                size="sm"
+                variant="destructive"
+                onClick={handleDeleteSelectedTracks}
+                className="gap-1 transition-all duration-200 hover:scale-105 active:scale-95 shadow-sm"
+              >
+                Delete Selected
+              </Button>
+              <Button
+                size="sm"
+                variant="outline"
+                onClick={() => {
+                  setSelectedTrackIds(new Set());
+                  setTrackSelectionAnchorId(null);
+                }}
+                className="transition-all duration-200 hover:scale-105 active:scale-95 shadow-sm"
+              >
+                Clear
+              </Button>
+            </div>
+          </motion.div>
+        )}
       </div>
       
       {/* Search and sort controls removed per request; Library now shows a simple folder tree without filters. */}
-    </div>
 
-    {/* Folder List (VS Code style) */}
+      {/* Folder List (VS Code style) */}
     {folders.length > 0 && (
       <div
         className="flex-1 overflow-y-auto px-2 py-2 space-y-1 border-t border-border scroll-thin outline-none"
@@ -916,12 +980,12 @@ export function LibraryPanel({
                         onDrop={(e) => {
                           void handleDropOnFolder(folder.id, e);
                         }}
-                        className={`w-full flex items-center gap-2 rounded px-2 py-1.5 text-xs text-left transition-colors ${
+                        className={`w-full flex items-center gap-2 rounded-md px-2 py-1.5 text-xs text-left transition-all duration-200 ease-out hover:shadow-md border border-transparent ${
                           selectedFolderId === folder.id
-                            ? 'bg-[#094771] dark:bg-[#1a3b5c] text-white'
+                            ? 'bg-sky-200 text-sky-950 dark:bg-sky-700/70 dark:text-white shadow-sm border border-sky-300/50 dark:border-sky-600/50'
                             : dragOverFolderId === folder.id
-                              ? 'bg-[#37373d] dark:bg-[#2a2d2e] text-foreground'
-                              : 'hover:bg-[#2a2d2e] dark:hover:bg-[#37373d] text-foreground'
+                              ? 'bg-sky-100 dark:bg-sky-800/50 text-foreground shadow-sm border border-sky-200/50 dark:border-sky-700/30'
+                              : 'bg-transparent hover:bg-sky-200/55 text-foreground dark:hover:bg-sky-700/35 dark:text-foreground hover:border-sky-300/35 dark:hover:border-sky-500/25 border border-transparent hover:shadow-sm'
                         }`}
                       >
                         {expanded ? (
@@ -969,11 +1033,11 @@ export function LibraryPanel({
                     {expanded && (
                       <motion.div
                         key={`${folder.id}-expanded`}
-                        initial={reduceMotion || !hasMounted ? false : { opacity: 0, height: 0 }}
-                        animate={reduceMotion || !hasMounted ? undefined : { opacity: 1, height: 'auto' }}
-                        exit={reduceMotion || !hasMounted ? undefined : { opacity: 0, height: 0 }}
-                        transition={reduceMotion ? undefined : { duration: 0.22, ease: 'easeInOut' }}
-                        className="ml-6 border-l border-border/40 pl-3 mt-1 space-y-0.5 overflow-hidden"
+                        initial={reduceMotion || !hasMounted ? false : { opacity: 0, height: 0, scale: 0.98 }}
+                        animate={reduceMotion || !hasMounted ? undefined : { opacity: 1, height: 'auto', scale: 1 }}
+                        exit={reduceMotion || !hasMounted ? undefined : { opacity: 0, height: 0, scale: 0.98 }}
+                        transition={reduceMotion ? undefined : { duration: 0.3, ease: [0.16, 1, 0.3, 1] }}
+                        className="ml-6 border-l border-border/40 pl-3 mt-1 space-y-0.5 overflow-hidden origin-top"
                       >
                         {childFolders.length > 0 && (
                           <div className="space-y-0.5">
@@ -1017,12 +1081,12 @@ export function LibraryPanel({
                                         onDrop={(e) => {
                                           void handleDropOnFolder(sf.id, e);
                                         }}
-                                        className={`w-full flex items-center gap-2 rounded px-2 py-1.5 text-xs text-left transition-colors ${
+                                        className={`w-full flex items-center gap-2 rounded-md px-2 py-1.5 text-xs text-left transition-all duration-200 ease-out hover:shadow-md border border-transparent ${
                                           sfSelected
-                                            ? 'bg-[#094771] dark:bg-[#1a3b5c] text-white'
+                                            ? 'bg-sky-200 text-sky-950 dark:bg-sky-700/70 dark:text-white shadow-sm border border-sky-300/50 dark:border-sky-600/50'
                                             : dragOverFolderId === sf.id
-                                              ? 'bg-[#37373d] dark:bg-[#2a2d2e] text-foreground'
-                                              : 'hover:bg-[#2a2d2e] dark:hover:bg-[#37373d] text-foreground'
+                                              ? 'bg-sky-100 dark:bg-sky-800/50 text-foreground shadow-sm border border-sky-200/50 dark:border-sky-700/30'
+                                              : 'bg-transparent hover:bg-sky-200/55 text-foreground dark:hover:bg-sky-700/35 dark:text-foreground hover:border-sky-300/35 dark:hover:border-sky-500/25 border border-transparent hover:shadow-sm'
                                         }`}
                                       >
                                         {sfExpanded ? (
@@ -1061,7 +1125,13 @@ export function LibraryPanel({
                                   </ContextMenu>
 
                                   {sfExpanded && (
-                                    <div className="ml-6 border-l border-border/40 pl-3 mt-1 space-y-0.5">
+                                    <motion.div 
+                                      initial={reduceMotion || !hasMounted ? false : { opacity: 0, height: 0, scale: 0.98 }}
+                                      animate={reduceMotion || !hasMounted ? undefined : { opacity: 1, height: 'auto', scale: 1 }}
+                                      exit={reduceMotion || !hasMounted ? undefined : { opacity: 0, height: 0, scale: 0.98 }}
+                                      transition={reduceMotion ? undefined : { duration: 0.3, ease: [0.16, 1, 0.3, 1] }}
+                                      className="ml-6 border-l border-border/40 pl-3 mt-1 space-y-0.5 overflow-hidden origin-top"
+                                    >
                                       {folderLoadingIds.has(sf.id) ? (
                                         <div className="text-[11px] text-muted-foreground/80 pl-5 py-0.5">
                                           Loading…
@@ -1084,7 +1154,7 @@ export function LibraryPanel({
                                           onRemove={handleRemoveFolderTrack}
                                         />
                                       )}
-                                    </div>
+                                    </motion.div>
                                   )}
                                 </div>
                               );
@@ -1130,22 +1200,22 @@ export function LibraryPanel({
       <AnimatePresence>
         {folderDialogOpen && (
           <motion.div
-            className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-sm"
+            className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm"
             onClick={() => {
               closeFolderDialog();
             }}
             initial={reduceMotion ? false : { opacity: 0 }}
             animate={reduceMotion ? undefined : { opacity: 1 }}
             exit={reduceMotion ? undefined : { opacity: 0 }}
-            transition={reduceMotion ? undefined : { duration: 0.16, ease: 'easeOut' }}
+            transition={reduceMotion ? undefined : { duration: 0.2, ease: 'easeOut' }}
           >
             <motion.div
               className="w-full max-w-lg rounded-xl border border-border/60 bg-background text-foreground shadow-2xl p-6"
               onClick={(e) => e.stopPropagation()}
-              initial={reduceMotion ? false : { opacity: 0, scale: 0.98, y: 6 }}
+              initial={reduceMotion ? false : { opacity: 0, scale: 0.96, y: 8 }}
               animate={reduceMotion ? undefined : { opacity: 1, scale: 1, y: 0 }}
-              exit={reduceMotion ? undefined : { opacity: 0, scale: 0.98, y: 6 }}
-              transition={reduceMotion ? undefined : { duration: 0.18, ease: 'easeOut' }}
+              exit={reduceMotion ? undefined : { opacity: 0, scale: 0.96, y: 8 }}
+              transition={reduceMotion ? undefined : { duration: 0.25, ease: [0.16, 1, 0.3, 1] }}
             >
               <form
                 onSubmit={(e) => {
@@ -1171,14 +1241,24 @@ export function LibraryPanel({
                     placeholder="Folder name"
                     value={folderNameInput}
                     onChange={(e) => setFolderNameInput(e.target.value)}
-                    className="bg-white text-slate-900 placeholder:text-slate-500 border-slate-300 focus-visible:ring-primary/30 focus-visible:border-primary dark:bg-input/40 dark:text-foreground dark:placeholder:text-muted-foreground/80 dark:border-input"
+                    className="bg-white text-slate-900 placeholder:text-slate-500 border-slate-300 focus-visible:ring-primary/30 focus-visible:border-primary dark:bg-input/40 dark:text-foreground dark:placeholder:text-muted-foreground/80 dark:border-input transition-all duration-200 focus:scale-[1.02]"
                   />
                 </div>
                 <div className="flex justify-end gap-3 mt-6">
-                  <Button size="sm" variant="outline" type="button" onClick={closeFolderDialog}>
+                  <Button 
+                    size="sm" 
+                    variant="outline" 
+                    type="button" 
+                    onClick={closeFolderDialog}
+                    className="transition-all duration-200 hover:scale-105 active:scale-95"
+                  >
                     Cancel
                   </Button>
-                  <Button size="sm" type="submit">
+                  <Button 
+                    size="sm" 
+                    type="submit"
+                    className="transition-all duration-200 hover:scale-105 active:scale-95"
+                  >
                     Save
                   </Button>
                 </div>
