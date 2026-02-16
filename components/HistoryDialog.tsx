@@ -244,10 +244,9 @@ export function HistoryDialog({ open, onOpenChange }: HistoryDialogProps) {
 
       sheet.columns = [
         { header: 'No.', key: 'no', width: 6 },
-        { header: 'Program Files', key: 'programFile', width: 44 },
-        { header: 'Start Time', key: 'startTime', width: 18 },
-        { header: 'End Time', key: 'endTime', width: 18 },
-        { header: 'Status', key: 'status', width: 15 },
+        { header: 'Starting time', key: 'startTime', width: 22 },
+        { header: 'Ending time', key: 'endTime', width: 22 },
+        { header: 'Program files', key: 'programFile', width: 54 },
       ];
 
       const headerRow = sheet.getRow(1);
@@ -268,9 +267,12 @@ export function HistoryDialog({ open, onOpenChange }: HistoryDialogProps) {
         };
       });
 
-      const formatTimeOnly = (d: Date) =>
-        d.toLocaleTimeString('en-IN', {
+      const formatDateTime = (d: Date) =>
+        d.toLocaleString('en-IN', {
           timeZone: 'Asia/Kolkata',
+          year: 'numeric',
+          month: 'short',
+          day: '2-digit',
           hour: '2-digit',
           minute: '2-digit',
           second: '2-digit',
@@ -287,10 +289,9 @@ export function HistoryDialog({ open, onOpenChange }: HistoryDialogProps) {
 
         const row = sheet.addRow({
           no: index + 1,
+          startTime: formatDateTime(start),
+          endTime: durationSeconds > 0 ? formatDateTime(end) : '',
           programFile: r.track_name || 'Unknown track',
-          startTime: formatTimeOnly(start),
-          endTime: formatTimeOnly(end),
-          status: r.completed ? 'Completed' : 'Skipped',
         });
         row.height = 18;
       });
@@ -325,7 +326,7 @@ export function HistoryDialog({ open, onOpenChange }: HistoryDialogProps) {
       // Auto filter across all columns
       sheet.autoFilter = {
         from: { row: 1, column: 1 },
-        to: { row: Math.max(1, sheet.rowCount), column: 5 },
+        to: { row: Math.max(1, sheet.rowCount), column: 4 },
       };
 
       const buffer = await workbook.xlsx.writeBuffer();
@@ -488,14 +489,14 @@ export function HistoryDialog({ open, onOpenChange }: HistoryDialogProps) {
                                           </div>
                                         </div>
 
-                                        <div className="flex flex-col items-end gap-0.5 text-[10px] font-mono text-muted-foreground/60 min-w-[5.5rem]">
-                                          <span className="flex items-center justify-end gap-1.5 w-full" title="Start Time">
+                                        <div className="flex flex-col items-end gap-0.5 text-[10px] font-mono text-muted-foreground/70 min-w-[7.5rem]">
+                                          <span className="flex items-center justify-end gap-1.5 w-full" title="Starting time">
+                                            <span className="opacity-70">Start</span>
                                             <span>{startTime}</span>
-                                            <div className="w-1.5 h-1.5 rounded-full bg-emerald-500/70" />
                                           </span>
-                                          <span className="flex items-center justify-end gap-1.5 w-full opacity-70" title="End Time">
+                                          <span className="flex items-center justify-end gap-1.5 w-full" title="Ending time">
+                                            <span className="opacity-70">End</span>
                                             <span>{endTime}</span>
-                                            <div className="w-1.5 h-1.5 rounded-full bg-rose-500/70" />
                                           </span>
                                         </div>
                                       </div>

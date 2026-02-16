@@ -1,10 +1,9 @@
-import { useState, useEffect, useRef, useCallback } from 'react';
-import type React from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { LibraryPanel } from './components/LibraryPanel';
 import { PlaylistManager } from './components/PlaylistManager';
 import { QueuePanel } from './components/QueuePanel';
 import { PlaybackBar } from './components/PlaybackBar';
-import { ThemeToggle } from './components/ThemeToggle';
+// import { ThemeToggle } from './components/ThemeToggle';
 import { ResizeHandle } from './components/ResizeHandle';
 import { FloatingQueueDialog, FloatingDialogRect } from './components/FloatingQueueDialog';
 import { SchedulePlaylistDialog, ScheduleConfig } from './components/SchedulePlaylistDialog';
@@ -12,7 +11,7 @@ import { HistoryDialog } from './components/HistoryDialog';
 import { SimpleBackupDialog } from './components/SimpleBackupDialog';
 import { ConfirmDialog } from './components/ConfirmDialog';
 import { ErrorBoundary } from './components/ErrorBoundary';
-import { Clock, HardDriveDownload, ListMusic, ListOrdered, Music2, Speaker, Database, Settings, Shield } from 'lucide-react';
+import { Clock, HardDriveDownload, ListMusic, ListOrdered, Music2, Speaker, Database, Settings, Shield, Sun, Moon } from 'lucide-react';
 import { Button } from './components/ui/button';
 import { useTheme } from './hooks/useTheme';
 import { useResizable } from './hooks/useResizable';
@@ -25,6 +24,14 @@ import {
   SelectTrigger,
   SelectValue,
 } from './components/ui/select';
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+  DropdownMenuSeparator,
+  DropdownMenuLabel,
+} from './components/ui/dropdown-menu';
 import { Track, Playlist, QueueItem, ScheduledPlaylist } from './types';
 import { formatDuration, generateId } from './lib/utils';
 import { toast, Toaster } from 'sonner';
@@ -74,6 +81,9 @@ export default function App() {
   const [scheduleDialogOpen, setScheduleDialogOpen] = useState(false);
   const [historyOpen, setHistoryOpen] = useState(false);
   const [showBackupDialog, setShowBackupDialog] = useState(false);
+
+  const [libraryImportProgress, setLibraryImportProgress] = useState<{ percent: number; label: string } | null>(null);
+  const [playlistImportProgress, setPlaylistImportProgress] = useState<{ percent: number; label: string } | null>(null);
   const [selectedPlaylistForSchedule, setSelectedPlaylistForSchedule] = useState<Playlist | null>(null);
   const [tracksToRemove, setTracksToRemove] = useState<Set<string> | null>(null);
   const [duplicatePrompt, setDuplicatePrompt] = useState<{
@@ -135,6 +145,517 @@ export default function App() {
         hour12: true,
       })
       .toUpperCase();
+  };
+
+  const yieldToBrowser = async () => {
+    await new Promise<void>((resolve) => window.setTimeout(resolve, 0));
+  };
+
+  const ALLOWED_UPLOAD_EXTENSIONS = new Set(['.mp3', '.wav', '.ogg', '.m4a', '.flac']);
+  const ALLOWED_UPLOAD_MIME_TYPES = new Set([
+    'audio/mpeg',
+    'audio/mp3',
+    'audio/wav',
+    'audio/x-wav',
+    'audio/ogg',
+    'audio/flac',
+    'audio/x-flac',
+    'audio/mp4',
+    'audio/aac',
+    'video/mp4',
+    'application/ogg',
+  ]);
+
+  const isValidUploadFile = (file: File) => {
+    if (!file) return { ok: false as const, reason: 'Invalid file' };
+    const lower = String(file.name || '').toLowerCase();
+    const dot = lower.lastIndexOf('.');
+    const ext = dot >= 0 ? lower.slice(dot) : '';
+    if (!ext || !ALLOWED_UPLOAD_EXTENSIONS.has(ext)) {
+      return { ok: false as const, reason: 'Invalid file type' };
+    }
+    const mime = String((file as any).type || '').toLowerCase();
+    if (mime && !mime.startsWith('audio/') && !ALLOWED_UPLOAD_MIME_TYPES.has(mime)) {
+      return { ok: false as const, reason: 'Invalid file type' };
+    }
+    return { ok: true as const, reason: '' };
+  };
+
+  const getAudioDuration = (file: File): Promise<number> => {
+    return new Promise((resolve) => {
+      try {
+        const audio = new Audio();
+        const url = URL.createObjectURL(file);
+        audio.src = url;
+        audio.addEventListener('loadedmetadata', () => {
+          URL.revokeObjectURL(url);
+          const d = Number(audio.duration);
+          resolve(Number.isFinite(d) && d > 0 ? d : 0);
+        });
+        audio.addEventListener('error', () => {
+          URL.revokeObjectURL(url);
+          resolve(0);
+        });
+      } catch {
+        resolve(0);
+      }
+    });
+  };
+
+  const hydrateTrackDurationInLibrary = (trackId: string, filePath: string) => {
+    try {
+      const audio = new Audio(resolveUploadsUrl(filePath));
+      audio.addEventListener('loadedmetadata', () => {
+        if (!isNaN(audio.duration) && audio.duration > 0) {
+          setTracks((prev) =>
+            prev.map((t) => (t.id === trackId ? { ...t, duration: Math.round(audio.duration) } : t))
+          );
+        }
+      });
+    } catch {
+      // ignore
+    }
+  };
+
+  const handleDropTrackOnPlaylistPanel = async (playlistId: string, trackIds: string[], insertIndex: number) => {
+    const playlist = playlists.find((p) => p.id === playlistId);
+    if (!playlist) return;
+    if (playlist.locked) {
+      toast.error('Playlist is locked');
+      return;
+    }
+
+    const tracksToAttach = trackIds
+      .map((id) => tracks.find((t) => t.id === id))
+      .filter(Boolean) as Track[];
+    if (tracksToAttach.length === 0) return;
+
+    try {
+      await playlistsAPI.addTracks(playlistId, tracksToAttach.map((t) => t.id));
+
+      let combined: Track[] = [];
+      setPlaylists((prev) =>
+        prev.map((p) => {
+          if (p.id !== playlistId) return p;
+          const current = p.tracks || [];
+          const idx = Math.min(Math.max(insertIndex ?? current.length, 0), current.length);
+          combined = [...current.slice(0, idx), ...tracksToAttach, ...current.slice(idx)];
+          return {
+            ...p,
+            tracks: combined,
+            duration: combined.reduce((sum, t) => sum + (t.duration || 0), 0),
+          };
+        })
+      );
+
+      if (combined.length > 0) {
+        try {
+          await playlistsAPI.reorder(playlistId, combined.map((t) => t.id));
+        } catch (err) {
+          console.error('Failed to persist playlist reorder after drop', err);
+        }
+      }
+    } catch (err: any) {
+      console.error('Failed to drop tracks on playlist panel', err);
+      toast.error(err?.message || 'Failed to update playlist');
+    }
+  };
+
+  const handleDuplicateDecision = (choice: 'skip' | 'cancel' | 'add' | 'addAll') => {
+    const r = duplicateDecisionResolver.current;
+    duplicateDecisionResolver.current = null;
+    setDuplicatePrompt(null);
+    if (r) r(choice);
+  };
+
+  const handleFolderDuplicateDecision = (choice: 'skip' | 'cancel' | 'add' | 'addAll') => {
+    const r = folderDuplicateDecisionResolver.current;
+    folderDuplicateDecisionResolver.current = null;
+    setFolderDuplicatePrompt(null);
+    if (r) r(choice);
+  };
+
+  const submitPlaylistNameDialog = async () => {
+    const dialog = playlistNameDialog;
+    if (!dialog) return;
+    const name = String(dialog.name || '').trim();
+    if (!name) return;
+
+    try {
+      if (dialog.mode === 'create') {
+        const created = await playlistsAPI.create(name);
+        setPlaylists((prev) => [...prev, created as any]);
+      } else {
+        const updated = await playlistsAPI.update(dialog.playlistId, { name });
+        setPlaylists((prev) => prev.map((p) => (p.id === dialog.playlistId ? { ...p, name: updated.name } : p)));
+      }
+      setPlaylistNameDialog(null);
+    } catch (err: any) {
+      toast.error(err?.message || 'Failed to save playlist');
+    }
+  };
+
+  const getFolderPathParts = (file: File): string[] => {
+    const rel = String((file as any).webkitRelativePath || '');
+    if (!rel) return [];
+    const parts = rel.split('/').filter(Boolean);
+    if (parts.length <= 1) return [];
+    return parts.slice(0, -1);
+  };
+
+  const handleImportTracks = async (files: File[], folderId?: string) => {
+    let imported = 0;
+    let failed = 0;
+    const importedIds: string[] = [];
+
+    for (const file of files) {
+      const validation = isValidUploadFile(file);
+      if (!validation.ok) {
+        failed += 1;
+        continue;
+      }
+
+      const detectedDuration = files.length > 120 ? 0 : await getAudioDuration(file);
+      const formData = new FormData();
+      formData.append('file', file);
+      if (detectedDuration > 0) formData.append('duration', String(detectedDuration));
+
+      try {
+        const uploadData = await apiClient.request<any>('/tracks/upload', {
+          method: 'POST',
+          body: formData,
+          allowedStatuses: [409],
+        });
+
+        if (uploadData?.existingTrack) {
+          const existingTrack = uploadData.existingTrack;
+          const aliasName = getNextSequentialName(
+            String(existingTrack?.name || file.name || 'Track').replace(/ \((\d+)\)$/, ''),
+            tracks.map((t) => String(t.name || '')).filter(Boolean),
+          );
+          const t = await tracksAPI.alias(existingTrack.id, aliasName);
+          const mapped: Track = {
+            id: t.id,
+            name: t.name,
+            artist: t.artist,
+            duration: t.duration && t.duration > 0 ? t.duration : detectedDuration,
+            size: t.size,
+            filePath: resolveUploadsUrl((t as any).filePath || (t as any).file_path),
+            hash: t.hash,
+            dateAdded: (t as any).date_added ? new Date((t as any).date_added) : new Date(),
+          };
+          setTracks((prev) => [mapped, ...prev]);
+          importedIds.push(mapped.id);
+          if ((!t.duration || t.duration === 0) && mapped.filePath) {
+            hydrateTrackDurationInLibrary(mapped.id, mapped.filePath);
+          }
+          imported += 1;
+          continue;
+        }
+
+        if (!uploadData?.id) {
+          failed += 1;
+          continue;
+        }
+
+        const mapped: Track = {
+          id: uploadData.id,
+          name: uploadData.name,
+          artist: uploadData.artist,
+          duration: uploadData.duration && uploadData.duration > 0 ? uploadData.duration : detectedDuration,
+          size: uploadData.size,
+          filePath: resolveUploadsUrl(uploadData.filePath || uploadData.file_path),
+          hash: uploadData.hash,
+          dateAdded: uploadData.date_added ? new Date(uploadData.date_added) : new Date(),
+        };
+        setTracks((prev) => [mapped, ...prev]);
+        importedIds.push(mapped.id);
+        if ((!uploadData.duration || uploadData.duration === 0) && mapped.filePath) {
+          hydrateTrackDurationInLibrary(mapped.id, mapped.filePath);
+        }
+        imported += 1;
+      } catch (err) {
+        console.error('Failed to import track', err);
+        failed += 1;
+      }
+    }
+
+    if (folderId && importedIds.length > 0) {
+      try {
+        await foldersAPI.attachTracks(folderId, importedIds);
+      } catch (err) {
+        console.error('Failed to attach tracks to folder', err);
+      }
+    }
+
+    if (imported > 0 || failed > 0) {
+      toast.success('Import complete', {
+        description: `${imported} imported, ${failed} failed`,
+      });
+    }
+  };
+
+  const handleImportFolder = async (files: File[], parentFolderId?: string) => {
+    if (!parentFolderId) {
+      toast.error('Select a folder first, then import a folder into that folder.');
+      return;
+    }
+
+    const supported = (files || []).filter((f) => isValidUploadFile(f).ok);
+    if (supported.length === 0) {
+      toast.error('No supported audio files found in that folder');
+      return;
+    }
+
+    setLibraryImportProgress({ percent: 0, label: 'Preparing folder import…' });
+
+    const pathToFolderId = new Map<string, string>();
+    const getOrCreateFolderIdForPath = async (parts: string[]): Promise<string> => {
+      const key = parts.join('/');
+      if (!key) return parentFolderId;
+      const cached = pathToFolderId.get(key);
+      if (cached) return cached;
+      const parentParts = parts.slice(0, -1);
+      const leaf = parts[parts.length - 1];
+      const parentId = parentParts.length ? await getOrCreateFolderIdForPath(parentParts) : parentFolderId;
+      const created = await foldersAPI.create(leaf, parentId);
+      pathToFolderId.set(key, created.id);
+      return created.id;
+    };
+
+    const groups = new Map<string, File[]>();
+    for (const f of supported) {
+      const parts = getFolderPathParts(f);
+      const key = parts.join('/');
+      const arr = groups.get(key) || [];
+      arr.push(f);
+      groups.set(key, arr);
+    }
+
+    const total = supported.length;
+    let processed = 0;
+    let failed = 0;
+
+    for (const [pathKey, groupFiles] of groups.entries()) {
+      const parts = pathKey ? pathKey.split('/').filter(Boolean) : [];
+      const folderId = await getOrCreateFolderIdForPath(parts);
+      const idsToAttach: string[] = [];
+
+      for (const file of groupFiles) {
+        try {
+          const detectedDuration = total > 120 ? 0 : await getAudioDuration(file);
+          const formData = new FormData();
+          formData.append('file', file);
+          if (detectedDuration > 0) formData.append('duration', String(detectedDuration));
+
+          const uploadData = await apiClient.request<any>('/tracks/upload', {
+            method: 'POST',
+            body: formData,
+            allowedStatuses: [409],
+          });
+
+          let newId: string | null = null;
+
+          if (uploadData?.existingTrack) {
+            const existingTrack = uploadData.existingTrack;
+            const baseName = String(existingTrack?.name || file.name || 'Track').replace(/ \((\d+)\)$/, '');
+            const aliasName = getNextSequentialName(baseName, tracks.map((t) => String(t.name || '')).filter(Boolean));
+            const t = await tracksAPI.alias(existingTrack.id, aliasName);
+            const mapped: Track = {
+              id: t.id,
+              name: t.name,
+              artist: t.artist,
+              duration: t.duration && t.duration > 0 ? t.duration : detectedDuration,
+              size: t.size,
+              filePath: resolveUploadsUrl((t as any).filePath || (t as any).file_path),
+              hash: t.hash,
+              dateAdded: (t as any).date_added ? new Date((t as any).date_added) : new Date(),
+            };
+            setTracks((prev) => [mapped, ...prev]);
+            newId = mapped.id;
+            if ((!t.duration || t.duration === 0) && mapped.filePath) {
+              hydrateTrackDurationInLibrary(mapped.id, mapped.filePath);
+            }
+          } else if (uploadData?.id) {
+            const mapped: Track = {
+              id: uploadData.id,
+              name: uploadData.name,
+              artist: uploadData.artist,
+              duration: uploadData.duration && uploadData.duration > 0 ? uploadData.duration : detectedDuration,
+              size: uploadData.size,
+              filePath: resolveUploadsUrl(uploadData.filePath || uploadData.file_path),
+              hash: uploadData.hash,
+              dateAdded: uploadData.date_added ? new Date(uploadData.date_added) : new Date(),
+            };
+            setTracks((prev) => [mapped, ...prev]);
+            newId = mapped.id;
+            if ((!uploadData.duration || uploadData.duration === 0) && mapped.filePath) {
+              hydrateTrackDurationInLibrary(mapped.id, mapped.filePath);
+            }
+          }
+
+          if (newId) idsToAttach.push(newId);
+        } catch (err) {
+          console.error('Failed to import folder file', err);
+          failed += 1;
+        } finally {
+          processed += 1;
+          setLibraryImportProgress({
+            percent: Math.min(100, (processed / total) * 100),
+            label: `Importing… ${processed}/${total}`,
+          });
+        }
+
+        if (processed % 10 === 0) {
+          await yieldToBrowser();
+        }
+      }
+
+      if (idsToAttach.length > 0) {
+        try {
+          await foldersAPI.attachTracks(folderId, idsToAttach);
+        } catch (err) {
+          console.error('Failed to attach imported tracks to folder', err);
+        }
+      }
+    }
+
+    setLibraryImportProgress(null);
+    if (failed > 0) {
+      toast.error('Folder import finished with errors', { description: `${failed} failed` });
+    } else {
+      toast.success('Folder import complete');
+    }
+  };
+
+  const handleCreatePlaylist = async () => {
+    const name = 'New Playlist';
+    try {
+      const created = await playlistsAPI.create(name);
+      setPlaylists((prev) => [...prev, { ...(created as any), tracks: (created as any).tracks || [], duration: (created as any).duration || 0 }]);
+    } catch (err: any) {
+      toast.error(err?.message || 'Failed to create playlist');
+    }
+  };
+
+  const handleRenamePlaylist = async (playlistId: string) => {
+    const playlist = playlists.find((p) => p.id === playlistId);
+    if (!playlist) return;
+    const name = window.prompt('Rename playlist', playlist.name);
+    if (!name) return;
+    try {
+      const updated = await playlistsAPI.update(playlistId, { name });
+      setPlaylists((prev) => prev.map((p) => (p.id === playlistId ? { ...p, name: updated.name } : p)));
+    } catch (err: any) {
+      toast.error(err?.message || 'Failed to rename playlist');
+    }
+  };
+
+  const handleDeletePlaylist = async (playlistId: string) => {
+    if (!window.confirm('Delete this playlist?')) return;
+    try {
+      await playlistsAPI.delete(playlistId);
+      setPlaylists((prev) => prev.filter((p) => p.id !== playlistId));
+    } catch (err: any) {
+      toast.error(err?.message || 'Failed to delete playlist');
+    }
+  };
+
+  const handleToggleLockPlaylist = async (playlistId: string) => {
+    const playlist = playlists.find((p) => p.id === playlistId);
+    if (!playlist) return;
+    const locked = !playlist.locked;
+    try {
+      await playlistsAPI.update(playlistId, { locked });
+      setPlaylists((prev) => prev.map((p) => (p.id === playlistId ? { ...p, locked } : p)));
+    } catch (err: any) {
+      toast.error(err?.message || 'Failed to update playlist');
+    }
+  };
+
+  const setPlaylistLocked = async (playlistId: string, locked: boolean): Promise<boolean> => {
+    const prev = playlists;
+    setPlaylists((p) => p.map((x) => (x.id === playlistId ? { ...x, locked } : x)));
+    try {
+      await playlistsAPI.update(playlistId, { locked });
+      return true;
+    } catch (err) {
+      setPlaylists(prev);
+      return false;
+    }
+  };
+
+  const handleDuplicatePlaylist = async (playlistId: string) => {
+    const playlist = playlists.find((p) => p.id === playlistId);
+    if (!playlist) return;
+    try {
+      const created = await playlistsAPI.create(`${playlist.name} Copy`);
+      const trackIds = (playlist.tracks || []).map((t) => t.id);
+      if (trackIds.length > 0) {
+        await playlistsAPI.addTracks(created.id, trackIds);
+      }
+      const fetched = await playlistsAPI.getById(created.id);
+      setPlaylists((prev) => [...prev, fetched as any]);
+    } catch (err: any) {
+      toast.error(err?.message || 'Failed to duplicate playlist');
+    }
+  };
+
+  const handleAddSongsToPlaylist = async (playlistId: string, tracksToAdd: Track[]) => {
+    const playlist = playlists.find((p) => p.id === playlistId);
+    if (!playlist) return;
+    if (playlist.locked) {
+      toast.error('Playlist is locked');
+      return;
+    }
+    try {
+      const ids = tracksToAdd.map((t) => t.id);
+      await playlistsAPI.addTracks(playlistId, ids);
+      setPlaylists((prev) =>
+        prev.map((p) => {
+          if (p.id !== playlistId) return p;
+          const combined = [...(p.tracks || []), ...tracksToAdd];
+          return { ...p, tracks: combined, duration: combined.reduce((sum, t) => sum + (t.duration || 0), 0) };
+        })
+      );
+    } catch (err: any) {
+      toast.error(err?.message || 'Failed to add songs');
+    }
+  };
+
+  const handleRemoveFromQueue = async (id: string) => {
+    try {
+      await queueAPI.remove(id);
+    } catch {
+    }
+    setQueue((prev) => prev.filter((q) => q.id !== id));
+    if (currentQueueItemId === id) {
+      const next = queue.find((q) => q.id !== id);
+      setCurrentQueueItemId(next?.id ?? null);
+    }
+  };
+
+  const handleReorderQueue = async (items: QueueItem[]) => {
+    setQueue(items);
+    try {
+      await queueAPI.reorder(items.map((i) => i.id));
+    } catch (err) {
+      console.error('Failed to reorder queue', err);
+    }
+  };
+
+  const handleAddQueueItemToPlaylist = async (item: QueueItem, playlistId: string) => {
+    if (!item?.track) return;
+    await handleAddToPlaylist(item.track, playlistId, true);
+  };
+
+  const createFolderPath = async (parts: string[], parentFolderId?: string): Promise<string | undefined> => {
+    let currentParentId = parentFolderId;
+    for (const name of parts) {
+      const created = await foldersAPI.create(name, currentParentId);
+      currentParentId = created.id;
+    }
+    return currentParentId;
   };
 
   const prevQueueLengthRef = useRef(0);
@@ -386,6 +907,87 @@ export default function App() {
       if (track) {
         await handleAddToPlaylist(track, playlistId, true);
       }
+    }
+  };
+
+  const escapeRegExp = (value: string) => value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
+  const getNextSequentialName = (baseName: string, existingNames: string[]): string => {
+    const pattern = new RegExp(`^${escapeRegExp(baseName)}(?: \\((\\d+)\\))?$`);
+    const used = new Set<number>();
+    let baseTaken = false;
+
+    for (const name of existingNames) {
+      const m = name.match(pattern);
+      if (!m) continue;
+      if (!m[1]) {
+        baseTaken = true;
+        continue;
+      }
+      const n = Number(m[1]);
+      if (Number.isFinite(n) && n >= 1) used.add(n);
+    }
+
+    if (!baseTaken) return baseName;
+    let i = 1;
+    while (used.has(i)) i += 1;
+    return `${baseName} (${i})`;
+  };
+
+  const handleAddToPlaylist = async (track: Track, playlistId: string, fromDragDrop = false) => {
+    const playlist = playlists.find((p) => p.id === playlistId);
+    if (!playlist) return;
+    if (playlist.locked) {
+      toast.error('Playlist is locked');
+      return;
+    }
+
+    try {
+      const existingNames: string[] = (playlist.tracks || []).map((t) => String(t.name || '')).filter(Boolean);
+      const baseName = String(track.name || 'Track').replace(/ \((\d+)\)$/, '');
+      const namePattern = new RegExp(`^${escapeRegExp(baseName)}(?: \\((\\d+)\\))?$`);
+      const hasSameBase = existingNames.some((name) => namePattern.test(name));
+
+      let trackToAttach: Track = track;
+      if (hasSameBase) {
+        const desiredName = getNextSequentialName(baseName, existingNames);
+        const t = await tracksAPI.alias(track.id, desiredName);
+        const aliasTrack: Track = {
+          id: t.id,
+          name: t.name,
+          artist: t.artist,
+          duration: t.duration && t.duration > 0 ? t.duration : track.duration,
+          size: t.size,
+          filePath: resolveUploadsUrl((t as any).filePath || (t as any).file_path),
+          hash: t.hash,
+          dateAdded: (t as any).date_added ? new Date((t as any).date_added) : new Date(),
+        };
+        setTracks((prev) => [aliasTrack, ...prev]);
+        trackToAttach = aliasTrack;
+      }
+
+      await playlistsAPI.addTracks(playlistId, [trackToAttach.id]);
+
+      setPlaylists((prev) =>
+        prev.map((p) => {
+          if (p.id !== playlistId) return p;
+          const newTracks = [...(p.tracks || []), trackToAttach];
+          return {
+            ...p,
+            tracks: newTracks,
+            duration: newTracks.reduce((sum, t) => sum + (t.duration || 0), 0),
+          };
+        })
+      );
+
+      if (fromDragDrop) {
+        setRecentPlaylistAdd({ playlistId, trackId: trackToAttach.id, createdAt: Date.now() });
+      }
+
+      toast.success(`Added to "${playlist.name}"`);
+    } catch (error: any) {
+      console.error('Failed to add track to playlist', error);
+      toast.error(error?.message || 'Failed to add track to playlist');
     }
   };
 
@@ -715,1139 +1317,55 @@ export default function App() {
                   completed: false,
                   source: 'queue',
                   playedAtOverride,
-                  endTimestampOverride: interruptionTime,
                 });
               }
-
-              const now = new Date();
-              const completedIds: string[] = [];
-              setScheduledPlaylists((prev) =>
-                prev.map((s) => {
-                  if (
-                    s.type === 'datetime' &&
-                    s.status === 'pending' &&
-                    s.dateTime &&
-                    s.dateTime.getTime() <= now.getTime()
-                  ) {
-                    completedIds.push(s.id);
-                    return { ...s, status: 'completed' };
-                  }
-                  return s;
-                }),
-              );
-
-              if (completedIds.length > 0) {
-                setDismissedScheduleIds((prev) =>
-                  Array.from(new Set([...prev, ...completedIds])),
-                );
-              }
-
-              setCurrentQueueItemId(firstQueueItemId);
-              setIsPlaying(true);
-              setNowPlayingStart(nowIst ?? new Date());
-              return;
-            }
-
-            if (previousCurrentId && !wasCurrentStillPresent && firstQueueItemId) {
-              const interruptionTime = nowIst ?? new Date();
-              const interruptedTrack = currentTrackRef.current;
-              if (interruptedTrack) {
-                void finalizePlaybackHistory(interruptedTrack, {
-                  completed: false,
-                  source: 'queue',
-                  endTimestampOverride: interruptionTime,
-                });
-              }
-              setCurrentQueueItemId(firstQueueItemId);
-              setIsPlaying(true);
-              setNowPlayingStart(nowIst ?? new Date());
-            } else {
-              setCurrentQueueItemId((prev: string | null) => prev ?? firstQueueItemId);
             }
           }
-        } catch (err) {
-          console.error('Error parsing WebSocket message', err);
+        } catch (error) {
+          console.error('Failed to handle WebSocket message', error);
         }
       };
 
       socket.onclose = () => {
-        console.log('WebSocket disconnected');
+        console.log('WebSocket disconnected:', wsUrl);
         hasLiveQueueRef.current = false;
-
-        // Finalize history for currently playing track when server disconnects
-        if (historyEntryIdRef.current && currentTrackRef.current) {
-          const disconnectionTime = new Date();
-          void finalizePlaybackHistory(currentTrackRef.current, {
-            completed: false,
-            source: 'queue',
-            endTimestampOverride: disconnectionTime,
-          });
-        }
-
         scheduleReconnect();
       };
 
-      socket.onerror = (err) => {
-        console.error('WebSocket error', err);
+      socket.onerror = (event) => {
+        console.error('WebSocket error:', event);
+        scheduleReconnect();
       };
     };
 
-    const onVisibility = () => {
-      if (document.hidden) return;
-      const state = socket?.readyState;
-      if (state == null || state === WebSocket.CLOSED) {
-        connect();
-      }
-      void resync();
-    };
-
-    window.addEventListener('focus', onVisibility);
-    document.addEventListener('visibilitychange', onVisibility);
     connect();
 
     return () => {
       stopped = true;
-      window.removeEventListener('focus', onVisibility);
-      document.removeEventListener('visibilitychange', onVisibility);
-      if (reconnectTimer != null) {
-        window.clearTimeout(reconnectTimer);
-        reconnectTimer = null;
-      }
-      try {
-        socket?.close();
-      } catch { }
-      socket = null;
+      socket?.close();
     };
   }, []);
 
-  // Load queue from backend so it persists across refreshes
+  // Load tracks from backend so library reflects database
   useEffect(() => {
-    (async () => {
-      try {
-        const serverQueue = await queueAPI.get();
-        const normalized: QueueItem[] = (serverQueue as any[]).map((item) => {
-          const track = item?.track;
-          if (!track) return item;
-          return {
-            ...item,
-            track: {
-              ...track,
-              filePath: resolveUploadsUrl(track.filePath || track.file_path),
-            },
-          };
-        });
-        setQueue(normalized);
-      } catch (error: any) {
-        console.error('Failed to load queue', error);
-        toast.error(error.message || 'Failed to load queue');
-      }
-    })();
+    void resyncAll();
   }, []);
 
-  // Load playlists from backend so created playlists persist
+  // Allow other components to request a resync (e.g. after restore)
   useEffect(() => {
-    (async () => {
-      try {
-        const serverPlaylists = await playlistsAPI.getAll();
-        const mapped: Playlist[] = (serverPlaylists as any[]).map((p: any) => {
-          const mappedTracks: Track[] = (p.tracks || []).map((t: any) => ({
-            id: t.id,
-            name: t.name,
-            artist: t.artist,
-            duration: t.duration,
-            size: t.size,
-            filePath: resolveUploadsUrl(t.filePath || t.file_path),
-            hash: t.hash,
-            dateAdded: t.date_added
-              ? new Date(t.date_added)
-              : t.created_at
-                ? new Date(t.created_at)
-                : new Date(),
-          }));
-
-          return {
-            id: p.id,
-            name: p.name,
-            tracks: mappedTracks,
-            locked: Boolean(p.locked),
-            createdAt: p.created_at ? new Date(p.created_at) : new Date(),
-            duration: p.duration ?? mappedTracks.reduce((sum, t) => sum + t.duration, 0),
-          } as Playlist;
-        });
-        setPlaylists(mapped);
-      } catch (error: any) {
-        console.error('Failed to load playlists', error);
-        toast.error(error.message || 'Failed to load playlists');
-      }
-    })();
+    const onResync = () => void resyncAll();
+    window.addEventListener('redio:resync', onResync);
+    return () => window.removeEventListener('redio:resync', onResync);
   }, []);
 
-  // Track Management
-  const getAudioDuration = (file: File): Promise<number> => {
-    return new Promise((resolve) => {
-      const audio = new Audio();
-      const url = URL.createObjectURL(file);
-      audio.src = url;
-      audio.addEventListener('loadedmetadata', () => {
-        if (!isNaN(audio.duration) && audio.duration > 0) {
-          resolve(Math.round(audio.duration));
-        } else {
-          resolve(0);
-        }
-        URL.revokeObjectURL(url);
-      });
-      audio.addEventListener('error', () => {
-        resolve(0);
-        URL.revokeObjectURL(url);
-      });
-    });
-  };
-
-  const askDuplicateDecision = (
-    existingName: string,
-    fileName: string,
-  ): Promise<'skip' | 'cancel' | 'add' | 'addAll'> => {
-    return new Promise((resolve) => {
-      duplicateDecisionResolver.current = resolve;
-      setDuplicatePrompt({ existingName, fileName });
-    });
-  };
-
-  const handleDuplicateDecision = (choice: 'skip' | 'cancel' | 'add' | 'addAll') => {
-    if (duplicateDecisionResolver.current) {
-      duplicateDecisionResolver.current(choice);
-      duplicateDecisionResolver.current = null;
-    }
-    setDuplicatePrompt(null);
-  };
-
-  const askFolderDuplicateDecision = (
-    baseName: string,
-    fileName: string,
-  ): Promise<'skip' | 'cancel' | 'add' | 'addAll'> => {
-    return new Promise((resolve) => {
-      folderDuplicateDecisionResolver.current = resolve;
-      setFolderDuplicatePrompt({ baseName, fileName });
-    });
-  };
-
-  const handleFolderDuplicateDecision = (choice: 'skip' | 'cancel' | 'add' | 'addAll') => {
-    if (folderDuplicateDecisionResolver.current) {
-      folderDuplicateDecisionResolver.current(choice);
-      folderDuplicateDecisionResolver.current = null;
-    }
-    setFolderDuplicatePrompt(null);
-  };
-
-  const escapeRegExp = (value: string) => value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-
-  // Given a base name and the list of existing names in a folder, return the
-  // next OS-style name. Rules: use the plain baseName if it is free; otherwise
-  // use the smallest positive integer suffix not yet taken.
-  // Examples for baseName="Sahiba":
-  //  []                                  -> "Sahiba"
-  //  ["Sahiba"]                         -> "Sahiba (1)"
-  //  ["Sahiba", "Sahiba (1)"]         -> "Sahiba (2)"
-  //  ["Sahiba", "Sahiba (2)"]         -> "Sahiba (1)"  (fill the gap)
-  //  ["Sahiba (1)", "Sahiba (2)"]     -> "Sahiba"      (base is free again)
-  const getNextSequentialName = (baseName: string, existingNames: string[]): string => {
-    const pattern = new RegExp(`^${escapeRegExp(baseName)}(?: \\((\\d+)\\))?$`);
-    const used = new Set<number>();
-
-    for (const name of existingNames) {
-      const match = name.match(pattern);
-      if (!match) continue;
-      const idx = match[1] ? parseInt(match[1], 10) : 0; // 0 = plain baseName
-      if (!Number.isNaN(idx)) {
-        used.add(idx);
-      }
-    }
-
-    // If the plain name is not taken, use it.
-    if (!used.has(0)) {
-      return baseName;
-    }
-
-    // Otherwise, find the smallest positive integer not in the set.
-    let suffix = 1;
-    while (used.has(suffix)) {
-      suffix += 1;
-    }
-    return `${baseName} (${suffix})`;
-  };
-
-  const handleDuplicatePlaylist = async (playlistId: string) => {
-    const original = playlists.find(p => p.id === playlistId);
-    if (!original) return;
-
-    // Generate a unique copy name
-    let baseName = `${original.name} Copy`;
-    let name = baseName;
-    let suffix = 2;
-    while (playlists.some(p => p.name.toLowerCase() === name.toLowerCase())) {
-      name = `${baseName} ${suffix++}`;
-    }
-
-    try {
-      const serverPlaylist: any = await playlistsAPI.create(name);
-      const newPlaylistId = serverPlaylist.id as string;
-      const trackIds = original.tracks.map(t => t.id);
-
-      if (trackIds.length > 0) {
-        await playlistsAPI.addTracks(newPlaylistId, trackIds);
-      }
-
-      const newPlaylist: Playlist = {
-        id: newPlaylistId,
-        name,
-        tracks: [...original.tracks],
-        locked: false,
-        createdAt: serverPlaylist.created_at
-          ? new Date(serverPlaylist.created_at)
-          : serverPlaylist.createdAt
-            ? new Date(serverPlaylist.createdAt)
-            : new Date(),
-        duration: original.duration,
-      };
-
-      setPlaylists(prev => [...prev, newPlaylist]);
-      toast.success(`Duplicated playlist as "${name}"`);
-    } catch (error: any) {
-      console.error('Failed to duplicate playlist', error);
-      toast.error(error.message || 'Failed to duplicate playlist');
-    }
-  };
-
-  const hydrateTrackDurationInLibrary = (trackId: string, filePath: string) => {
-    const audio = new Audio(resolveUploadsUrl(filePath));
-    audio.addEventListener('loadedmetadata', () => {
-      if (!isNaN(audio.duration) && audio.duration > 0) {
-        setTracks((prev) =>
-          prev.map((t) => (t.id === trackId ? { ...t, duration: Math.round(audio.duration) } : t)),
-        );
-      }
-    });
-  };
-
-  const handleAddToQueue = async (track: Track) => {
-    try {
-      const rawItem = await queueAPI.add(track.id);
-      const newItem: QueueItem = rawItem?.track
-        ? {
-          ...rawItem,
-          track: {
-            ...rawItem.track,
-            filePath: resolveUploadsUrl(rawItem.track.filePath || (rawItem.track as any).file_path),
-          },
-        }
-        : (rawItem as any);
-
-      const wasEmpty = queue.length === 0;
-
-      // If we do not have a live WebSocket connection, optimistically update
-      // the local queue. When WS is connected, the backend will broadcast the
-      // new queue state, so we avoid double-adding.
-      if (!hasLiveQueueRef.current) {
-        setQueue(prev => [...prev, newItem]);
-
-        // If this is the first item in the queue, reflect it immediately in the playback bar
-        if (wasEmpty && !currentQueueItemId) {
-          setCurrentQueueItemId(newItem.id);
-        }
-      }
-
-      toast.success(`Added "${track.name}" to queue`);
-    } catch (error: any) {
-      console.error('Failed to add to queue', error);
-      toast.error(error.message || 'Failed to add to queue');
-    }
-  };
-
-  // Whenever the queue goes from empty to non-empty and nothing is selected,
-  // reflect the first item in the playback bar without auto-playing.
+  // Keep refs in sync with the latest current track so the WebSocket
+  // handlers can safely reason about preemption.
   useEffect(() => {
-    if (prevQueueLengthRef.current === 0 && queue.length > 0 && !currentQueueItemId) {
-      setCurrentQueueItemId(queue[0].id);
-    }
-    prevQueueLengthRef.current = queue.length;
-  }, [queue, currentQueueItemId]);
-
-  // Track when playback actually starts (wall-clock). Selection changes
-  // while paused should NOT reset start time, otherwise history timestamps
-  // drift away from the queue timing display.
-  useEffect(() => {
-    if (!currentQueueItemId) {
-      playbackStartedQueueItemIdRef.current = null;
-      setNowPlayingStart(null);
-      return;
-    }
-
-    if (!isPlaying) {
-      return;
-    }
-
-    if (playbackStartedQueueItemIdRef.current !== currentQueueItemId) {
-      playbackStartedQueueItemIdRef.current = currentQueueItemId;
-      const start = nowIst ?? new Date();
-      setNowPlayingStart(start);
-      if (currentTrack) {
-        void startPlaybackHistoryIfNeeded(currentTrack, 'queue', start);
-      }
-    }
-  }, [currentQueueItemId, isPlaying, currentTrack, nowIst, startPlaybackHistoryIfNeeded]);
-
-  // Clear any seek override when the playing item changes so the next
-  // track's timing derives from its own start.
-  useEffect(() => {
-    setSeekAnchor(null);
-  }, [currentQueueItemId]);
-
-  // Finalize history when the current track changes (even from pause state)
-  // This ensures that moving to next song always records end time for previous song
-  useEffect(() => {
-    // Skip if no previous track to finalize
-    if (!historyEntryTrackIdRef.current || !historyEntryIdRef.current) return;
-
-    // Skip if the track hasn't actually changed
-    if (currentTrack && historyEntryTrackIdRef.current === currentTrack.id) return;
-
-    // Finalize the previous track's history
-    const previousTrackId = historyEntryTrackIdRef.current;
-    const previousTrack = tracks.find(t => t.id === previousTrackId);
-
-    if (previousTrack) {
-      const changeTime = nowIst ?? new Date();
-      void finalizePlaybackHistory(previousTrack, {
-        completed: false,
-        source: 'queue',
-        endTimestampOverride: changeTime,
-      });
-    }
-  }, [currentTrack?.id, nowIst, finalizePlaybackHistory, tracks]);
-
-  // Adjust start time when pausing/resuming so future timings stay accurate
-  useEffect(() => {
-    if (!nowPlayingStart) return;
-    if (!isPlaying) {
-      pauseStartedAtRef.current = new Date();
-    } else if (pauseStartedAtRef.current) {
-      const now = new Date();
-      const delta = now.getTime() - pauseStartedAtRef.current.getTime();
-      pauseStartedAtRef.current = null;
-      setNowPlayingStart(new Date(nowPlayingStart.getTime() + delta));
-    }
-  }, [isPlaying, nowPlayingStart]);
-
-  // Finalize history when playback is completely stopped (no next track)
-  // This handles cases like manual stop when queue is empty
-  useEffect(() => {
-    // Only finalize if playback stopped and no track is selected (complete stop)
-    if (!isPlaying && !currentQueueItemId && historyEntryIdRef.current && currentTrackRef.current) {
-      const stopTime = nowIst ?? new Date();
-      void finalizePlaybackHistory(currentTrackRef.current, {
-        completed: false,
-        source: 'queue',
-        endTimestampOverride: stopTime,
-      });
-    }
-  }, [isPlaying, currentQueueItemId, nowIst, finalizePlaybackHistory]);
-
-  // If playback starts while a track is already selected (e.g. operator
-  // clicked an item while paused), ensure we capture the start time.
-  // Note: History creation is handled by the useEffect above.
-  useEffect(() => {
-    if (!isPlaying) return;
-    if (!currentQueueItemId || !currentTrack) return;
-
-    if (!nowPlayingStart) {
-      const start = nowIst ?? new Date();
-      setNowPlayingStart(start);
-    }
-  }, [isPlaying, currentQueueItemId, currentTrack, nowPlayingStart, nowIst]);
-
-  const ALLOWED_UPLOAD_EXTENSIONS = new Set(['.mp3', '.wav', '.ogg', '.m4a', '.flac']);
-  const ALLOWED_UPLOAD_MIME_TYPES = new Set([
-    'audio/mpeg',
-    'audio/mp3',
-    'audio/wav',
-    'audio/x-wav',
-    'audio/ogg',
-    'audio/flac',
-    'audio/x-flac',
-    'audio/mp4',
-    'audio/aac',
-    'video/mp4',
-    'application/ogg',
-  ]);
-
-  const isValidUploadFile = (file: File) => {
-    if (!file) return { ok: false as const, reason: 'Invalid file' };
-    const lower = String(file.name || '').toLowerCase();
-    const dot = lower.lastIndexOf('.');
-    const ext = dot >= 0 ? lower.slice(dot) : '';
-    if (!ext || !ALLOWED_UPLOAD_EXTENSIONS.has(ext)) {
-      return { ok: false as const, reason: 'Invalid file type' };
-    }
-    const mime = String((file as any).type || '').toLowerCase();
-    if (mime && !mime.startsWith('audio/') && !ALLOWED_UPLOAD_MIME_TYPES.has(mime)) {
-      return { ok: false as const, reason: 'Invalid file type' };
-    }
-    return { ok: true as const, reason: '' };
-  };
-
-  const handleImportTracks = async (files: File[], folderId?: string) => {
-    let imported = 0;
-    let duplicates = 0;
-    let failed = 0;
-    let folderDuplicateMode: 'ask' | 'addAll' = 'ask';
-    let libraryDuplicateMode: 'ask' | 'addAll' = 'ask';
-    let canceledImport = false;
-    let existingFolderNames: string[] = [];
-
-    if (folderId) {
-      try {
-        const raw = await foldersAPI.getTracks(folderId);
-        existingFolderNames = (raw || []).map((t: any) => String(t.name || '')).filter(Boolean);
-      } catch (err) {
-        console.error('Failed to load existing folder tracks for duplicate detection', err);
-      }
-    }
-    const importedIds: string[] = [];
-
-    for (const file of files) {
-      if (canceledImport) break;
-
-      const validation = isValidUploadFile(file);
-      if (!validation.ok) {
-        failed += 1;
-        toast.error(`${validation.reason}: ${file?.name || 'file'}`);
-        continue;
-      }
-
-      const detectedDuration = await getAudioDuration(file);
-
-      const formData = new FormData();
-
-      // For folder imports, if a file with the same base name already exists
-      // in that folder, ask the operator whether to Skip (this file only),
-      // Cancel (stop the whole batch), Add (with a new numbered name), or
-      // Add All Copy for remaining duplicates.
-      if (folderId) {
-        const dotIndex = file.name.lastIndexOf('.');
-        const baseName = dotIndex > 0 ? file.name.slice(0, dotIndex) : file.name;
-
-        const namePattern = new RegExp(`^${escapeRegExp(baseName)}(?: \\((\\d+)\\))?$`);
-        const hasSameBase = existingFolderNames.some((name) => namePattern.test(name));
-        if (hasSameBase) {
-          let decision: 'skip' | 'cancel' | 'add' | 'addAll' = 'add';
-          if (folderDuplicateMode === 'addAll') {
-            decision = 'addAll';
-          } else {
-            decision = await askFolderDuplicateDecision(baseName, file.name);
-          }
-
-          if (decision === 'skip') {
-            duplicates += 1;
-            continue;
-          }
-
-          if (decision === 'cancel') {
-            canceledImport = true;
-            break;
-          }
-
-          const newName = getNextSequentialName(baseName, existingFolderNames);
-          existingFolderNames.push(newName);
-          formData.append('name', newName);
-
-          if (decision === 'addAll') {
-            folderDuplicateMode = 'addAll';
-          }
-        }
-      }
-
-      formData.append('file', file);
-      if (detectedDuration > 0) {
-        formData.append('duration', String(detectedDuration));
-      }
-
-      try {
-        const uploadData = await apiClient.request<any>('/tracks/upload', {
-          method: 'POST',
-          body: formData,
-          allowedStatuses: [409],
-        });
-
-        if (uploadData?.existingTrack) {
-          // Duplicate audio file based on hash.
-          const existingTrack = uploadData?.existingTrack;
-
-          if (!existingTrack) {
-            duplicates += 1;
-            continue;
-          }
-
-          // For folder imports, generate a folder-level OS-style name so
-          // duplicates show as Sahiba, Sahiba (1), Sahiba (2) inside that
-          // folder, and persist that name via aliasName on the backend.
-          let aliasName: string | undefined;
-          if (folderId) {
-            const dotIndex = file.name.lastIndexOf('.');
-            const baseName = dotIndex > 0 ? file.name.slice(0, dotIndex) : file.name;
-            aliasName = getNextSequentialName(baseName, existingFolderNames);
-            // We will push the final alias name into existingFolderNames only
-            // after the alias has been created successfully.
-          } else {
-            // Library-level duplicate: do not show a dialog. Always create
-            // an alias using OS-style gap-filling naming across the entire
-            // library so repeated imports of the same file produce
-            // Sahiba, Sahiba (1), Sahiba (2), ...
-            const allNames: string[] = tracks
-              .map(t => String(t.name || ''))
-              .filter(Boolean);
-            const baseName = String(existingTrack.name || '').replace(/ \((\d+)\)$/, '');
-            aliasName = getNextSequentialName(baseName, allNames);
-          }
-
-          // Create an alias track that reuses the same file but with an
-          // auto-renamed title (either global OS-style or folder-specific).
-          const fallbackName = String(existingTrack.name || file.name || '');
-          const t = await tracksAPI.alias(existingTrack.id, aliasName || fallbackName);
-          const mapped: Track = {
-            id: t.id,
-            name: t.name,
-            artist: t.artist,
-            duration: t.duration && t.duration > 0 ? t.duration : detectedDuration,
-            size: t.size,
-            filePath: resolveUploadsUrl((t as any).filePath || (t as any).file_path),
-            hash: t.hash,
-            dateAdded: (t as any).date_added ? new Date((t as any).date_added) : new Date(),
-          };
-          setTracks(prev => [mapped, ...prev]);
-          importedIds.push(mapped.id);
-          if (folderId) {
-            existingFolderNames.push(mapped.name);
-          }
-          if ((!t.duration || t.duration === 0) && mapped.filePath) {
-            hydrateTrackDurationInLibrary(mapped.id, mapped.filePath);
-          }
-          imported += 1;
-          continue;
-        }
-
-        // Successful upload
-        const t = uploadData;
-        if (!t?.id) {
-          failed += 1;
-          continue;
-        }
-        const mapped: Track = {
-          id: t.id,
-          name: t.name,
-          artist: t.artist,
-          duration: t.duration && t.duration > 0 ? t.duration : detectedDuration,
-          size: t.size,
-          filePath: resolveUploadsUrl(t.filePath || t.file_path),
-          hash: t.hash,
-          dateAdded: t.date_added ? new Date(t.date_added) : new Date(),
-        };
-        setTracks(prev => [mapped, ...prev]);
-        importedIds.push(mapped.id);
-        if (folderId) {
-          existingFolderNames.push(mapped.name);
-        }
-        if ((!t.duration || t.duration === 0) && mapped.filePath) {
-          hydrateTrackDurationInLibrary(mapped.id, mapped.filePath);
-        }
-        imported += 1;
-      } catch (error) {
-        console.error('Failed to import track', error);
-        failed += 1;
-      }
-    }
-
-    // If files were added for a specific library folder, associate them
-    if (folderId && importedIds.length > 0) {
-      try {
-        await foldersAPI.attachTracks(folderId, importedIds);
-      } catch (err) {
-        console.error('Failed to link imported tracks to folder', err);
-      }
-    }
-
-    toast.success('Import summary', {
-      description: `${imported} imported, ${duplicates} duplicates skipped, ${failed} failed`,
-    });
-  };
-
-  const handleRemoveFromQueue = async (id: string) => {
-    const target = queue.find(item => item.id === id);
-    const isCurrent = Boolean(target && currentQueueItemId && target.id === currentQueueItemId);
-
-    if (isCurrent) {
-      const ok = confirm('This track is currently playing. Skip and remove it from the queue?');
-      if (!ok) return;
-      // Advance playback first so audio keeps flowing
-      handleNext();
-    }
-
-    const previousQueue = queue;
-
-    // Optimistically update local queue for non-current items
-    if (!isCurrent) {
-      setQueue(queue.filter(item => item.id !== id));
-    }
-
-    // Check if removed song had any scheduled playlists
-    setScheduledPlaylists(prev =>
-      prev.filter(schedule => schedule.queueSongId !== id)
-    );
-
-    try {
-      await queueAPI.remove(id);
-    } catch (error: any) {
-      if (error instanceof ApiError && error.status === 404) {
-        toast.info('Queue item was already removed');
-        return;
-      }
-      console.error('Failed to remove from queue', error);
-      if (!isCurrent) {
-        setQueue(previousQueue);
-      }
-      toast.error(error.message || 'Failed to remove from queue');
-    }
-  };
-
-  useEffect(() => {
-    const onKeyDown = (e: KeyboardEvent) => {
-      const target = e.target as HTMLElement | null;
-      const isTypingTarget =
-        !!target &&
-        (target.tagName === 'INPUT' ||
-          target.tagName === 'TEXTAREA' ||
-          (target as any).isContentEditable);
-
-      if (isTypingTarget) return;
-
-      if (e.key === 'q' || e.key === 'Q') {
-        e.preventDefault();
-        toggleQueueDialog();
-        return;
-      }
-      if (e.key === 'Escape') {
-        setQueueDialogOpen(false);
-      }
-
-      if (!queueDialogOpen) return;
-      if (queueDialogLocked) return;
-      if (!selectedQueueItemId) return;
-      if (e.key === 'Delete' || e.key === 'Backspace') {
-        e.preventDefault();
-        handleRemoveFromQueue(selectedQueueItemId);
-      }
-    };
-    window.addEventListener('keydown', onKeyDown);
-    return () => window.removeEventListener('keydown', onKeyDown);
-  }, [queueDialogLocked, queueDialogOpen, selectedQueueItemId, toggleQueueDialog, handleRemoveFromQueue]);
-
-  const handleReorderQueue = async (items: QueueItem[]) => {
-    const previousQueue = queue;
-
-    // Optimistically update queue order
-    setQueue(items);
-
-    try {
-      const queueIds = items.map(i => i.id);
-      await queueAPI.reorder(queueIds);
-    } catch (error: any) {
-      console.error('Failed to reorder queue', error);
-      // Roll back to previous order
-      setQueue(previousQueue);
-      toast.error(error.message || 'Failed to reorder queue');
-    }
-  };
-
-  // Keep the currently playing item pinned to the top of the queue.
-  // This also persists the order so the position remains stable across
-  // refresh/reconnect.
-  useEffect(() => {
-    if (!currentQueueItemId) return;
-    if (queue.length === 0) return;
-    if (queue[0]?.id === currentQueueItemId) {
-      pinnedQueueItemIdRef.current = currentQueueItemId;
-      return;
-    }
-
-    // Avoid re-sending reorder for the same playing item if we're already
-    // waiting for the queue state to reflect it.
-    if (pinnedQueueItemIdRef.current === currentQueueItemId) return;
-
-    const idx = queue.findIndex((q) => q.id === currentQueueItemId);
-    if (idx < 0) return;
-
-    pinnedQueueItemIdRef.current = currentQueueItemId;
-    const next = [queue[idx], ...queue.slice(0, idx), ...queue.slice(idx + 1)];
-    void handleReorderQueue(next);
-  }, [currentQueueItemId, queue]);
-
-  // Playlist Management
-  const handleAddToPlaylist = async (track: Track, playlistId: string, fromDragDrop = false) => {
-    const playlist = playlists.find(p => p.id === playlistId);
-    if (!playlist) return;
-    if (playlist.locked) {
-      toast.error('Playlist is locked');
-      return;
-    }
-
-    try {
-      const existingNames: string[] = (playlist.tracks || [])
-        .map(t => String(t.name || ''))
-        .filter(Boolean);
-
-      const baseName = track.name.replace(/ \((\d+)\)$/, '');
-      const desiredName = getNextSequentialName(baseName, existingNames);
-
-      // If the desired name is exactly the same as the current track name
-      // and there is no conflicting base in this playlist, we can safely
-      // reuse the existing track without creating an alias.
-      const namePattern = new RegExp(`^${escapeRegExp(baseName)}(?: \\((\\d+)\\))?$`);
-      const hasSameBase = existingNames.some(name => namePattern.test(name));
-
-      let trackToAttach: Track = track;
-
-      if (hasSameBase) {
-        const t = await tracksAPI.alias(track.id, desiredName);
-        const aliasTrack: Track = {
-          id: t.id,
-          name: t.name,
-          artist: t.artist,
-          duration: t.duration && t.duration > 0 ? t.duration : track.duration,
-          size: t.size,
-          filePath: resolveUploadsUrl((t as any).filePath || (t as any).file_path),
-          hash: t.hash,
-          dateAdded: (t as any).date_added ? new Date((t as any).date_added) : new Date(),
-        };
-
-        setTracks(prev => [aliasTrack, ...prev]);
-        trackToAttach = aliasTrack;
-      }
-
-      await playlistsAPI.addTracks(playlistId, [trackToAttach.id]);
-
-      setPlaylists(prev => prev.map(p => {
-        if (p.id !== playlistId) return p;
-        const newTracks = [...p.tracks, trackToAttach];
-        return {
-          ...p,
-          tracks: newTracks,
-          duration: newTracks.reduce((sum, t) => sum + t.duration, 0)
-        };
-      }));
-
-      if (fromDragDrop) {
-        setRecentPlaylistAdd({ playlistId, trackId: trackToAttach.id, createdAt: Date.now() });
-      }
-
-      toast.success(`Added to "${playlist.name}"`);
-    } catch (error: any) {
-      console.error('Failed to add track to playlist', error);
-      toast.error(error.message || 'Failed to add track to playlist');
-    }
-  };
-
-  const handleDropTrackOnPlaylistPanel = async (
-    playlistId: string,
-    trackIds: string[],
-    insertIndex: number,
-  ) => {
-    const playlist = playlists.find((p) => p.id === playlistId);
-    if (!playlist) return;
-    if (playlist.locked) {
-      toast.error('Playlist is locked');
-      return;
-    }
-
-    const tracksToAdd = tracks.map((t) => trackIds.includes(t.id) ? t : null).filter(Boolean) as Track[];
-    if (tracksToAdd.length === 0) return;
-
-    try {
-      const existingNames: string[] = (playlist.tracks || [])
-        .map((t) => String(t.name || ''))
-        .filter(Boolean);
-
-      const tracksToAttach: Track[] = [];
-      for (const track of tracksToAdd) {
-        const baseName = track.name.replace(/ \((\d+)\)$/, '');
-        const desiredName = getNextSequentialName(baseName, existingNames);
-
-        const namePattern = new RegExp(`^${escapeRegExp(baseName)}(?: \\((\\d+)\\))?$`);
-        const hasSameBase = existingNames.some((name) => namePattern.test(name));
-
-        let trackToAttach: Track = track;
-
-        if (hasSameBase) {
-          const t = await tracksAPI.alias(track.id, desiredName);
-          const aliasTrack: Track = {
-            id: t.id,
-            name: t.name,
-            artist: t.artist,
-            duration: t.duration && t.duration > 0 ? t.duration : track.duration,
-            size: t.size,
-            filePath: resolveUploadsUrl((t as any).filePath || (t as any).file_path),
-            hash: t.hash,
-            dateAdded: (t as any).date_added ? new Date((t as any).date_added) : new Date(),
-          };
-
-          setTracks((prev) => [aliasTrack, ...prev]);
-          trackToAttach = aliasTrack;
-        }
-
-        tracksToAttach.push(trackToAttach);
-        existingNames.push(trackToAttach.name);
-      }
-
-      await playlistsAPI.addTracks(playlistId, tracksToAttach.map(t => t.id));
-
-      // Compute the new in-memory order with items inserted at insertIndex
-      let newTracks: Track[] = [];
-      setPlaylists((prev) =>
-        prev.map((p) => {
-          if (p.id !== playlistId) return p;
-
-          const clampedIndex = Math.min(Math.max(insertIndex, 0), p.tracks.length);
-          const before = p.tracks.slice(0, clampedIndex);
-          const after = p.tracks.slice(clampedIndex);
-          newTracks = [...before, ...tracksToAttach, ...after];
-
-          return {
-            ...p,
-            tracks: newTracks,
-            duration: newTracks.reduce((sum, t2) => sum + t2.duration, 0),
-          };
-        }),
-      );
-
-      setRecentPlaylistAdd({ playlistId, trackId: tracksToAttach[0].id, createdAt: Date.now() });
-
-      // Persist the new order so the DB matches the visual insertion position
-      if (newTracks.length > 0) {
-        const trackIds = newTracks.map((t) => t.id);
-        try {
-          await playlistsAPI.reorder(playlistId, trackIds);
-        } catch (err) {
-          console.error('Failed to persist playlist reorder', err);
-        }
-      }
-
-      toast.success(`Added ${tracksToAttach.length} track${tracksToAttach.length !== 1 ? 's' : ''} to "${playlist.name}"`);
-    } catch (error: any) {
-      console.error('Failed to add track to playlist at position', error);
-      toast.error(error.message || 'Failed to add track to playlist');
-    }
-  };
-
-  // When adding a song from the live queue into a playlist, create a real
-  // file copy with special naming so edits to that playlist entry do not
-  // affect the original. This uses the backend /tracks/copy endpoint.
-  const handleAddQueueItemToPlaylist = async (item: QueueItem, playlistId: string) => {
-    const playlist = playlists.find((p) => p.id === playlistId);
-    if (!playlist) return;
-    if (playlist.locked) {
-      toast.error('Playlist is locked');
-      return;
-    }
-
-    try {
-      const t = await tracksAPI.copy(item.track.id);
-      const newTrack: Track = {
-        id: t.id,
-        name: t.name,
-        artist: t.artist,
-        duration: t.duration,
-        size: t.size,
-        filePath: resolveUploadsUrl((t as any).filePath || (t as any).file_path),
-        hash: t.hash,
-        dateAdded: (t as any).date_added ? new Date((t as any).date_added) : new Date(),
-      };
-
-      setTracks((prev) => [newTrack, ...prev]);
-
-      await playlistsAPI.addTracks(playlistId, [newTrack.id]);
-
-      setPlaylists((prev) =>
-        prev.map((p) => {
-          if (p.id !== playlistId) return p;
-          const newTracks = [...p.tracks, newTrack];
-          return {
-            ...p,
-            tracks: newTracks,
-            duration: newTracks.reduce((sum, t2) => sum + t2.duration, 0),
-          };
-        }),
-      );
-
-      toast.success(`Copied to "${playlist.name}" from queue`);
-    } catch (error: any) {
-      console.error('Failed to copy queue track to playlist', error);
-      toast.error(error.message || 'Failed to copy track to playlist');
-    }
-  };
-
-  const handleCreatePlaylist = () => {
-    setPlaylistNameDialog({ mode: 'create', name: '' });
-  };
-
-  const handleRenamePlaylist = async (playlistId: string) => {
-    const playlist = playlists.find((p) => p.id === playlistId);
-    if (!playlist || playlist.locked) return;
-    setPlaylistNameDialog({ mode: 'rename', playlistId, name: playlist.name });
-  };
-
-  const submitPlaylistNameDialog = async () => {
-    if (!playlistNameDialog) return;
-    const name = playlistNameDialog.name.trim();
-    if (!name) {
-      setPlaylistNameDialog(null);
-      return;
-    }
-
-    if (playlistNameDialog.mode === 'create') {
-      const exists = playlists.some((p) => p.name.toLowerCase() === name.toLowerCase());
-      if (exists) {
-        toast.error('Playlist name already exists');
-        return;
-      }
-
-      try {
-        const serverPlaylist: any = await playlistsAPI.create(name);
-        const newPlaylist: Playlist = {
-          id: serverPlaylist.id,
-          name: serverPlaylist.name,
-          tracks: [],
-          locked: Boolean(serverPlaylist.locked),
-          createdAt: serverPlaylist.created_at
-            ? new Date(serverPlaylist.created_at)
-            : serverPlaylist.createdAt
-              ? new Date(serverPlaylist.createdAt)
-              : new Date(),
-          duration: serverPlaylist.duration ?? 0,
-        };
-
-        setPlaylists((prev) => [...prev, newPlaylist]);
-        toast.success(`Created playlist "${name}"`);
-        setPlaylistNameDialog(null);
-      } catch (error: any) {
-        console.error('Failed to create playlist', error);
-        toast.error(error.message || 'Failed to create playlist');
-      }
-
-      return;
-    }
-
-    const playlistId = playlistNameDialog.playlistId;
-    const playlist = playlists.find((p) => p.id === playlistId);
-    if (!playlist || playlist.locked) {
-      setPlaylistNameDialog(null);
-      return;
-    }
-
-    if (name === playlist.name) {
-      setPlaylistNameDialog(null);
-      return;
-    }
-
-    const exists = playlists.some(
-      (p) => p.id !== playlistId && p.name.toLowerCase() === name.toLowerCase(),
-    );
-    if (exists) {
-      toast.error('Playlist name already exists');
-      return;
-    }
-
-    const previousPlaylists = playlists;
-    setPlaylists((prev) => prev.map((p) => (p.id === playlistId ? { ...p, name } : p)));
-
-    try {
-      await playlistsAPI.update(playlistId, { name });
-
-      toast.success('Playlist renamed');
-      setPlaylistNameDialog(null);
-    } catch (error: any) {
-      console.error('Failed to rename playlist', error);
-      setPlaylists(previousPlaylists);
-      toast.error(error.message || 'Failed to rename playlist');
-    }
-  };
-
-  const handleDeletePlaylist = async (playlistId: string) => {
-    const playlist = playlists.find(p => p.id === playlistId);
-    if (!playlist || playlist.locked) return;
-
-    if (!confirm(`Delete playlist "${playlist.name}"?`)) return;
-
-    const previousPlaylists = playlists;
-
-    // Optimistically remove playlist from UI
-    setPlaylists(prev => prev.filter(p => p.id !== playlistId));
-
-    try {
-      await playlistsAPI.delete(playlistId);
-      toast.success('Playlist deleted');
-    } catch (error: any) {
-      console.error('Failed to delete playlist', error);
-      // Roll back optimistic removal
-      setPlaylists(previousPlaylists);
-      toast.error(error.message || 'Failed to delete playlist');
-    }
-  };
-
-  const setPlaylistLocked = async (playlistId: string, locked: boolean) => {
-    const playlist = playlists.find(p => p.id === playlistId);
-    if (!playlist) return false;
-
-    const previousPlaylists = playlists;
-
-    // Optimistically update UI (same as right-click Lock)
-    setPlaylists(prev => prev.map(p =>
-      p.id === playlistId ? { ...p, locked } : p
-    ));
-
-    try {
-      const updated: any = await playlistsAPI.update(playlistId, { locked });
-
-      // Ensure local state matches backend response
-      setPlaylists(prev => prev.map(p =>
-        p.id === playlistId ? { ...p, locked: Boolean(updated?.locked) } : p
-      ));
-      return true;
-    } catch (error: any) {
-      console.error('Failed to update lock state', error);
-      // Roll back optimistic change
-      setPlaylists(previousPlaylists);
-      toast.error(error.message || 'Failed to update playlist lock state');
-      return false;
-    }
-  };
-
-  const handleToggleLockPlaylist = async (playlistId: string) => {
-    const playlist = playlists.find(p => p.id === playlistId);
-    if (!playlist) return;
-    await setPlaylistLocked(playlistId, !playlist.locked);
-  };
-
-  const handleAddSongsToPlaylist = (playlistId: string, newTracks: Track[]) => {
-    setPlaylists(playlists.map(playlist => {
-      if (playlist.id === playlistId) {
-        const combinedTracks = [...playlist.tracks, ...newTracks];
-        return {
-          ...playlist,
-          tracks: combinedTracks,
-          duration: combinedTracks.reduce((sum, t) => sum + t.duration, 0)
-        };
-      }
-      return playlist;
-    }));
-  };
+    currentTrackRef.current = currentTrack;
+    currentTrackIdRef.current = currentTrackId;
+    currentQueueItemIdRef.current = currentQueueItemId;
+    nowPlayingStartRef.current = nowPlayingStart;
+  }, [currentTrack, currentTrackId, currentQueueItemId, nowPlayingStart]);
 
   const handleRemoveTrackFromPlaylist = async (playlistId: string, trackId: string) => {
     const playlist = playlists.find(p => p.id === playlistId);
@@ -1974,6 +1492,34 @@ export default function App() {
     }
   };
 
+  const handleAddToQueue = async (track: Track) => {
+    if (!track?.id) return;
+    const wasEmpty = queue.length === 0;
+    try {
+      const item = await queueAPI.add(track.id);
+      const normalized: QueueItem = item?.track
+        ? {
+            ...item,
+            track: {
+              ...item.track,
+              filePath: resolveUploadsUrl(item.track.filePath || (item.track as any).file_path),
+            },
+          }
+        : (item as any);
+
+      // Avoid double-adding when WebSocket is live; rely on backend broadcast.
+      if (!hasLiveQueueRef.current) {
+        setQueue((prev) => [...prev, normalized]);
+        if (wasEmpty && !currentQueueItemId) {
+          setCurrentQueueItemId(normalized.id);
+        }
+      }
+    } catch (error: any) {
+      console.error('Failed to add track to queue', error);
+      toast.error(error?.message || 'Failed to add track to queue');
+    }
+  };
+
   const handleImportFilesToPlaylist = async (
     playlistId: string,
     files: File[],
@@ -1981,9 +1527,17 @@ export default function App() {
     suppressDuplicateDialog = false,
   ) => {
     // ...
-    const playlist = playlists.find(p => p.id === playlistId);
-    if (!playlist) return;
-    if (playlist.locked) {
+    let playlist = playlists.find(p => p.id === playlistId);
+    const playlistWasMissing = !playlist;
+    if (!playlist) {
+      try {
+        playlist = await playlistsAPI.getById(playlistId);
+      } catch {
+        // proceed with safe defaults; backend will still accept addTracks
+        playlist = undefined;
+      }
+    }
+    if (playlist?.locked) {
       toast.error('Playlist is locked');
       return;
     }
@@ -1995,11 +1549,19 @@ export default function App() {
     // Track existing names in this playlist so we can apply OS-style,
     // gap-filling naming (Name, Name (1), Name (2), reusing gaps) when
     // importing files directly into the playlist.
-    let existingNames: string[] = (playlist.tracks || [])
+    let existingNames: string[] = (playlist?.tracks || [])
       .map(t => String(t.name || ''))
       .filter(Boolean);
 
     for (const file of files) {
+      const index = importedTracks.length + duplicates + failed;
+      if (files.length >= 25) {
+        setPlaylistImportProgress({
+          percent: Math.min(100, (index / files.length) * 100),
+          label: `Adding to playlist… ${index}/${files.length}`,
+        });
+        await yieldToBrowser();
+      }
       const validation = isValidUploadFile(file);
       if (!validation.ok) {
         failed += 1;
@@ -2007,7 +1569,7 @@ export default function App() {
         continue;
       }
 
-      const detectedDuration = await getAudioDuration(file);
+      const detectedDuration = files.length > 120 ? 0 : await getAudioDuration(file);
       const formData = new FormData();
       formData.append('file', file);
 
@@ -2094,42 +1656,51 @@ export default function App() {
       }
     }
 
-    if (importedTracks.length === 0) {
-      toast.error('No new tracks imported for playlist');
-      return;
-    }
-
     try {
-      const trackIds = importedTracks.map(t => t.id);
+      const trackIds = importedTracks.map((t) => t.id);
       await playlistsAPI.addTracks(playlistId, trackIds);
 
-      // Update playlists state: merge importedTracks into the selected playlist's tracks,
-      // either appended or inserted at a specific index when provided.
+      // If the playlist was not in local state yet (created moments ago),
+      // refresh it from the backend so the UI updates reliably.
+      if (playlistWasMissing) {
+        try {
+          const fresh = await playlistsAPI.getById(playlistId);
+          setPlaylists((prev) => {
+            const idx = prev.findIndex((p) => p.id === playlistId);
+            if (idx === -1) return [...prev, fresh as any];
+            const next = [...prev];
+            next[idx] = { ...prev[idx], ...(fresh as any) };
+            return next;
+          });
+        } catch {
+          // ignore
+        }
+      }
+
       let newTracksForReorder: Track[] = [];
-      setPlaylists(prev => prev.map(p => {
-        if (p.id !== playlistId) return p;
+      setPlaylists((prev) =>
+        prev.map((p) => {
+          if (p.id !== playlistId) return p;
 
-        const current = p.tracks || [];
-        const baseLen = current.length;
-        const targetIndex =
-          insertIndex != null ? Math.min(Math.max(insertIndex, 0), baseLen) : baseLen;
-        const before = current.slice(0, targetIndex);
-        const after = current.slice(targetIndex);
-        const combined = [...before, ...importedTracks, ...after];
+          const current = p.tracks || [];
+          const baseLen = current.length;
+          const targetIndex = insertIndex != null ? Math.min(Math.max(insertIndex, 0), baseLen) : baseLen;
+          const before = current.slice(0, targetIndex);
+          const after = current.slice(targetIndex);
+          const combined = [...before, ...importedTracks, ...after];
 
-        newTracksForReorder = combined;
+          newTracksForReorder = combined;
 
-        return {
-          ...p,
-          tracks: combined,
-          duration: combined.reduce((sum, t) => sum + t.duration, 0),
-        };
-      }));
+          return {
+            ...p,
+            tracks: combined,
+            duration: combined.reduce((sum, t) => sum + t.duration, 0),
+          };
+        }),
+      );
 
-      // If we inserted at a specific position, persist the new order so the
-      // backend playlist positions match the UI.
       if (insertIndex != null && newTracksForReorder.length > 0) {
-        const trackIdsForReorder = newTracksForReorder.map(t => t.id);
+        const trackIdsForReorder = newTracksForReorder.map((t) => t.id);
         try {
           await playlistsAPI.reorder(playlistId, trackIdsForReorder);
         } catch (err) {
@@ -2137,11 +1708,8 @@ export default function App() {
         }
       }
 
-      // Reflect the newly imported audio in the queue/playback bar.
-      // For OS drag-and-drop into playlists we only update the playlist; we
-      // do not automatically enqueue.
       if (!suppressDuplicateDialog && importedTracks.length > 0) {
-        handleAddToQueue(importedTracks[0]);
+        void handleAddToQueue(importedTracks[0]);
       }
 
       toast.success('Playlist updated', {
@@ -2150,6 +1718,25 @@ export default function App() {
     } catch (error: any) {
       console.error('Failed to attach tracks to playlist', error);
       toast.error(error.message || 'Failed to update playlist');
+    } finally {
+      setPlaylistImportProgress(null);
+    }
+  };
+
+  const handleDropFolderOnPlaylistEmptyArea = async (playlistName: string, files: File[]) => {
+    const name = String(playlistName || '').trim() || 'Imported Folder';
+    const safeFiles = Array.isArray(files) ? files : [];
+    if (safeFiles.length === 0) return;
+
+    try {
+      setPlaylistImportProgress({ percent: 0, label: 'Creating playlist…' });
+      const created = await playlistsAPI.create(name);
+      setPlaylists((prev) => [...prev, created as any]);
+      await handleImportFilesToPlaylist(created.id, safeFiles, undefined, true);
+    } catch (err: any) {
+      console.error('Failed to import folder into new playlist', err);
+      toast.error(err?.message || 'Failed to import folder into playlist');
+      setPlaylistImportProgress(null);
     }
   };
 
@@ -2552,29 +2139,6 @@ export default function App() {
 
           <div className="flex items-center gap-2 px-2 py-1 rounded-md border border-border/70 bg-muted/10">
             <Button
-              variant="ghost"
-              size="sm"
-              className="gap-2 text-xs bg-muted/10 hover:bg-muted/20 text-foreground/80 hover:text-foreground border border-transparent hover:border-border/60"
-              onClick={() => setHistoryOpen(true)}
-              title="History"
-            >
-              <Clock className="w-4 h-4" />
-              <span>History</span>
-            </Button>
-
-            <Button
-              variant="ghost"
-              size="sm"
-              className="gap-2 text-xs bg-muted/10 hover:bg-muted/20 text-foreground/80 hover:text-foreground border border-transparent hover:border-border/60"
-              onClick={() => setShowBackupDialog(true)}
-              title="Backup & Restore"
-            >
-              <Shield className="w-4 h-4" />
-              <span>Backup & Restore</span>
-            </Button>
-
-
-            <Button
               variant={queueDialogOpen ? 'default' : 'ghost'}
               size="sm"
               className={
@@ -2588,8 +2152,48 @@ export default function App() {
               <ListOrdered className="w-4 h-4" />
               <span>Queue</span>
             </Button>
+            {/* Settings Dropdown */}
+            <DropdownMenu>
+              <DropdownMenuTrigger asChild>
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  className="gap-2 text-xs bg-muted/10 hover:bg-muted/20 text-foreground/80 hover:text-foreground border border-transparent hover:border-border/60"
+                  title="Settings"
+                >
+                  <Settings className="w-4 h-4" />
+                  <span className="hidden sm:inline">Settings</span>
+                </Button>
+              </DropdownMenuTrigger>
+              <DropdownMenuContent align="end" className="w-56">
+                <DropdownMenuLabel>System</DropdownMenuLabel>
+                <DropdownMenuItem onClick={() => setHistoryOpen(true)}>
+                  <Clock className="w-4 h-4 mr-2" />
+                  History
+                </DropdownMenuItem>
+                <DropdownMenuItem onClick={() => setShowBackupDialog(true)}>
+                  <Shield className="w-4 h-4 mr-2" />
+                  Backup & Restore
+                </DropdownMenuItem>
+                <DropdownMenuSeparator />
+                <DropdownMenuLabel>Appearance</DropdownMenuLabel>
+                <DropdownMenuItem onClick={toggleTheme}>
+                  {theme === 'default' ? (
+                    <>
+                      <Sun className="w-4 h-4 mr-2" />
+                      Switch to Light Mode
+                    </>
+                  ) : (
+                    <>
+                      <Moon className="w-4 h-4 mr-2" />
+                      Switch to Dark Mode
+                    </>
+                  )}
+                </DropdownMenuItem>
+              </DropdownMenuContent>
+            </DropdownMenu>
 
-            <ThemeToggle theme={theme} onToggle={toggleTheme} />
+
           </div>
         </div>
       </div>
@@ -2620,6 +2224,8 @@ export default function App() {
 
               onRemoveTracks={handleRemoveTracks}
               onImportTracks={handleImportTracks}
+              onImportFolder={handleImportFolder}
+              importProgress={libraryImportProgress}
             />
           </ErrorBoundary>
         </div>
@@ -2662,6 +2268,8 @@ export default function App() {
               onDropTrackOnPlaylistHeader={handleDropTrackOnPlaylistHeader}
               onDropFilesOnPlaylistHeader={handleOsDropFilesOnPlaylistHeader}
               onDropTrackOnPlaylistPanel={handleDropTrackOnPlaylistPanel}
+              onDropFolderOnEmptyArea={handleDropFolderOnPlaylistEmptyArea}
+              importProgress={playlistImportProgress}
             />
           </ErrorBoundary>
         </div>

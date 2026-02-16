@@ -1,5 +1,5 @@
 // electron/main.cjs
-const { app, BrowserWindow, shell, dialog, clipboard, powerSaveBlocker } = require('electron');
+const { app, BrowserWindow, shell, dialog, clipboard, powerSaveBlocker, ipcMain } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const { pathToFileURL } = require('url');
@@ -20,6 +20,23 @@ let expiryHandled = false;
 let powerBlockerId = null;
 let mainWindow = null;
 let isQuitting = false;
+
+ipcMain.handle('redio-backup-select-directory', async () => {
+  try {
+    const result = await dialog.showOpenDialog({
+      title: 'Select Backup Folder',
+      properties: ['openDirectory', 'createDirectory'],
+    });
+
+    if (result.canceled || !Array.isArray(result.filePaths) || result.filePaths.length === 0) {
+      return { ok: true, canceled: true, path: null };
+    }
+
+    return { ok: true, canceled: false, path: result.filePaths[0] };
+  } catch (e) {
+    return { ok: false, canceled: true, path: null, error: String(e && e.message ? e.message : e) };
+  }
+});
 
 // Keep renderer timers/audio responsive even when the window is minimized.
 // This is important for uninterrupted playback during scheduled preemptions.

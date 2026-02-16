@@ -41,6 +41,20 @@ const normalizeParentId = (value) => {
 
 const isRootParentId = (parentId) => parentId === '';
 
+const getDescendantIds = async (folderId) => {
+  const rows = await query(
+    `WITH RECURSIVE descendants(id) AS (
+      SELECT id FROM folders WHERE parent_id = ?
+      UNION ALL
+      SELECT f.id FROM folders f
+      JOIN descendants d ON f.parent_id = d.id
+    )
+    SELECT id FROM descendants`,
+    [folderId]
+  );
+  return (rows || []).map((r) => String(r.id));
+};
+
 // Get all folders
 router.get('/', async (req, res) => {
   try {
@@ -64,11 +78,6 @@ router.post('/', async (req, res) => {
       const parent = await get('SELECT * FROM folders WHERE id = ?', [parentId]);
       if (!parent) {
         return res.status(404).json({ error: 'Parent folder not found' });
-      }
-      // Allow only one nesting level: parent must be a main folder (root parent)
-      const parentParentId = normalizeParentId(parent.parent_id);
-      if (!isRootParentId(parentParentId)) {
-        return res.status(400).json({ error: 'Nested folders beyond one level are not allowed' });
       }
     }
 
@@ -131,8 +140,7 @@ router.delete('/:id', async (req, res) => {
     }
 
     const targetId = String(req.params.id);
-    const childFolders = await query('SELECT id FROM folders WHERE parent_id = ?', [targetId]);
-    const childIds = (childFolders || []).map((r) => String(r.id));
+    const childIds = await getDescendantIds(targetId);
     const idsToDelete = [targetId, ...childIds];
 
     await run('BEGIN IMMEDIATE TRANSACTION');
@@ -141,10 +149,9 @@ router.delete('/:id', async (req, res) => {
         await run('DELETE FROM folder_tracks WHERE folder_id = ?', [id]);
       }
 
-      for (const id of childIds) {
+      for (const id of idsToDelete) {
         await run('DELETE FROM folders WHERE id = ?', [id]);
       }
-      await run('DELETE FROM folders WHERE id = ?', [targetId]);
       await run('COMMIT');
     } catch (e) {
       await run('ROLLBACK');
@@ -284,10 +291,8 @@ router.put('/:id/parent', async (req, res) => {
       return res.status(404).json({ error: 'Folder not found' });
     }
 
-    // Prevent turning a main folder with children into a subfolder (would create sub-subfolders)
-    const children = await query('SELECT id FROM folders WHERE parent_id = ?', [folderId]);
-    if (Array.isArray(children) && children.length > 0 && parentId !== '') {
-      return res.status(400).json({ error: 'Folders with subfolders cannot be moved under another folder' });
+    if (parentId === folderId) {
+      return res.status(400).json({ error: 'Folder cannot be moved into itself' });
     }
 
     if (parentId !== '') {
@@ -296,9 +301,10 @@ router.put('/:id/parent', async (req, res) => {
         return res.status(404).json({ error: 'Parent folder not found' });
       }
 
-      const newParentParentId = normalizeParentId(newParent.parent_id);
-      if (newParentParentId !== '') {
-        return res.status(400).json({ error: 'Nested folders beyond one level are not allowed' });
+      // Prevent cycles (moving a folder into its own descendant)
+      const descendants = await getDescendantIds(folderId);
+      if (descendants.includes(parentId)) {
+        return res.status(400).json({ error: 'Folder cannot be moved into its own subfolder' });
       }
     }
 

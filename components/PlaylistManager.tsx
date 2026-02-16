@@ -9,6 +9,7 @@ import { useResizable } from '../hooks/useResizable';
 interface PlaylistManagerProps {
   playlists: Playlist[];
   recentPlaylistAdd?: { playlistId: string; trackId: string; createdAt: number } | null;
+  importProgress?: { percent: number; label: string } | null;
   onCreatePlaylist: () => void;
   onRenamePlaylist: (playlistId: string) => void;
   onDeletePlaylist: (playlistId: string) => void;
@@ -28,11 +29,13 @@ interface PlaylistManagerProps {
   onDropTrackOnPlaylistHeader: (playlistId: string, trackIds: string[]) => void;
   onDropFilesOnPlaylistHeader: (playlistId: string, files: File[], suppressDuplicateDialog?: boolean) => void;
   onDropTrackOnPlaylistPanel: (playlistId: string, trackIds: string[], insertIndex: number) => void;
+  onDropFolderOnEmptyArea?: (playlistName: string, files: File[]) => void;
 }
 
 export function PlaylistManager({
   playlists,
   recentPlaylistAdd,
+  importProgress,
   onCreatePlaylist,
   onRenamePlaylist,
   onDeletePlaylist,
@@ -52,6 +55,7 @@ export function PlaylistManager({
   onDropTrackOnPlaylistHeader,
   onDropFilesOnPlaylistHeader,
   onDropTrackOnPlaylistPanel,
+  onDropFolderOnEmptyArea,
 }: PlaylistManagerProps) {
   const [selectedPlaylist, setSelectedPlaylist] = useState<Playlist | null>(null);
   const [isEditorOpen, setIsEditorOpen] = useState(false);
@@ -212,31 +216,28 @@ export function PlaylistManager({
   ]);
 
   const playlistEditorEl = useMemo(() => {
-    if (!selectedPlaylist) return null;
+    if (!isEditorOpen || !selectedPlaylist) return null;
     return (
       <PlaylistEditor
         playlist={selectedPlaylist}
-        highlightTrackId={
-          recentPlaylistAdd && recentPlaylistAdd.playlistId === selectedPlaylist.id
-            ? recentPlaylistAdd.trackId
-            : null
-        }
-        onClose={handleCloseEditor}
+        onClose={() => setIsEditorOpen(false)}
         onPlayPlaylistNow={onPlayPlaylistNowCb}
         onQueuePlaylist={onQueuePlaylistCb}
         onAddSongs={onAddSongsCb}
         onRemoveTrack={onRemoveTrackCb}
         onReorderTracks={onReorderTracksCb}
         onImportFiles={onImportFilesCb}
+        importProgress={importProgress}
         onQueueTrack={onQueueTrackFromPlaylist}
         scheduledStartTime={selectedPlaylistStartTime}
         onDropTrackOnPlaylistPanel={onDropTrackOnPlaylistPanelCb}
       />
     );
   }, [
+    importProgress,
+    isEditorOpen,
     selectedPlaylist,
-    recentPlaylistAdd,
-    handleCloseEditor,
+    selectedPlaylistStartTime,
     onPlayPlaylistNowCb,
     onQueuePlaylistCb,
     onAddSongsCb,
@@ -244,27 +245,134 @@ export function PlaylistManager({
     onReorderTracksCb,
     onImportFilesCb,
     onQueueTrackFromPlaylist,
-    selectedPlaylistStartTime,
     onDropTrackOnPlaylistPanelCb,
   ]);
 
-  // When the editor is closed (or there is no selected playlist), show only
-  // the navigator taking the full width so there is no empty panel.
-  if (!isEditorOpen || !selectedPlaylist) {
+  const handleEmptyAreaDrop = useCallback(
+    async (e: React.DragEvent<HTMLDivElement>) => {
+      if (!onDropFolderOnEmptyArea) return;
+
+      const types = Array.from(e.dataTransfer.types);
+      const hasFiles = types.includes('Files');
+      const hasTrackId = types.includes('application/x-track-id');
+      const hasTracks = types.includes('application/x-redio-tracks');
+      if (!hasFiles || hasTrackId || hasTracks) return;
+
+      e.preventDefault();
+      e.stopPropagation();
+
+      const items = Array.from(e.dataTransfer.items || []);
+
+      const isDirectoryEntry = (it: DataTransferItem) => {
+        try {
+          const entry = (it as any).webkitGetAsEntry?.();
+          return Boolean(entry && entry.isDirectory);
+        } catch {
+          return false;
+        }
+      };
+
+      const readEntry = async (entry: any): Promise<File[]> => {
+        const out: File[] = [];
+        if (!entry) return out;
+
+        if (entry.isFile) {
+          await new Promise<void>((resolve) => {
+            entry.file(
+              (file: File) => {
+                out.push(file);
+                resolve();
+              },
+              () => resolve(),
+            );
+          });
+          return out;
+        }
+
+        if (entry.isDirectory) {
+          const reader = entry.createReader();
+          const all: any[] = [];
+          for (;;) {
+            const batch: any[] = await new Promise((resolve) => {
+              reader.readEntries((entries: any[]) => resolve(entries || []));
+            });
+            if (!batch || batch.length === 0) break;
+            all.push(...batch);
+          }
+
+          for (const child of all) {
+            const childFiles = await readEntry(child);
+            out.push(...childFiles);
+          }
+        }
+
+        return out;
+      };
+
+      const allowed = new Set(['.mp3', '.wav', '.ogg', '.m4a', '.flac']);
+      const isAllowed = (f: File) => {
+        const name = String(f?.name || '').toLowerCase();
+        const dot = name.lastIndexOf('.');
+        const ext = dot >= 0 ? name.slice(dot) : '';
+        return Boolean(ext && allowed.has(ext));
+      };
+
+      const hasDirectory = items.some(isDirectoryEntry);
+
+      let folderName = '';
+      if (hasDirectory) {
+        const firstDir = items.map((it) => (it as any).webkitGetAsEntry?.()).find((e) => e?.isDirectory);
+        folderName = String(firstDir?.name || '');
+      }
+
+      let files: File[] = [];
+      if (hasDirectory) {
+        for (const it of items) {
+          const entry = (it as any).webkitGetAsEntry?.();
+          if (!entry) continue;
+          const collected = await readEntry(entry);
+          files.push(...collected);
+        }
+      } else {
+        files = Array.from(e.dataTransfer.files || []);
+        if (!folderName) {
+          const rel = String((files[0] as any)?.webkitRelativePath || '');
+          folderName = rel ? rel.split('/').filter(Boolean)[0] || '' : '';
+        }
+      }
+
+      const audioFiles = files.filter(isAllowed);
+      if (audioFiles.length === 0) return;
+
+      onDropFolderOnEmptyArea(folderName || 'Imported Folder', audioFiles);
+    },
+    [onDropFolderOnEmptyArea],
+  );
+
+  if (!isEditorOpen) {
     return (
-      <div className="h-full flex bg-background">
-        <div className="flex-1 border-r border-border">
-          {playlistNavigatorEl}
-        </div>
+      <div
+        className="h-full flex bg-background"
+        onDragOver={(e) => {
+          const types = Array.from(e.dataTransfer.types);
+          if (types.includes('Files')) e.preventDefault();
+        }}
+        onDrop={handleEmptyAreaDrop}
+      >
+        <div className="flex-1 border-r border-border">{playlistNavigatorEl}</div>
       </div>
     );
   }
 
-  // When the editor is open, show a split view with navigator on the left
-  // and the playlist editor sliding in from the right.
   return (
-    <div className="h-full flex bg-background">
-      {/* Left Subpanel - Playlist Navigator */}
+    <div
+      className="h-full flex bg-background"
+      onDragOver={(e) => {
+        const types = Array.from(e.dataTransfer.types);
+        if (types.includes('Files')) e.preventDefault();
+      }}
+      onDrop={handleEmptyAreaDrop}
+    >
       <div
         className="transition-all duration-200 border-r border-border relative flex-shrink-0"
         style={{ width: navPanel.width }}
@@ -274,7 +382,6 @@ export function PlaylistManager({
 
       <ResizeHandle onMouseDown={navPanel.handleMouseDown} isResizing={navPanel.isResizing} />
 
-      {/* Right Subpanel - Playlist Editor */}
       <AnimatePresence mode="wait">
         {isEditorOpen && selectedPlaylist && (
           <motion.div

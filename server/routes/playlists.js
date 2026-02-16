@@ -111,7 +111,7 @@ router.put('/:id', async (req, res) => {
   try {
     const { name, locked } = req.body;
     const playlist = await get('SELECT * FROM playlists WHERE id = ?', [req.params.id]);
-    
+
     if (!playlist) {
       return res.status(404).json({ error: 'Playlist not found' });
     }

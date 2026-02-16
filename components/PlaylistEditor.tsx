@@ -7,10 +7,12 @@ import { Playlist, Track } from '../types';
 import { TrackRow } from './TrackRow';
 import { formatDuration } from '../lib/utils';
 import { ConfirmDialog } from './ConfirmDialog';
+import { Progress } from './ui/progress';
 
 interface PlaylistEditorProps {
   playlist: Playlist;
   highlightTrackId?: string | null;
+  importProgress?: { percent: number; label: string } | null;
   onClose: () => void;
   onPlayPlaylistNow: () => void;
   onQueuePlaylist: () => void;
@@ -26,6 +28,7 @@ interface PlaylistEditorProps {
 export function PlaylistEditor({
   playlist,
   highlightTrackId,
+  importProgress,
   onClose,
   onPlayPlaylistNow,
   onQueuePlaylist,
@@ -192,7 +195,7 @@ export function PlaylistEditor({
         <div className="flex items-center gap-2">
           <div className="relative flex-1">
             <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-500 dark:text-muted-foreground" />
-            <Input 
+            <Input
               placeholder="Search in playlist..."
               value={searchQuery}
               onChange={(e) => setSearchQuery(e.target.value)}
@@ -224,6 +227,16 @@ export function PlaylistEditor({
             }}
           />
         </div>
+
+        {importProgress && (
+          <div className="space-y-1">
+            <div className="flex items-center justify-between text-[11px] text-muted-foreground">
+              <span className="truncate pr-3">{importProgress.label}</span>
+              <span>{Math.round(importProgress.percent)}%</span>
+            </div>
+            <Progress value={importProgress.percent} />
+          </div>
+        )}
 
         <div className="flex items-center gap-4 text-[11px] text-muted-foreground">
           <span>{playlist.tracks.length} tracks</span>
@@ -302,15 +315,15 @@ export function PlaylistEditor({
                       ? undefined
                       : flashTrackId === track.id
                         ? {
-                            opacity: 1,
-                            y: 0,
-                            scale: [1, 1.01, 1],
-                            backgroundColor: [
-                              'rgba(56,189,248,0.08)',
-                              'rgba(56,189,248,0.18)',
-                              'rgba(56,189,248,0.08)',
-                            ],
-                          }
+                          opacity: 1,
+                          y: 0,
+                          scale: [1, 1.01, 1],
+                          backgroundColor: [
+                            'rgba(56,189,248,0.08)',
+                            'rgba(56,189,248,0.18)',
+                            'rgba(56,189,248,0.08)',
+                          ],
+                        }
                         : { opacity: 1, y: 0, backgroundColor: 'rgba(0,0,0,0)' }
                   }
                   exit={reduceMotion ? undefined : { opacity: 0, y: -6 }}
@@ -322,11 +335,10 @@ export function PlaylistEditor({
                         ? { duration: 0.9, ease: 'easeOut' }
                         : { duration: 0.18, ease: 'easeOut' }
                   }
-                  className={`flex items-center gap-2 cursor-default select-none relative hover:bg-accent/10 ${
-                    dropIndex === index || dropIndex === index + 1
+                  className={`flex items-center gap-2 cursor-default select-none relative hover:bg-accent/10 ${dropIndex === index || dropIndex === index + 1
                       ? 'bg-accent/15 ring-1 ring-accent/60'
                       : ''
-                  }`}
+                    }`}
                   draggable={canReorder}
                   onDragStart={() => handleDragStart(index)}
                   onDragOver={(e) => handleDragOverRow(e, index)}
@@ -368,7 +380,7 @@ export function PlaylistEditor({
                     <TrackRow
                       track={track}
                       onAddToQueue={onQueueTrack}
-                      onAddToPlaylist={() => {}}
+                      onAddToPlaylist={() => { }}
                       playlists={[]}
                       onRemove={onRemoveTrack}
                       showRemove={!playlist.locked}

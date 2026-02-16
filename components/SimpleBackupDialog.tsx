@@ -1,4 +1,4 @@
-import React, { useMemo, useState, useRef } from 'react';
+import React, { useEffect, useMemo, useState, useRef } from 'react';
 import { Button } from './ui/button';
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from './ui/dialog';
 import { ScrollArea } from './ui/scroll-area';
@@ -18,6 +18,10 @@ export function SimpleBackupDialog({ open, onOpenChange }: SimpleBackupDialogPro
   const [validationResult, setValidationResult] = useState<any>(null);
   const [showValidationDialog, setShowValidationDialog] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const [dailyEnabled, setDailyEnabled] = useState(false);
+  const [backupDirectoryPath, setBackupDirectoryPath] = useState<string>('');
+  const [backupTimeOfDay, setBackupTimeOfDay] = useState<string>('02:00 AM');
+  const [savingDailyConfig, setSavingDailyConfig] = useState(false);
 
   const categories = useMemo(
     () =>
@@ -42,6 +46,86 @@ export function SimpleBackupDialog({ open, onOpenChange }: SimpleBackupDialogPro
   });
 
   const [restoreMode, setRestoreMode] = useState<'override' | 'merge'>('override');
+
+  useEffect(() => {
+    if (!open) return;
+    let cancelled = false;
+
+    const loadDaily = async () => {
+      try {
+        const res = await backupAPI.getDailyAuto();
+        if (cancelled) return;
+        setDailyEnabled(Boolean(res?.config?.enabled));
+        setBackupDirectoryPath(String(res?.config?.directoryPath || ''));
+        setBackupTimeOfDay(String(res?.config?.timeOfDay || '02:00 AM'));
+      } catch (e: any) {
+        if (!cancelled) {
+          console.error('Failed to load daily auto-backup config', e);
+        }
+      }
+    };
+
+    void loadDaily();
+    return () => {
+      cancelled = true;
+    };
+  }, [open]);
+
+  const saveDailyAutoConfig = async (next?: Partial<{ enabled: boolean; directoryPath: string; timeOfDay: string }>) => {
+    const enabled = next?.enabled ?? dailyEnabled;
+    const directoryPath = next?.directoryPath ?? backupDirectoryPath;
+    const timeOfDay = next?.timeOfDay ?? backupTimeOfDay;
+
+    setSavingDailyConfig(true);
+    try {
+      const res = await backupAPI.setDailyAuto({
+        enabled,
+        directoryPath,
+        timeOfDay,
+      });
+      setDailyEnabled(Boolean(res?.config?.enabled));
+      setBackupDirectoryPath(String(res?.config?.directoryPath || directoryPath));
+      setBackupTimeOfDay(String(res?.config?.timeOfDay || timeOfDay));
+      toast.success('Backup schedule saved');
+    } catch (e: any) {
+      console.error('Failed to save daily auto-backup config', e);
+      toast.error(e?.message || 'Failed to save backup schedule');
+    } finally {
+      setSavingDailyConfig(false);
+    }
+  };
+
+  const chooseBackupDirectory = async () => {
+    // Prefer native Electron picker when available.
+    const w = window as any;
+    try {
+      if (w?.redioBackup?.selectDirectory) {
+        const res = await w.redioBackup.selectDirectory();
+        if (res?.ok && !res?.canceled && res?.path) {
+          const chosen = String(res.path);
+          setBackupDirectoryPath(chosen);
+          await saveDailyAutoConfig({ directoryPath: chosen });
+        }
+        return;
+      }
+    } catch {
+      // fall through
+    }
+
+    // Web fallback (Chromium): File System Access API.
+    try {
+      const dirHandle = await (window as any).showDirectoryPicker({ mode: 'readwrite' });
+      const chosen = String((dirHandle as any)?.name || '');
+      if (!chosen) {
+        toast.error('Folder selected but no path available in this environment');
+        return;
+      }
+      toast.error('Folder path is not available in browser mode. Use the packaged app for full folder-path scheduling.');
+    } catch (error: any) {
+      if (error?.name === 'AbortError') return;
+      toast.error('Failed to choose backup directory');
+    }
+  };
 
   const handleCreateBackup = async () => {
     setLoading(true);
@@ -152,42 +236,112 @@ export function SimpleBackupDialog({ open, onOpenChange }: SimpleBackupDialogPro
   return (
     <>
       <Dialog open={open} onOpenChange={onOpenChange}>
-        <DialogContent className="max-w-md bg-gradient-to-br from-slate-900 via-slate-800 to-slate-900 text-white border-slate-700 shadow-2xl">
-          <DialogHeader className="pb-6">
-            <DialogTitle className="flex items-center gap-3 text-xl">
-              <div className="p-3 bg-blue-600 rounded-lg">
-                <Database className="w-6 h-6" />
-              </div>
-              Database Backup & Restore
+        <DialogContent className="sm:max-w-lg w-[95vw] gap-0 p-0 overflow-hidden bg-background border-border shadow-xl rounded-lg">
+          <DialogHeader className="px-5 py-3.5 border-b border-border bg-muted/40">
+            <DialogTitle className="flex items-center gap-2 text-base font-semibold tracking-tight text-foreground">
+              <Database className="w-4 h-4 text-primary" />
+              Backup & Restore
             </DialogTitle>
           </DialogHeader>
           
-          <div className="space-y-6">
+          <div className="p-5 space-y-4">
+            {/* Automatic Daily Backup */}
+            <div className="p-4 rounded-lg border border-border bg-muted/20 space-y-3">
+              <div className="flex items-center justify-between gap-1">
+                <div>
+                  <h3 className="font-medium text-foreground mb-0.5 flex items-center gap-2 text-sm">
+                    <Database className="w-4 h-4 text-primary" />
+                    Daily Automatic Backup
+                  </h3>
+                  <p className="text-xs text-muted-foreground">
+                    Runs every day at the configured time and saves a full backup to your selected folder.
+                  </p>
+                </div>
+
+                <label className="inline-flex items-center gap-2 text-xs text-muted-foreground">
+                  <input
+                    type="checkbox"
+                    checked={dailyEnabled}
+                    disabled={savingDailyConfig}
+                    onChange={(e) => {
+                      const next = e.target.checked;
+                      setDailyEnabled(next);
+                      void saveDailyAutoConfig({ enabled: next });
+                    }}
+                  />
+                  Enabled
+                </label>
+              </div>
+
+              <div className="space-y-3">
+                <div>
+                  <div className="text-[11px] text-muted-foreground mb-1">Backup folder</div>
+                  <div className="flex items-center gap-2">
+                    <div className="flex-1 min-w-0 px-3 py-2 rounded-md border border-border bg-background text-[11px] text-foreground/90 truncate">
+                      {backupDirectoryPath || 'Loading...'}
+                    </div>
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      onClick={() => void chooseBackupDirectory()}
+                      disabled={savingDailyConfig}
+                      className="h-7 px-2 text-[11px]"
+                    >
+                      Change
+                    </Button>
+                  </div>
+                </div>
+
+                <div>
+                  <div className="text-[11px] text-muted-foreground mb-1">Scheduled time (HH:MM AM/PM)</div>
+                  <div className="flex items-center gap-2">
+                    <input
+                      type="text"
+                      value={backupTimeOfDay}
+                      onChange={(e) => setBackupTimeOfDay(e.target.value)}
+                      onBlur={() => void saveDailyAutoConfig()}
+                      placeholder="02:00 AM"
+                      className="flex-1 h-8 px-3 rounded-md border border-border bg-background text-xs text-foreground outline-none"
+                      disabled={savingDailyConfig}
+                    />
+                    <Button
+                      size="sm"
+                      onClick={() => void saveDailyAutoConfig()}
+                      disabled={savingDailyConfig}
+                      className="h-8 px-3 text-[11px]"
+                    >
+                      {savingDailyConfig ? 'Saving…' : 'Save'}
+                    </Button>
+                  </div>
+                </div>
+              </div>
+            </div>
+
             {/* Create Backup Section */}
-            <div className="p-6 bg-slate-800/50 backdrop-blur rounded-xl border border-slate-700/50">
-              <h3 className="font-semibold text-white mb-4 flex items-center gap-2">
-                <Download className="w-5 h-5 text-blue-400" />
+            <div className="p-4 rounded-lg border border-border bg-muted/20">
+              <h3 className="font-medium text-foreground mb-1 flex items-center gap-2 text-sm">
+                <Download className="w-4 h-4 text-primary" />
                 Create Backup
               </h3>
-              <p className="text-sm text-slate-400 mb-4">
+              <p className="text-xs text-muted-foreground mb-3">
                 Generate a full database backup and save it to your chosen folder.
               </p>
               <Button 
                 onClick={handleCreateBackup} 
                 disabled={loading}
-                className="w-full bg-gradient-to-r from-blue-600 to-blue-700 hover:from-blue-700 hover:to-blue-800 text-white shadow-lg hover:shadow-xl transition-all duration-300"
+                className="w-full h-9"
               >
                 {loading ? 'Creating Backup...' : 'Create Backup'}
               </Button>
             </div>
             
             {/* Upload Database Section */}
-            <div className="p-6 bg-slate-800/50 backdrop-blur rounded-xl border border-slate-700/50">
-              <h3 className="font-semibold text-white mb-4 flex items-center gap-2">
-                <Upload className="w-5 h-5 text-green-400" />
+            <div className="p-4 rounded-lg border border-border bg-muted/20">
+              <h3 className="font-medium text-foreground mb-1 flex items-center gap-2 text-sm">
+                <Upload className="w-4 h-4 text-primary" />
                 Upload Database
               </h3>
-              <p className="text-sm text-slate-400 mb-4">
+              <p className="text-xs text-muted-foreground mb-3">
                 Upload a .sqlite file to restore. Database structure will be validated.
               </p>
               <input
@@ -202,22 +356,13 @@ export function SimpleBackupDialog({ open, onOpenChange }: SimpleBackupDialogPro
                 onClick={() => fileInputRef.current?.click()}
                 disabled={loading}
                 variant="outline"
-                className="w-full border-slate-600/50 text-slate-300 hover:bg-slate-700/50 hover:text-white shadow-lg hover:shadow-xl transition-all duration-300"
+                className="w-full h-9"
               >
                 {loading ? 'Uploading...' : 'Upload Database'}
               </Button>
             </div>
             
-            {/* System Status */}
-            <div className="p-4 bg-slate-800/30 backdrop-blur rounded-xl border border-slate-700/50">
-              <div className="flex items-center justify-between text-sm">
-                <span className="text-slate-300">Playback Protection</span>
-                <span className="text-green-400 font-medium flex items-center gap-2">
-                  <div className="w-2 h-2 bg-green-400 rounded-full animate-pulse" />
-                  Active
-                </span>
-              </div>
-            </div>
+            
           </div>
         </DialogContent>
       </Dialog>

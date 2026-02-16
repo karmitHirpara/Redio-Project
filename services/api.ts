@@ -214,9 +214,9 @@ export const apiClient = {
 // Tracks API
 export const tracksAPI = {
   getAll: () => apiClient.get<Track[]>('/tracks'),
-  
+
   getById: (id: string) => apiClient.get<Track>(`/tracks/${id}`),
-  
+
   upload: async (file: File, metadata: { name?: string; artist?: string; duration?: number }) => {
     const formData = new FormData();
     formData.append('file', file);
@@ -235,58 +235,58 @@ export const tracksAPI = {
       method: 'POST',
       body: formData,
     }),
-  
+
   copy: (sourceTrackId: string) =>
     apiClient.json<Track>('/tracks/copy', { method: 'POST', json: { sourceTrackId } }),
 
   alias: (baseTrackId: string, aliasName: string) =>
     apiClient.json<Track>('/tracks/alias', { method: 'POST', json: { baseTrackId, aliasName } }),
-  
+
   delete: (id: string) => apiClient.request<{ message: string }>(`/tracks/${id}`, { method: 'DELETE' }),
 };
 
 // Playlists API
 export const playlistsAPI = {
   getAll: () => apiClient.get<Playlist[]>('/playlists'),
-  
+
   getById: (id: string) => apiClient.get<Playlist>(`/playlists/${id}`),
-  
+
   create: (name: string) => apiClient.json<Playlist>('/playlists', { method: 'POST', json: { name } }),
-  
-  update: (id: string, data: { name?: string; locked?: boolean }) => 
+
+  update: (id: string, data: { name?: string; locked?: boolean }) =>
     apiClient.json<Playlist>(`/playlists/${id}`, { method: 'PUT', json: data }),
-  
+
   delete: (id: string) => apiClient.request<{ message: string }>(`/playlists/${id}`, { method: 'DELETE' }),
-  
-  addTracks: (id: string, trackIds: string[]) => 
+
+  addTracks: (id: string, trackIds: string[]) =>
     apiClient.json<{ tracks: Track[] }>(`/playlists/${id}/tracks`, { method: 'POST', json: { trackIds } }),
-  
-  removeTrack: (id: string, trackId: string) => 
+
+  removeTrack: (id: string, trackId: string) =>
     apiClient.request<{ message: string }>(`/playlists/${id}/tracks/${trackId}`, { method: 'DELETE' }),
-  
-  reorder: (id: string, trackIds: string[]) => 
+
+  reorder: (id: string, trackIds: string[]) =>
     apiClient.json<{ message: string }>(`/playlists/${id}/reorder`, { method: 'PUT', json: { trackIds } }),
 };
 
 // Queue API
 export const queueAPI = {
   get: () => apiClient.get<QueueItem[]>('/queue'),
-  
-  add: (trackId: string, fromPlaylist?: string) => 
+
+  add: (trackId: string, fromPlaylist?: string) =>
     apiClient.json<QueueItem>('/queue', { method: 'POST', json: { trackId, fromPlaylist } }),
-  
-  reorder: (queueIds: string[]) => 
+
+  reorder: (queueIds: string[]) =>
     apiClient.json<{ message: string }>('/queue/reorder', { method: 'PUT', json: { queueIds } }),
-  
+
   remove: (id: string) => apiClient.request<{ message: string }>(`/queue/${id}`, { method: 'DELETE' }),
-  
+
   clear: () => apiClient.request<{ message: string }>('/queue', { method: 'DELETE' }),
 };
 
 // Schedules API
 export const schedulesAPI = {
   getAll: () => apiClient.get<ScheduledPlaylist[]>('/schedules'),
-  
+
   create: (schedule: {
     playlistId: string;
     type: 'datetime' | 'song-trigger';
@@ -295,10 +295,10 @@ export const schedulesAPI = {
     triggerPosition?: 'before' | 'after';
     lockPlaylist?: boolean;
   }) => apiClient.json<ScheduledPlaylist>('/schedules', { method: 'POST', json: schedule }),
-  
-  updateStatus: (id: string, status: string) => 
+
+  updateStatus: (id: string, status: string) =>
     apiClient.json<ScheduledPlaylist>(`/schedules/${id}`, { method: 'PUT', json: { status } }),
-  
+
   delete: (id: string) => apiClient.request<{ message: string }>(`/schedules/${id}`, { method: 'DELETE' }),
 };
 
@@ -472,40 +472,46 @@ export type RestoreResult = {
   fullRestore?: boolean;
 };
 
+export type DailyAutoBackupConfig = {
+  enabled: boolean;
+  directoryPath: string;
+  timeOfDay: string; // "HH:MM AM/PM"
+};
+
 export const backupAPI = {
   // Basic operations
   list: (location?: string) => apiClient.get<{ backups: BackupFile[] }>(location ? `/backups?location=${location}` : '/backups'),
-  create: (options?: CreateBackupOptions) => 
-    apiClient.request<{ ok: true; backup: { filename: string; path: string; bytes: number; checksum: string } }>('/backup', { 
+  create: (options?: CreateBackupOptions) =>
+    apiClient.request<{ ok: true; backup: { filename: string; path: string; bytes: number; checksum: string } }>('/backup', {
       method: 'POST',
-      json: options || {} 
+      json: options || {}
     }),
-  
+
   // Status and job management
   getStatus: (jobId?: string) => apiClient.get<BackupStatus>(jobId ? `/backup/status?jobId=${jobId}` : '/backup/status'),
   cancelJob: (jobId: string) => apiClient.request<{ ok: true; message: string }>(`/backup/${jobId}`, { method: 'DELETE' }),
-  
+
   // Validation and preview
   preview: (filename: string, location?: string) =>
     apiClient.json<{ ok: true; metadata: BackupMetadata; preview: BackupPreview }>('/backup/preview', {
       method: 'POST',
       json: { filename, location }
     }),
-  
+
   // Validate database structure
   validate: (filename: string) =>
     apiClient.json<{ isValid: boolean; errors?: string[]; filename: string }>('/backup/validate', {
       method: 'POST',
       json: { filename }
     }),
-  
+
   // Restore with options
   restore: (filename: string, options?: RestoreOptions) =>
-    apiClient.json<RestoreResult>('/backup/restore', { 
-      method: 'POST', 
-      json: { filename, ...options } 
+    apiClient.json<RestoreResult>('/backup/restore', {
+      method: 'POST',
+      json: { filename, ...options }
     }),
-  
+
   // Configuration
   getConfig: () => apiClient.get<{ config: BackupConfig }>('/backup/config'),
   updateConfig: (config: Partial<BackupConfig>) =>
@@ -513,14 +519,14 @@ export const backupAPI = {
       method: 'PUT',
       json: config
     }),
-  
+
   // Storage location testing
   testLocation: (type: StorageType, path: string) =>
     apiClient.json<{ ok: boolean; error?: string }>('/backup/location/test', {
       method: 'POST',
       json: { type, path }
     }),
-  
+
   // Cleanup and management
   delete: (filename: string, location?: string) =>
     apiClient.request<{ ok: true }>(`/backups/${filename}${location ? `?location=${location}` : ''}`, { method: 'DELETE' }),
@@ -529,21 +535,21 @@ export const backupAPI = {
       method: 'POST',
       json: { policy }
     }),
-  
+
   // Upload and download
   upload: (file: File) => {
     const formData = new FormData();
     formData.append('backupFile', file);
-    
+
     return apiClient.request<UploadResult>('/backup/upload', {
       method: 'POST',
       body: formData,
     });
   },
-  
+
   download: (filename: string, location?: string) => {
     const url = location ? `/api/backup/download/${filename}?location=${location}` : `/api/backup/download/${filename}`;
-    
+
     // Create download link
     const link = document.createElement('a');
     link.href = url;
@@ -551,7 +557,7 @@ export const backupAPI = {
     document.body.appendChild(link);
     link.click();
     document.body.removeChild(link);
-    
+
     return Promise.resolve();
   },
   getSchedule: () => apiClient.get<{ enabled: boolean; intervalMinutes: number }>('/backup/schedule'),
@@ -559,5 +565,12 @@ export const backupAPI = {
     apiClient.json<{ ok: boolean; enabled: boolean; intervalMinutes: number }>('/backup/schedule', {
       method: 'POST',
       json: { enabled, intervalMinutes },
+    }),
+
+  getDailyAuto: () => apiClient.get<{ config: DailyAutoBackupConfig }>('/backup/auto'),
+  setDailyAuto: (config: DailyAutoBackupConfig) =>
+    apiClient.json<{ ok: true; config: DailyAutoBackupConfig }>('/backup/auto', {
+      method: 'PUT',
+      json: config,
     }),
 };

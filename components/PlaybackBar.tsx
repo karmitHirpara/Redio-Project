@@ -278,19 +278,6 @@ export function PlaybackBar({
                     }}
                   />
 
-                  <div className="text-xs text-muted-foreground">Crossfade</div>
-                  <StepperInput
-                    value={crossfadeSeconds}
-                    min={0}
-                    max={10}
-                    step={1}
-                    showButtons={false}
-                    onChange={(v) => {
-                      onCrossfadeSecondsChange(v);
-                      onTransitionModeChange('crossfade');
-                    }}
-                  />
-
                   <div className="text-xs text-muted-foreground">Sound</div>
                   <StepperInput
                     value={volumePercent}

@@ -37,6 +37,109 @@ const upload = multer({
 let scheduledIntervalId = null;
 let scheduledIntervalMinutes = 0;
 let currentBackupJob = null;
+let dailyAutoTimeoutId = null;
+let dailyAutoConfig = {
+  enabled: false,
+  directoryPath: '',
+  timeOfDay: '02:00 AM',
+};
+
+function getDailyAutoConfigPath() {
+  const dir = ensureBackupsDir(null);
+  return path.join(dir, 'auto-backup.config.json');
+}
+
+function loadDailyAutoConfigFromDisk() {
+  try {
+    const cfgPath = getDailyAutoConfigPath();
+    if (!fs.existsSync(cfgPath)) return;
+    const raw = JSON.parse(fs.readFileSync(cfgPath, 'utf8'));
+    if (raw && typeof raw === 'object') {
+      dailyAutoConfig = {
+        enabled: Boolean(raw.enabled),
+        directoryPath: typeof raw.directoryPath === 'string' ? raw.directoryPath : '',
+        timeOfDay: typeof raw.timeOfDay === 'string' ? raw.timeOfDay : '02:00 AM',
+      };
+    }
+  } catch (e) {
+    console.error('Failed to load daily auto-backup config', e);
+  }
+}
+
+function saveDailyAutoConfigToDisk() {
+  try {
+    const cfgPath = getDailyAutoConfigPath();
+    fs.writeFileSync(cfgPath, JSON.stringify(dailyAutoConfig, null, 2), 'utf8');
+  } catch (e) {
+    console.error('Failed to save daily auto-backup config', e);
+  }
+}
+
+function clearDailyAutoSchedule() {
+  if (dailyAutoTimeoutId != null) {
+    clearTimeout(dailyAutoTimeoutId);
+    dailyAutoTimeoutId = null;
+  }
+}
+
+function parseTimeOfDay(value) {
+  const s = String(value || '').trim().toUpperCase();
+  const m = /^([0-1]?\d):([0-5]\d)\s*(AM|PM)$/.exec(s);
+  if (!m) return null;
+  let hh = Number(m[1]);
+  const mm = Number(m[2]);
+  const ap = m[3];
+  if (!Number.isFinite(hh) || !Number.isFinite(mm)) return null;
+  if (hh < 1 || hh > 12) return null;
+  if (mm < 0 || mm > 59) return null;
+  if (ap === 'AM') {
+    if (hh === 12) hh = 0;
+  } else {
+    if (hh !== 12) hh = hh + 12;
+  }
+  return { hh, mm, normalized: `${String(m[1]).padStart(2, '0')}:${String(m[2]).padStart(2, '0')} ${ap}` };
+}
+
+function computeNextRunMs(timeOfDay) {
+  const parsed = parseTimeOfDay(timeOfDay);
+  if (!parsed) return null;
+  const now = new Date();
+  const target = new Date(now);
+  target.setHours(parsed.hh, parsed.mm, 0, 0);
+  if (target.getTime() <= now.getTime() + 1000) {
+    target.setDate(target.getDate() + 1);
+  }
+  return Math.max(0, target.getTime() - now.getTime());
+}
+
+function scheduleDailyAutoBackup() {
+  clearDailyAutoSchedule();
+
+  if (!dailyAutoConfig.enabled) return;
+
+  const directoryPath = String(dailyAutoConfig.directoryPath || '').trim() || getBackupsDir(null);
+  const nextMs = computeNextRunMs(dailyAutoConfig.timeOfDay);
+  if (nextMs == null) return;
+
+  dailyAutoTimeoutId = setTimeout(() => {
+    const location = {
+      name: 'auto',
+      type: STORAGE_TYPES.LOCAL,
+      path: directoryPath,
+    };
+
+    createBackup({ location, description: 'Scheduled daily auto-backup' })
+      .catch((e) => {
+        console.error('Daily auto-backup failed', e);
+      })
+      .finally(() => {
+        scheduleDailyAutoBackup();
+      });
+  }, nextMs);
+}
+
+loadDailyAutoConfigFromDisk();
+scheduleDailyAutoBackup();
 let backupConfig = {
   storageLocations: [],
   retentionPolicy: { keepDaily: 7, keepWeekly: 4, keepMonthly: 12 },
@@ -1117,6 +1220,51 @@ router.post('/backup/schedule', (req, res) => {
 
   setSchedule(minutes);
   return res.json({ ok: true, enabled: true, intervalMinutes: scheduledIntervalMinutes });
+});
+
+router.get('/backup/auto', (_req, res) => {
+  const defaultDir = getBackupsDir(null);
+  const cfg = {
+    ...dailyAutoConfig,
+    directoryPath: String(dailyAutoConfig.directoryPath || '').trim() || defaultDir,
+  };
+  return res.json({ config: cfg });
+});
+
+router.put('/backup/auto', (req, res) => {
+  try {
+    const enabled = Boolean(req.body?.enabled);
+    const directoryPath = String(req.body?.directoryPath || '').trim();
+    const timeRaw = String(req.body?.timeOfDay || '').trim();
+
+    const parsed = parseTimeOfDay(timeRaw);
+    if (!parsed) {
+      return res.status(400).json({ error: 'timeOfDay must be in HH:MM AM/PM format' });
+    }
+
+    if (directoryPath && !path.isAbsolute(directoryPath)) {
+      return res.status(400).json({ error: 'directoryPath must be an absolute path' });
+    }
+
+    dailyAutoConfig = {
+      enabled,
+      directoryPath,
+      timeOfDay: parsed.normalized,
+    };
+    saveDailyAutoConfigToDisk();
+    scheduleDailyAutoBackup();
+
+    const defaultDir = getBackupsDir(null);
+    return res.json({
+      ok: true,
+      config: {
+        ...dailyAutoConfig,
+        directoryPath: String(dailyAutoConfig.directoryPath || '').trim() || defaultDir,
+      },
+    });
+  } catch (e) {
+    return res.status(500).json({ error: e?.message || 'Failed to update auto-backup config' });
+  }
 });
 
 // Validate database structure
