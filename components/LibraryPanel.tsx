@@ -5,19 +5,21 @@ import {
   useEffect,
   useMemo,
   useCallback,
+  memo,
   type MouseEvent,
   type DragEvent,
   type KeyboardEvent as ReactKeyboardEvent,
 } from 'react';
-import { Folder, FolderPlus, FolderUp, FolderInput, ChevronRight, ChevronDown } from 'lucide-react';
+import { Folder, FolderPlus, FolderUp, FolderInput, ChevronRight, ChevronDown, Search } from 'lucide-react';
 import { Input } from './ui/input';
 import { Button } from './ui/button';
 import { Progress } from './ui/progress';
 import { Track, Playlist, LibraryFolder } from '../types';
 import { TrackRow } from './TrackRow';
 import { toast } from 'sonner';
-import { foldersAPI, resolveUploadsUrl } from '../services/api';
+import { foldersAPI, libraryAPI, resolveUploadsUrl } from '../services/api';
 import { PlaylistFolder } from './PlaylistFolder';
+import { cn } from '../lib/utils';
 import { AnimatePresence, motion, useReducedMotion } from 'framer-motion';
 import {
   Select,
@@ -40,7 +42,21 @@ import {
   ContextMenuTrigger,
 } from './ui/context-menu';
 
-function VirtualizedFolderTrackList({
+interface VirtualizedFolderTrackListProps {
+  tracks: Track[];
+  folderId: string;
+  selectedTrackIds: Set<string>;
+  recentlyMovedTrackIds?: Set<string>;
+  onSelect: (trackId: string, folderId: string, e: React.MouseEvent) => void;
+  getDragPayload: (trackId: string, folderId: string) => { trackIds: string[]; sourceFolderId?: string };
+  onAddToQueue: (track: Track) => void;
+  onAddToPlaylist: (track: Track, playlistId: string) => void;
+  playlists: Playlist[];
+  onRemove: (trackId: string) => void;
+  onTrackUpdated?: (track: Track) => void;
+}
+
+const VirtualizedFolderTrackList = memo(function VirtualizedFolderTrackList({
   tracks,
   folderId,
   selectedTrackIds,
@@ -51,24 +67,14 @@ function VirtualizedFolderTrackList({
   onAddToPlaylist,
   playlists,
   onRemove,
-}: {
-  tracks: Track[];
-  folderId?: string;
-  selectedTrackIds: Set<string>;
-  recentlyMovedTrackIds?: Set<string>;
-  onSelect: (trackId: string, folderId: string, e: MouseEvent) => void;
-  getDragPayload: (trackId: string, folderId?: string) => { trackIds: string[]; sourceFolderId?: string };
-  onAddToQueue: (track: Track) => void;
-  onAddToPlaylist: (track: Track, playlistId: string) => void;
-  playlists: Playlist[];
-  onRemove: (trackId: string) => void;
-}) {
+  onTrackUpdated,
+}: VirtualizedFolderTrackListProps) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const [viewportHeight, setViewportHeight] = useState(0);
   const [scrollTop, setScrollTop] = useState(0);
 
-  const rowHeight = 28;
-  const overscan = 10;
+  const rowHeight = 32;
+  const overscan = 20;
 
   useEffect(() => {
     const el = containerRef.current;
@@ -104,7 +110,7 @@ function VirtualizedFolderTrackList({
     >
       <div className="relative" style={{ height: totalHeight }}>
         <div className="absolute left-0 right-0" style={{ transform: `translateY(${startIndex * rowHeight}px)` }}>
-          <div className="space-y-0.5">
+          <div className="flex flex-col gap-[1px]">
             {items.map((track) => (
               <TrackRow
                 key={track.id}
@@ -119,6 +125,7 @@ function VirtualizedFolderTrackList({
                 playlists={playlists}
                 onRemove={onRemove}
                 showRemove
+                onTrackUpdated={onTrackUpdated}
               />
             ))}
           </div>
@@ -126,7 +133,7 @@ function VirtualizedFolderTrackList({
       </div>
     </div>
   );
-}
+});
 
 interface LibraryPanelProps {
   tracks: Track[];
@@ -143,9 +150,10 @@ interface LibraryPanelProps {
   onImportTracks: (files: File[], folderId?: string) => Promise<void> | void;
   onImportFolder?: (files: File[], parentFolderId?: string) => Promise<void> | void;
   importProgress?: { percent: number; label: string } | null;
+  onTrackUpdated?: (track: Track) => void;
 }
 
-export function LibraryPanel({
+export const LibraryPanel = memo(function LibraryPanel({
   tracks,
   playlists,
   onAddToQueue,
@@ -160,6 +168,7 @@ export function LibraryPanel({
   onImportTracks,
   onImportFolder,
   importProgress,
+  onTrackUpdated,
 }: LibraryPanelProps) {
   const reduceMotion = useReducedMotion() ?? false;
   const [hasMounted, setHasMounted] = useState(false);
@@ -180,6 +189,10 @@ export function LibraryPanel({
   const [selectedTrackIds, setSelectedTrackIds] = useState<Set<string>>(new Set());
   const [trackSelectionAnchorId, setTrackSelectionAnchorId] = useState<string | null>(null);
   const [dragOverFolderId, setDragOverFolderId] = useState<string | null>(null);
+  // Global drag end handler to clear all drag states
+  const handleDragEnd = useCallback(() => {
+    setDragOverFolderId(null);
+  }, []);
   const [focusedExplorerItem, setFocusedExplorerItem] = useState<
     | { kind: 'folder'; id: string }
     | { kind: 'track'; id: string; folderId: string }
@@ -193,6 +206,16 @@ export function LibraryPanel({
   const [creatingParentFolderId, setCreatingParentFolderId] = useState<string | null>(null);
   const [pendingFolderForUpload, setPendingFolderForUpload] = useState<string | null>(null);
   const [folderLoadingIds, setFolderLoadingIds] = useState<Set<string>>(new Set());
+
+  const [librarySearchText, setLibrarySearchText] = useState('');
+  const [librarySearchQuery, setLibrarySearchQuery] = useState('');
+  const [librarySearchLoading, setLibrarySearchLoading] = useState(false);
+  const [librarySearchResults, setLibrarySearchResults] = useState<
+    Array<{ key: string; track: Track; folderPath: string }>
+  >([]);
+  const librarySearchCacheRef = useRef<Map<string, Array<{ key: string; track: Track; folderPath: string }>>>(
+    new Map(),
+  );
 
   const closeFolderDialog = () => {
     setFolderDialogOpen(false);
@@ -239,7 +262,6 @@ export function LibraryPanel({
     for (const f of folders) {
       dfs(String(f.id));
     }
-    void parentOf;
     return out;
   }, [folders, foldersByParentId]);
 
@@ -601,8 +623,9 @@ export function LibraryPanel({
 
           if (movingFolderIds.length === 0) return;
 
-          const destParentId = String(targetFolderId || '');
+          const destParentId = targetFolderId ? String(targetFolderId) : '';
 
+          // Block moving into self or subfolders
           for (const movingFolderId of movingFolderIds) {
             if (movingFolderId === destParentId) {
               toast.error('Cannot move folder into itself');
@@ -616,10 +639,10 @@ export function LibraryPanel({
             }
           }
 
-          for (const movingFolderId of movingFolderIds) {
-            await foldersAPI.setParent(movingFolderId, destParentId);
-          }
+          // Atomic backend call set
+          await Promise.all(movingFolderIds.map(id => foldersAPI.setParent(id, destParentId)));
 
+          // Atomic frontend state update
           setFolders((prev) =>
             prev.map((f) =>
               movingFolderIds.includes(String(f.id))
@@ -629,12 +652,16 @@ export function LibraryPanel({
           );
 
           toast.success(movingFolderIds.length === 1 ? 'Moved folder' : `Moved ${movingFolderIds.length} folders`);
-        } catch {
-          // ignore
+        } catch (err: any) {
+          console.error('Failed to move folders', err);
+          toast.error(err?.message || 'Failed to move folders');
+        } finally {
+          setDragOverFolderId(null);
         }
       }
+      setDragOverFolderId(null);
     },
-    [folderDescendantsMap, onImportFolder]
+    [folderDescendantsMap, onImportFolder, foldersAPI, toast, setFolders, setFolderTracks]
   );
 
   useEffect(() => {
@@ -677,22 +704,78 @@ export function LibraryPanel({
     load();
   }, []);
 
+  const prevExpandedIdsRef = useRef<Set<string>>(new Set());
+
+  useEffect(() => {
+    const loadNewFolders = async () => {
+      const currentSet = new Set(expandedFolderIds);
+      const newlyExpanded = expandedFolderIds.filter(id => !prevExpandedIdsRef.current.has(id));
+      prevExpandedIdsRef.current = currentSet;
+
+      if (newlyExpanded.length === 0) return;
+
+      setFolderLoadingIds((prev) => {
+        const next = new Set(prev);
+        newlyExpanded.forEach(id => next.add(id));
+        return next;
+      });
+
+      try {
+        const results = await Promise.all(
+          newlyExpanded.map(async (folderId) => {
+            try {
+              const raw = await foldersAPI.getTracks(folderId);
+              const normalized: Track[] = (raw || []).map((t: any) => ({
+                id: t.id,
+                name: t.name,
+                artist: t.artist,
+                duration: t.duration || 0,
+                size: t.size || 0,
+                filePath: resolveUploadsUrl(t.file_path),
+                hash: t.hash,
+                dateAdded: t.date_added ? new Date(t.date_added) : new Date(),
+              }));
+              normalized.sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true }));
+              return { folderId, tracks: normalized };
+            } catch (err) {
+              console.error(`Failed to load tracks for folder ${folderId}`, err);
+              return { folderId, tracks: [] };
+            }
+          })
+        );
+
+        setFolderTracks((prev) => {
+          const next = { ...prev };
+          for (const r of results) next[r.folderId] = r.tracks;
+          return next;
+        });
+      } finally {
+        setFolderLoadingIds((prev) => {
+          const next = new Set(prev);
+          newlyExpanded.forEach(id => next.delete(id));
+          return next;
+        });
+      }
+    };
+
+    void loadNewFolders();
+  }, [expandedFolderIds]);
+
+  // Handle resync events
   useEffect(() => {
     const load = async () => {
       try {
         const data = await foldersAPI.getAll();
         setFolders(data as any);
+
+        // Force refresh all expanded folders on resync
         if (expandedFolderIds.length > 0) {
-          setFolderLoadingIds((prev) => {
-            const next = new Set(prev);
-            for (const id of expandedFolderIds) next.add(id);
-            return next;
-          });
-          try {
-            const results = await Promise.all(
-              expandedFolderIds.map(async (folderId) => {
-                const raw = await foldersAPI.getTracks(folderId);
-                const normalized: Track[] = (raw || []).map((t: any) => ({
+          const results = await Promise.all(
+            expandedFolderIds.map(async (folderId) => {
+              const raw = await foldersAPI.getTracks(folderId);
+              return {
+                folderId,
+                tracks: (raw || []).map((t: any) => ({
                   id: t.id,
                   name: t.name,
                   artist: t.artist,
@@ -701,26 +784,18 @@ export function LibraryPanel({
                   filePath: resolveUploadsUrl(t.file_path),
                   hash: t.hash,
                   dateAdded: t.date_added ? new Date(t.date_added) : new Date(),
-                }));
-                normalized.sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true }));
-                return { folderId, tracks: normalized };
-              })
-            );
-            setFolderTracks((prev) => {
-              const next = { ...prev };
-              for (const r of results) next[r.folderId] = r.tracks;
-              return next;
-            });
-          } finally {
-            setFolderLoadingIds((prev) => {
-              const next = new Set(prev);
-              for (const id of expandedFolderIds) next.delete(id);
-              return next;
-            });
-          }
+                })).sort((a: any, b: any) => a.name.localeCompare(b.name, undefined, { numeric: true }))
+              };
+            })
+          );
+          setFolderTracks(prev => {
+            const next = { ...prev };
+            results.forEach(r => { next[r.folderId] = r.tracks; });
+            return next;
+          });
         }
       } catch (err) {
-        console.error('Failed to load folders', err);
+        console.error('Failed to load folders on resync', err);
       }
     };
 
@@ -1052,7 +1127,7 @@ export function LibraryPanel({
             animate={reduceMotion || !hasMounted ? undefined : { opacity: 1, y: 0 }}
             exit={reduceMotion || !hasMounted ? undefined : { opacity: 0, y: 6 }}
             transition={reduceMotion ? undefined : { duration: 0.16, ease: 'easeOut' }}
-            className="space-y-0.5"
+            className="flex flex-col gap-[1px]"
           >
             <ContextMenu>
               <ContextMenuTrigger>
@@ -1083,8 +1158,8 @@ export function LibraryPanel({
                   }}
                   onDragEnter={() => setDragOverFolderId(id)}
                   onDragLeave={(e) => {
-                    const next = e.relatedTarget as Node | null;
-                    if (!next || !e.currentTarget.contains(next)) setDragOverFolderId(null);
+                    // Clear drag state when leaving folder area
+                    setDragOverFolderId(null);
                   }}
                   onDragOver={(e) => {
                     e.preventDefault();
@@ -1093,32 +1168,35 @@ export function LibraryPanel({
                   onDrop={(e) => {
                     void handleDropOnFolder(id, e);
                   }}
-                  style={{ paddingLeft: `${8 + depth * 16}px` }}
-                  className={`w-full flex items-center gap-2 rounded-md px-2 py-1.5 text-xs text-left transition-all duration-200 ease-out hover:shadow-md border border-transparent ${selectedFolderId === id
-                    ? 'bg-sky-200 text-sky-950 dark:bg-sky-700/70 dark:text-white shadow-sm border border-sky-300/50 dark:border-sky-600/50'
-                    : dragOverFolderId === id
-                      ? 'bg-sky-100 dark:bg-sky-800/50 text-foreground shadow-sm border border-sky-200/50 dark:border-sky-700/30'
-                      : 'bg-transparent hover:bg-sky-200/55 text-foreground dark:hover:bg-sky-700/35 dark:text-foreground hover:border-sky-300/35 dark:hover:border-sky-500/25 border border-transparent hover:shadow-sm'
-                    }`}
-                >
-                  {expanded ? (
-                    <ChevronDown className="w-3 h-3 text-muted-foreground" />
-                  ) : (
-                    <ChevronRight className="w-3 h-3 text-muted-foreground" />
+                  className={cn(
+                    'group w-full flex items-center gap-1.5 px-2 py-0.5 rounded-sm transition-all duration-150 ease-out outline-none h-8 select-none border border-transparent relative overflow-hidden',
+                    selectedFolderIds.has(id)
+                      ? 'bg-primary/15 text-foreground dark:bg-primary/20 shadow-[inset_0_0_0_1px_rgba(var(--primary),0.2)]'
+                      : 'hover:bg-accent/40 dark:hover:bg-accent/20'
                   )}
-                  <Folder className="w-4 h-4 text-muted-foreground" />
-                  <span
-                    className={
-                      depth === 0
-                        ? 'flex-1 truncate font-semibold text-sm select-text'
-                        : 'flex-1 truncate text-sm select-text'
-                    }
-                  >
+                  style={{ paddingLeft: `${depth * 10 + 8}px` }}
+                >
+                  {/* Drop Target Visual Feedback Overlay */}
+                  {dragOverFolderId === id && (
+                    <div className="absolute inset-0 pointer-events-none bg-white/10 dark:bg-white/5 ring-2 ring-primary/40 z-0 animate-pulse" />
+                  )}
+                  <div className="flex items-center justify-center w-4 h-4 shrink-0 transition-transform">
+                    {expanded ? (
+                      <ChevronDown className="w-3.5 h-3.5 text-muted-foreground/80" />
+                    ) : (
+                      <ChevronRight className="w-3.5 h-3.5 text-muted-foreground/80" />
+                    )}
+                  </div>
+                  <Folder className={cn(
+                    "w-3.5 h-3.5 shrink-0 transition-colors",
+                    expanded ? "text-primary" : "text-muted-foreground opacity-70"
+                  )} />
+                  <span className="flex-1 truncate text-xs font-medium text-left">
                     {folder.name}
                   </span>
                   {trackCount > 0 && (
-                    <span className="text-[10px] text-muted-foreground select-text">
-                      {trackCount} track{trackCount === 1 ? '' : 's'}
+                    <span className="text-[10px] text-muted-foreground/60 tabular-nums px-1.5 font-mono">
+                      {trackCount}
                     </span>
                   )}
                 </button>
@@ -1169,6 +1247,7 @@ export function LibraryPanel({
                         onAddToPlaylist={onAddToPlaylist}
                         playlists={playlists}
                         onRemove={handleRemoveFolderTrack}
+                        onTrackUpdated={onTrackUpdated}
                       />
                     )}
                   </div>
@@ -1384,98 +1463,207 @@ export function LibraryPanel({
   // ... rest of the component
 
   return (
-    <div className="h-full flex flex-col bg-background border-r border-border relative">
+    <div
+      className="h-full flex flex-col bg-background border-r border-border relative"
+      onDragEnd={handleDragEnd}
+    >
       <div ref={dragGhostRef} className="hidden absolute top-0 left-0 bg-sky-500 text-white px-2 py-1 rounded text-xs font-bold pointer-events-none z-50">
         {dragGhostCount} items
       </div>
       {/* Library Header */}
       <div className="p-4 border-b border-border space-y-3">
-        <div className="flex items-center justify-between">
-          <h2 className="text-sm font-semibold tracking-tight text-foreground">Library</h2>
-          <div className="flex items-center gap-2">
-            <Button
-              size="icon"
-              variant="ghost"
-              className="h-9 w-9 p-0"
-              onClick={handleOpenNewFolderDialog}
-              title="New Folder"
-            >
-              <FolderPlus className="w-5 h-5" />
-            </Button>
+        <input
+          ref={fileInputRef}
+          type="file"
+          multiple
+          accept=".mp3,.wav,.ogg,.m4a,.flac"
+          className="hidden"
+          onChange={async (e) => {
+            const files = e.target.files ? Array.from(e.target.files) : [];
+            if (files.length > 0) {
+              const targetFolderId = pendingFolderForUpload || selectedFolderId;
+              setPendingFolderForUpload(null);
 
-            
+              // Enforce: audio files cannot be added to the Library root.
+              // A folder must be selected or chosen via context menu first.
+              if (!targetFolderId) {
+                alert('Select a folder first, then add files into that folder.');
+                e.target.value = '';
+                return;
+              }
 
-            <input
-              ref={fileInputRef}
-              type="file"
-              multiple
-              accept=".mp3,.wav,.ogg,.m4a,.flac"
-              className="hidden"
-              onChange={async (e) => {
-                const files = e.target.files ? Array.from(e.target.files) : [];
-                if (files.length > 0) {
-                  const targetFolderId = pendingFolderForUpload || selectedFolderId;
-                  setPendingFolderForUpload(null);
+              await onImportTracks(files, targetFolderId);
 
-                  // Enforce: audio files cannot be added to the Library root.
-                  // A folder must be selected or chosen via context menu first.
-                  if (!targetFolderId) {
-                    alert('Select a folder first, then add files into that folder.');
-                    e.target.value = '';
+              // Refresh this folder's contents after upload
+              try {
+                const raw = await foldersAPI.getTracks(targetFolderId);
+                const normalized: Track[] = (raw || []).map((t: any) => ({
+                  id: t.id,
+                  name: t.name,
+                  artist: t.artist,
+                  duration: t.duration || 0,
+                  size: t.size || 0,
+                  filePath: resolveUploadsUrl(t.file_path),
+                  hash: t.hash,
+                  dateAdded: t.date_added ? new Date(t.date_added) : new Date(),
+                }));
+                normalized.sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true }));
+                setFolderTracks(prev => ({ ...prev, [targetFolderId]: normalized }));
+              } catch (err) {
+                console.error('Failed to refresh folder tracks after upload', err);
+              }
+            }
+            // allow re-selecting the same files
+            e.target.value = '';
+          }}
+        />
+
+        <input
+          ref={folderInputRef}
+          type="file"
+          multiple
+          accept=".mp3,.wav,.ogg,.m4a,.flac"
+          className="hidden"
+          onChange={async (e) => {
+            const files = e.target.files ? Array.from(e.target.files) : [];
+            if (files.length > 0 && onImportFolder) {
+              await onImportFolder(files, selectedFolderId || undefined);
+            }
+            e.target.value = '';
+          }}
+          {...({ webkitdirectory: true } as any)}
+        />
+
+        <div className="flex items-center gap-2">
+          <Input
+            value={librarySearchText}
+            onChange={(e) => setLibrarySearchText(e.target.value)}
+            placeholder="Search songs"
+            className="h-9 text-slate-500 placeholder:text-foreground/70 dark:text-muted-foreground dark:placeholder:text-foreground/70"
+            onKeyDown={(e) => {
+              if (e.key === 'Enter') {
+                e.preventDefault();
+                void (async () => {
+                  const q = String(librarySearchText || '').trim();
+                  if (!q) {
+                    setLibrarySearchQuery('');
+                    setLibrarySearchResults([]);
                     return;
                   }
 
-                  await onImportTracks(files, targetFolderId);
-
-                  // Refresh this folder's contents after upload
-                  try {
-                    const raw = await foldersAPI.getTracks(targetFolderId);
-                    const normalized: Track[] = (raw || []).map((t: any) => ({
-                      id: t.id,
-                      name: t.name,
-                      artist: t.artist,
-                      duration: t.duration || 0,
-                      size: t.size || 0,
-                      filePath: resolveUploadsUrl(t.file_path),
-                      hash: t.hash,
-                      dateAdded: t.date_added ? new Date(t.date_added) : new Date(),
-                    }));
-                    normalized.sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true }));
-                    setFolderTracks(prev => ({ ...prev, [targetFolderId]: normalized }));
-                  } catch (err) {
-                    console.error('Failed to refresh folder tracks after upload', err);
+                  const cached = librarySearchCacheRef.current.get(q.toLowerCase());
+                  if (cached) {
+                    setLibrarySearchQuery(q);
+                    setLibrarySearchResults(cached);
+                    return;
                   }
-                }
-                // allow re-selecting the same files
-                e.target.value = '';
-              }}
-            />
 
-            <input
-              ref={folderInputRef}
-              type="file"
-              multiple
-              accept=".mp3,.wav,.ogg,.m4a,.flac"
-              className="hidden"
-              onChange={async (e) => {
-                const files = e.target.files ? Array.from(e.target.files) : [];
-                if (files.length > 0 && onImportFolder) {
-                  await onImportFolder(files, selectedFolderId || undefined);
+                  setLibrarySearchLoading(true);
+                  try {
+                    const resp = await libraryAPI.search(q, 1000);
+                    const results = (resp?.results || []).map((r: any) => {
+                      const folderPath = String(r?.folder_path || r?.folder_name || '').trim();
+                      const key = `${String(r.id)}:${String(r.folder_id || '')}`;
+                      const track: Track = {
+                        id: String(r.id),
+                        name: String(r.name || ''),
+                        artist: String(r.artist || ''),
+                        duration: Number(r.duration || 0),
+                        size: Number(r.size || 0),
+                        filePath: resolveUploadsUrl(String(r.file_path || '')),
+                        hash: String(r.hash || ''),
+                        dateAdded: r.date_added ? new Date(r.date_added) : new Date(),
+                      };
+                      return { key, track, folderPath };
+                    });
+                    librarySearchCacheRef.current.set(q.toLowerCase(), results);
+                    setLibrarySearchResults(results);
+                    setLibrarySearchQuery(q);
+                  } catch (err: any) {
+                    toast.error(err?.message || 'Search failed');
+                    setLibrarySearchQuery('');
+                    setLibrarySearchResults([]);
+                  } finally {
+                    setLibrarySearchLoading(false);
+                  }
+                })();
+              }
+            }}
+          />
+          <Button
+            size="icon"
+            variant="ghost"
+            className="h-9 w-9 p-0"
+            disabled={librarySearchLoading}
+            onClick={() => {
+              void (async () => {
+                const q = String(librarySearchText || '').trim();
+                if (!q) {
+                  setLibrarySearchQuery('');
+                  setLibrarySearchResults([]);
+                  return;
                 }
-                e.target.value = '';
-              }}
-              {...({ webkitdirectory: true } as any)}
-            />
-          </div>
+
+                const cached = librarySearchCacheRef.current.get(q.toLowerCase());
+                if (cached) {
+                  setLibrarySearchQuery(q);
+                  setLibrarySearchResults(cached);
+                  return;
+                }
+
+                setLibrarySearchLoading(true);
+                try {
+                  const resp = await libraryAPI.search(q, 1000);
+                  const results = (resp?.results || []).map((r: any) => {
+                    const folderPath = String(r?.folder_path || r?.folder_name || '').trim();
+                    const key = `${String(r.id)}:${String(r.folder_id || '')}`;
+                    const track: Track = {
+                      id: String(r.id),
+                      name: String(r.name || ''),
+                      artist: String(r.artist || ''),
+                      duration: Number(r.duration || 0),
+                      size: Number(r.size || 0),
+                      filePath: resolveUploadsUrl(String(r.file_path || '')),
+                      hash: String(r.hash || ''),
+                      dateAdded: r.date_added ? new Date(r.date_added) : new Date(),
+                    };
+                    return { key, track, folderPath };
+                  });
+                  librarySearchCacheRef.current.set(q.toLowerCase(), results);
+                  setLibrarySearchResults(results);
+                  setLibrarySearchQuery(q);
+                } catch (err: any) {
+                  toast.error(err?.message || 'Search failed');
+                  setLibrarySearchQuery('');
+                  setLibrarySearchResults([]);
+                } finally {
+                  setLibrarySearchLoading(false);
+                }
+              })();
+            }}
+            title="Search"
+          >
+            <Search className="w-4 h-4" />
+          </Button>
+
+          <Button
+            size="icon"
+            variant="ghost"
+            className="h-9 w-9 p-0"
+            onClick={handleOpenNewFolderDialog}
+            title="New Folder"
+          >
+            <FolderPlus className="w-5 h-5" />
+          </Button>
         </div>
 
         {importProgress && (
-          <div className="space-y-1">
-            <div className="flex items-center justify-between text-[11px] text-muted-foreground">
+          <div className="rounded-md border border-border/60 bg-muted/20 px-2 py-1.5">
+            <div className="flex items-center justify-between text-[10px] leading-4 text-muted-foreground">
               <span className="truncate pr-3">{importProgress.label}</span>
-              <span>{Math.round(importProgress.percent)}%</span>
+              <span className="tabular-nums">{Math.round(importProgress.percent)}%</span>
             </div>
-            <Progress value={importProgress.percent} />
+            <Progress value={importProgress.percent} className="h-1.5 mt-1" />
           </div>
         )}
 
@@ -1520,7 +1708,50 @@ export function LibraryPanel({
       {/* Search and sort controls removed per request; Library now shows a simple folder tree without filters. */}
 
       {/* Folder List (VS Code style) */}
-      {folders.length > 0 && (
+      {librarySearchQuery ? (
+        <div className="flex-1 overflow-y-auto px-2 py-2 space-y-2 border-t border-border scroll-thin outline-none">
+          <div className="flex items-center justify-between px-1">
+            <div className="text-xs text-muted-foreground truncate">
+              {librarySearchLoading
+                ? 'Searching...'
+                : `${librarySearchResults.length} result${librarySearchResults.length === 1 ? '' : 's'} for "${librarySearchQuery}"`}
+            </div>
+            <Button
+              size="sm"
+              variant="ghost"
+              className="h-7 px-2 text-[11px]"
+              onClick={() => {
+                setLibrarySearchText('');
+                setLibrarySearchQuery('');
+                setLibrarySearchResults([]);
+              }}
+            >
+              Clear
+            </Button>
+          </div>
+
+          <div className="space-y-1">
+            {librarySearchResults.map((r) => (
+              <div key={r.key} className="space-y-0.5">
+                <TrackRow
+                  track={r.track}
+                  isLibrary
+                  isSelected={false}
+                  onAddToQueue={onAddToQueue}
+                  onAddToPlaylist={onAddToPlaylist}
+                  playlists={playlists}
+                  onRemove={onRemoveTrack}
+                  showRemove
+                  onTrackUpdated={onTrackUpdated}
+                />
+                {r.folderPath ? (
+                  <div className="px-9 text-[10px] text-muted-foreground/70 truncate">{r.folderPath}</div>
+                ) : null}
+              </div>
+            ))}
+          </div>
+        </div>
+      ) : folders.length > 0 ? (
         <div
           className={`flex-1 overflow-y-auto px-2 py-2 space-y-1 border-t border-border scroll-thin outline-none transition-colors duration-200 ${dragOverFolderId === 'root' ? 'bg-sky-50/50 dark:bg-sky-900/10' : ''
             }`}
@@ -1528,18 +1759,48 @@ export function LibraryPanel({
           onKeyDown={handleExplorerKeyDown}
           onDragOver={(e) => {
             e.preventDefault();
-            if (!dragOverFolderId) setDragOverFolderId('root');
+            if (dragOverFolderId !== null) setDragOverFolderId(null);
           }}
+          onDragEnter={() => setDragOverFolderId(null)}
           onDragLeave={(e) => {
-            if (e.currentTarget === e.target) setDragOverFolderId(null);
+            // Clear drag state when leaving root folder area
+            setDragOverFolderId(null);
           }}
           onDrop={(e) => {
             void handleDropOnFolder(null, e);
           }}
         >
+          {/* Root Drop Target Visual Feedback Overlay */}
+          {dragOverFolderId === null && (
+            <div className="absolute inset-0 pointer-events-none bg-white/5 dark:bg-white/[0.02] ring-2 ring-inset ring-primary/20 z-0" />
+          )}
           <AnimatePresence mode="popLayout">
             {renderFolderNodes('', 0)}
           </AnimatePresence>
+        </div>
+      ) : (
+        <div
+          className={`flex-1 overflow-y-auto px-2 py-2 border-t border-border scroll-thin outline-none transition-colors duration-200 ${dragOverFolderId === 'root' ? 'bg-sky-50/50 dark:bg-sky-900/10' : ''
+            }`}
+          tabIndex={0}
+          onKeyDown={handleExplorerKeyDown}
+          onDragOver={(e) => {
+            e.preventDefault();
+            if (dragOverFolderId !== null) setDragOverFolderId(null);
+          }}
+          onDragEnter={() => setDragOverFolderId(null)}
+          onDragLeave={() => {
+            setDragOverFolderId(null);
+          }}
+          onDrop={(e) => {
+            void handleDropOnFolder(null, e);
+          }}
+        >
+          <div className="h-full min-h-[180px] flex items-center justify-center">
+            <div className="text-xs text-muted-foreground text-center">
+              Drop a folder here to import
+            </div>
+          </div>
         </div>
       )}
 
@@ -1616,4 +1877,4 @@ export function LibraryPanel({
       </AnimatePresence>
     </div>
   );
-}
+});

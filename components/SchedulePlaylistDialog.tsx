@@ -29,6 +29,10 @@ interface SchedulePlaylistDialogProps {
   playlistName: string;
   queue: QueueItem[];
   onSchedule: (config: ScheduleConfig) => void;
+  existingSchedule?: {
+    type: 'datetime' | 'song-trigger' | string;
+    dateTime?: Date;
+  } | null;
 }
 
 export interface ScheduleConfig {
@@ -44,7 +48,8 @@ export function SchedulePlaylistDialog({
   onOpenChange,
   playlistName,
   queue,
-  onSchedule
+  onSchedule,
+  existingSchedule = null,
 }: SchedulePlaylistDialogProps) {
   const [mode, setMode] = useState<'datetime' | 'song-trigger'>('datetime');
   const [date, setDate] = useState('');
@@ -176,6 +181,7 @@ export function SchedulePlaylistDialog({
   }, [open]);
 
   const handleSchedule = () => {
+    if (existingSchedule) return;
     if (mode === 'datetime') {
       if (!computedDateTime) return;
       if (isDateTimeInPast) return;
@@ -206,6 +212,28 @@ export function SchedulePlaylistDialog({
         </DialogHeader>
 
         <div className="p-6 space-y-6">
+          {existingSchedule && (
+            <motion.div
+              initial={{ opacity: 0, y: -5 }}
+              animate={{ opacity: 1, y: 0 }}
+              className="flex items-start gap-2 p-3 rounded-lg bg-amber-500/10 border border-amber-500/20 text-amber-300 text-sm"
+            >
+              <Info className="w-4 h-4 flex-shrink-0 mt-0.5" />
+              <div className="leading-snug">
+                <div className="font-semibold">This playlist is already scheduled.</div>
+                {existingSchedule.type === 'datetime' && existingSchedule.dateTime ? (
+                  <div className="text-[12px] text-amber-200/80 mt-0.5">
+                    Scheduled for {existingSchedule.dateTime.toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' })} (IST)
+                  </div>
+                ) : (
+                  <div className="text-[12px] text-amber-200/80 mt-0.5">
+                    Cancel the schedule or wait for it to trigger before scheduling again.
+                  </div>
+                )}
+              </div>
+            </motion.div>
+          )}
+
           <Tabs value={mode} onValueChange={(v) => setMode(v as any)} className="w-full">
             <TabsList className="grid w-full grid-cols-2 bg-slate-900 border border-slate-800">
               <TabsTrigger value="datetime" className="data-[state=active]:bg-sky-600 data-[state=active]:text-white gap-2">
@@ -375,6 +403,7 @@ export function SchedulePlaylistDialog({
                 className="bg-sky-600 hover:bg-sky-500 text-white px-6 font-bold shadow-lg shadow-sky-900/40"
                 onClick={handleSchedule}
                 disabled={
+                  Boolean(existingSchedule) ||
                   (mode === 'datetime' && (!date || !time || !computedDateTime || isDateTimeInPast)) ||
                   (mode === 'song-trigger' && !selectedSongId)
                 }

@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useMemo } from 'react';
+import { useState, useEffect, useCallback, useMemo, useRef, memo } from 'react';
 import { Playlist, Track, QueueItem, ScheduledPlaylist } from '../types';
 import { PlaylistNavigator } from './PlaylistNavigator';
 import { PlaylistEditor } from './PlaylistEditor';
@@ -9,7 +9,7 @@ import { useResizable } from '../hooks/useResizable';
 interface PlaylistManagerProps {
   playlists: Playlist[];
   recentPlaylistAdd?: { playlistId: string; trackId: string; createdAt: number } | null;
-  importProgress?: { percent: number; label: string } | null;
+  importProgress?: { percent: number; label: string; playlistId: string } | null;
   onCreatePlaylist: () => void;
   onRenamePlaylist: (playlistId: string) => void;
   onDeletePlaylist: (playlistId: string) => void;
@@ -24,15 +24,18 @@ interface PlaylistManagerProps {
   queue: QueueItem[];
   onImportFilesToPlaylist: (playlistId: string, files: File[], insertIndex?: number, suppressDuplicateDialog?: boolean) => void;
   onQueueTrackFromPlaylist: (track: Track) => void;
+  onTrackUpdated?: (track: Track) => void;
   scheduledPlaylists: ScheduledPlaylist[];
   onDeleteSchedule: (scheduleId: string) => void | Promise<void>;
   onDropTrackOnPlaylistHeader: (playlistId: string, trackIds: string[]) => void;
+  onDropFolderOnPlaylistHeader: (playlistId: string, folderIds: string[]) => void;
   onDropFilesOnPlaylistHeader: (playlistId: string, files: File[], suppressDuplicateDialog?: boolean) => void;
   onDropTrackOnPlaylistPanel: (playlistId: string, trackIds: string[], insertIndex: number) => void;
+  onDropFolderOnPlaylistPanel: (playlistId: string, folderIds: string[], insertIndex: number) => void;
   onDropFolderOnEmptyArea?: (playlistName: string, files: File[]) => void;
 }
 
-export function PlaylistManager({
+export const PlaylistManager = memo(function PlaylistManager({
   playlists,
   recentPlaylistAdd,
   importProgress,
@@ -50,15 +53,58 @@ export function PlaylistManager({
   queue,
   onImportFilesToPlaylist,
   onQueueTrackFromPlaylist,
+  onTrackUpdated,
   scheduledPlaylists,
   onDeleteSchedule,
   onDropTrackOnPlaylistHeader,
+  onDropFolderOnPlaylistHeader,
   onDropFilesOnPlaylistHeader,
   onDropTrackOnPlaylistPanel,
+  onDropFolderOnPlaylistPanel,
   onDropFolderOnEmptyArea,
 }: PlaylistManagerProps) {
+  const EDITOR_OPEN_KEY = 'redio.playlists.editor.open';
+  const SELECTED_PLAYLIST_ID_KEY = 'redio.playlists.selected.id';
+
   const [selectedPlaylist, setSelectedPlaylist] = useState<Playlist | null>(null);
-  const [isEditorOpen, setIsEditorOpen] = useState(false);
+  const [isEditorOpen, setIsEditorOpen] = useState(() => {
+    try {
+      return window.localStorage.getItem(EDITOR_OPEN_KEY) === 'true';
+    } catch {
+      return false;
+    }
+  });
+
+  useEffect(() => {
+    try {
+      window.localStorage.setItem(EDITOR_OPEN_KEY, String(isEditorOpen));
+    } catch { }
+  }, [isEditorOpen]);
+
+  // Restore selected playlist from local storage once playlists are loaded
+  const hasRestoredRef = useRef(false);
+  useEffect(() => {
+    if (!hasRestoredRef.current && playlists.length > 0) {
+      try {
+        const id = window.localStorage.getItem(SELECTED_PLAYLIST_ID_KEY);
+        if (id) {
+          const p = playlists.find((x) => x.id === id);
+          if (p) {
+            setSelectedPlaylist(p);
+            hasRestoredRef.current = true;
+          }
+        }
+      } catch { }
+    }
+  }, [playlists]);
+
+  useEffect(() => {
+    if (selectedPlaylist) {
+      try {
+        window.localStorage.setItem(SELECTED_PLAYLIST_ID_KEY, selectedPlaylist.id);
+      } catch { }
+    }
+  }, [selectedPlaylist]);
 
   const NAV_WIDTH_KEY = 'redio.playlists.nav.width';
   const initialNavWidth = (() => {
@@ -130,6 +176,10 @@ export function PlaylistManager({
   };
 
   const selectedPlaylistId = selectedPlaylist?.id ?? null;
+  const scopedImportProgress =
+    selectedPlaylistId && importProgress?.playlistId === selectedPlaylistId
+      ? { percent: importProgress.percent, label: importProgress.label }
+      : null;
 
   const onPlayPlaylistNowCb = useCallback(() => {
     if (!selectedPlaylistId) return;
@@ -181,6 +231,14 @@ export function PlaylistManager({
     [onDropTrackOnPlaylistPanel, selectedPlaylistId]
   );
 
+  const onDropFolderOnPlaylistPanelCb = useCallback(
+    (folderIds: string[], insertIndex: number) => {
+      if (!selectedPlaylistId) return;
+      onDropFolderOnPlaylistPanel(selectedPlaylistId, folderIds, insertIndex);
+    },
+    [onDropFolderOnPlaylistPanel, selectedPlaylistId]
+  );
+
   const playlistNavigatorEl = useMemo(() => {
     return (
       <PlaylistNavigator
@@ -196,6 +254,7 @@ export function PlaylistManager({
         scheduledPlaylists={scheduledPlaylists}
         onDeleteSchedule={onDeleteSchedule}
         onDropTrackOnPlaylistHeader={onDropTrackOnPlaylistHeader}
+        onDropFolderOnPlaylistHeader={onDropFolderOnPlaylistHeader}
         onDropFilesOnPlaylistHeader={onDropFilesOnPlaylistHeader}
       />
     );
@@ -227,15 +286,17 @@ export function PlaylistManager({
         onRemoveTrack={onRemoveTrackCb}
         onReorderTracks={onReorderTracksCb}
         onImportFiles={onImportFilesCb}
-        importProgress={importProgress}
+        importProgress={scopedImportProgress}
         onQueueTrack={onQueueTrackFromPlaylist}
+        onTrackUpdated={onTrackUpdated}
         scheduledStartTime={selectedPlaylistStartTime}
         onDropTrackOnPlaylistPanel={onDropTrackOnPlaylistPanelCb}
+        onDropFolderOnPlaylistPanel={onDropFolderOnPlaylistPanelCb}
       />
     );
   }, [
-    importProgress,
     isEditorOpen,
+    scopedImportProgress,
     selectedPlaylist,
     selectedPlaylistStartTime,
     onPlayPlaylistNowCb,
@@ -292,7 +353,7 @@ export function PlaylistManager({
         if (entry.isDirectory) {
           const reader = entry.createReader();
           const all: any[] = [];
-          for (;;) {
+          for (; ;) {
             const batch: any[] = await new Promise((resolve) => {
               reader.readEntries((entries: any[]) => resolve(entries || []));
             });
@@ -366,30 +427,42 @@ export function PlaylistManager({
 
   return (
     <div
-      className="h-full flex bg-background"
+      className="h-full flex bg-background overflow-hidden"
       onDragOver={(e) => {
         const types = Array.from(e.dataTransfer.types);
         if (types.includes('Files')) e.preventDefault();
       }}
       onDrop={handleEmptyAreaDrop}
     >
-      <div
-        className="transition-all duration-200 border-r border-border relative flex-shrink-0"
-        style={{ width: navPanel.width }}
+      <motion.div
+        className="border-r border-border relative flex-shrink-0 backdrop-blur-sm bg-background/40"
+        initial={false}
+        animate={{ width: navPanel.width }}
+        transition={{
+          type: "spring",
+          stiffness: 300,
+          damping: 30,
+          restDelta: 0.1
+        }}
       >
         {playlistNavigatorEl}
-      </div>
+      </motion.div>
 
-      <ResizeHandle onMouseDown={navPanel.handleMouseDown} isResizing={navPanel.isResizing} />
+      <ResizeHandle
+        onMouseDown={navPanel.handleMouseDown}
+        isResizing={navPanel.isResizing}
+        onDoubleClick={() => setIsEditorOpen(false)}
+      />
 
-      <AnimatePresence mode="wait">
+      <AnimatePresence initial={false} mode="popLayout">
         {isEditorOpen && selectedPlaylist && (
           <motion.div
-            initial={{ width: 0, opacity: 0 }}
-            animate={{ width: 'auto', opacity: 1 }}
-            exit={{ width: 0, opacity: 0 }}
-            transition={{ duration: 0.3, ease: 'easeInOut' }}
-            className="flex-1 overflow-hidden"
+            key="editor"
+            initial={{ opacity: 0, x: 10 }}
+            animate={{ opacity: 1, x: 0 }}
+            exit={{ opacity: 0, x: 10 }}
+            transition={{ type: "spring", stiffness: 400, damping: 35 }}
+            className="flex-1 min-w-0 h-full overflow-hidden bg-background"
           >
             {playlistEditorEl}
           </motion.div>
@@ -397,4 +470,4 @@ export function PlaylistManager({
       </AnimatePresence>
     </div>
   );
-}
+});

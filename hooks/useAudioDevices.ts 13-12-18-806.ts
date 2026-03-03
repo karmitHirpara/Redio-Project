@@ -97,7 +97,6 @@ export function useAudioDevices(): UseAudioDevicesResult {
         // id "default" in the UI so we do not collapse everything into the
         // same sink.
         .filter((d) => d.kind === 'audiooutput' && d.deviceId)
-        .filter((d) => d.deviceId !== 'default' && d.deviceId !== 'communications')
         .map((d) => {
           const fallback = d.deviceId === 'default' ? 'System default (OS)' : `Audio output (${d.deviceId.slice(0, 6)})`;
           return { deviceId: d.deviceId, label: d.label || fallback };
@@ -127,10 +126,9 @@ export function useAudioDevices(): UseAudioDevicesResult {
           setFallbackToDefault(false);
           return prev;
         }
-
         const stillExists = normalized.some((d) => d.deviceId === prev);
         setFallbackToDefault(!stillExists);
-        return prev;
+        return stillExists ? prev : 'default';
       });
     } catch (err: any) {
       setError(err?.message || 'Failed to enumerate audio devices');
@@ -164,50 +162,32 @@ export function useAudioDevices(): UseAudioDevicesResult {
       if (!supportsOutputSelection) return;
 
       const targetId = selectedDeviceId || 'default';
-      const filtered = elements.filter((el): el is HTMLAudioElement => !!el);
-      const ordered = [...filtered].sort((a, b) => {
-        const aScore = a.paused ? 1 : 0;
-        const bScore = b.paused ? 1 : 0;
-        return aScore - bScore;
-      });
+      const tasks = elements
+        .filter((el): el is HTMLAudioElement => !!el)
+        .map(async (el) => {
+          const anyEl = el as any;
+          if (typeof anyEl.setSinkId !== 'function') return;
+          try {
+            const wasPlaying = !el.paused;
+            if (wasPlaying) {
+              el.pause();
+            }
 
-      const trySetSink = async (el: HTMLAudioElement) => {
-        const anyEl = el as any;
-        if (typeof anyEl.setSinkId !== 'function') return { ok: false as const, err: null as any };
-        if (String(anyEl.sinkId || 'default') === String(targetId)) return { ok: true as const, err: null as any };
-        try {
-          await anyEl.setSinkId(targetId);
-          const applied = String(anyEl.sinkId || 'default');
-          if (applied !== String(targetId)) {
-            throw new Error(`Audio output did not change (sinkId=${applied})`);
+            await anyEl.setSinkId(targetId);
+
+            if (wasPlaying) {
+              try {
+                await el.play();
+              } catch {
+                // ignore play errors; user interaction may be required
+              }
+            }
+          } catch (err: any) {
+            setError(err?.message || 'Failed to route audio to selected device');
           }
-          return { ok: true as const, err: null as any };
-        } catch (err: any) {
-          return { ok: false as const, err };
-        }
-      };
+        });
 
-      let results: Array<{ ok: true; err: any } | { ok: false; err: any }> = [];
-      for (const el of ordered) {
-        results.push(await trySetSink(el));
-      }
-
-      if (!results.some((r) => r.ok)) {
-        await new Promise((r) => window.setTimeout(r, 250));
-        results = [];
-        for (const el of ordered) {
-          results.push(await trySetSink(el));
-        }
-      }
-
-      if (results.some((r) => r.ok)) {
-        setFallbackToDefault(false);
-        return;
-      }
-
-      const firstErr = results.find((r) => !r.ok)?.err;
-      setFallbackToDefault(true);
-      setError(firstErr?.message || 'Failed to route audio to selected device');
+      await Promise.all(tasks);
     },
     [selectedDeviceId, supportsOutputSelection],
   );

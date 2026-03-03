@@ -18,7 +18,10 @@ interface UseAudioEngineResult {
   secondaryAudioRef: React.RefObject<HTMLAudioElement>;
   currentTime: number;
   duration: number;
+  isInGap: boolean;
+  gapRemainingSeconds: number;
   handleSeek: (value: number[]) => void;
+  handleSoftRestart: () => void;
 }
 
 // Extracted single-audio playback engine used by PlaybackBar. This preserves all
@@ -35,20 +38,14 @@ export function useAudioEngine({
 }: UseAudioEngineOptions): UseAudioEngineResult {
   const [currentTime, setCurrentTime] = useState(0);
   const [duration, setDuration] = useState(0);
+  const [isInGap, setIsInGap] = useState(false);
+  const [gapRemainingSeconds, setGapRemainingSeconds] = useState(0);
 
-  const transitionModeRef = useRef<'gap' | 'crossfade'>(transitionMode);
   const gapSecondsRef = useRef<number>(gapSeconds);
-  const crossfadeSecondsRef = useRef<number>(crossfadeSeconds);
   const nextTrackRef = useRef<Track | null>(nextTrack ?? null);
-  useEffect(() => {
-    transitionModeRef.current = transitionMode;
-  }, [transitionMode]);
   useEffect(() => {
     gapSecondsRef.current = gapSeconds;
   }, [gapSeconds]);
-  useEffect(() => {
-    crossfadeSecondsRef.current = crossfadeSeconds;
-  }, [crossfadeSeconds]);
   useEffect(() => {
     nextTrackRef.current = nextTrack ?? null;
   }, [nextTrack]);
@@ -57,31 +54,28 @@ export function useAudioEngine({
   const secondaryAudioRef = useRef<HTMLAudioElement>(null);
   const lastTrackIdRef = useRef<string | null>(null);
 
-  // Edge fade state: we use a small RAF loop to fade in the first 0.5s of a
-  // new track, and a time-based computation for the last 0.5s.
-  const fadeRafRef = useRef<number | null>(null);
   const endDelayTimeoutRef = useRef<number | null>(null);
+  const pollIntervalRef = useRef<number | null>(null);
   const autoAdvanceRef = useRef(false);
-  const pendingAdvanceUntilMsRef = useRef<number | null>(null);
-  const crossfadeStateRef = useRef<
-    | { phase: 'idle' }
-    | { phase: 'fading'; startedAtMs: number; durationMs: number; outgoingIndex: 0 | 1; incomingIndex: 0 | 1 }
-  >({ phase: 'idle' });
+  const pendingAdvanceRemainingMsRef = useRef<number | null>(null);
+  const pendingAdvanceLastTickMsRef = useRef<number | null>(null);
 
-  const activeIndexRef = useRef<0 | 1>(0);
-
-  const getAudioByIndex = (index: 0 | 1) =>
-    index === 0 ? primaryAudioRef.current : secondaryAudioRef.current;
-
-  const getActiveAudio = () => getAudioByIndex(activeIndexRef.current);
-  const getInactiveAudio = () => getAudioByIndex(activeIndexRef.current === 0 ? 1 : 0);
+  const getActiveAudio = () => primaryAudioRef.current;
+  const getInactiveAudio = () => secondaryAudioRef.current;
 
   const clearPendingAdvance = () => {
     if (endDelayTimeoutRef.current !== null) {
       window.clearTimeout(endDelayTimeoutRef.current);
       endDelayTimeoutRef.current = null;
     }
-    pendingAdvanceUntilMsRef.current = null;
+    if (pollIntervalRef.current !== null) {
+      window.clearInterval(pollIntervalRef.current);
+      pollIntervalRef.current = null;
+    }
+    pendingAdvanceRemainingMsRef.current = null;
+    pendingAdvanceLastTickMsRef.current = null;
+    setIsInGap(false);
+    setGapRemainingSeconds(0);
   };
 
   // Sync audio element with current track. Only reset position when the track
@@ -93,20 +87,12 @@ export function useAudioEngine({
     if (!primaryAudioRef.current || !secondaryAudioRef.current) return;
 
     if (!currentTrack) {
-      if (fadeRafRef.current !== null) {
-        cancelAnimationFrame(fadeRafRef.current);
-        fadeRafRef.current = null;
-      }
-
       clearPendingAdvance();
 
       [primaryAudioRef.current, secondaryAudioRef.current].forEach((audioEl) => {
         if (!audioEl) return;
         audioEl.pause();
         audioEl.removeAttribute('src');
-        try {
-          audioEl.volume = 1;
-        } catch {}
       });
       setCurrentTime(0);
       setDuration(0);
@@ -124,51 +110,13 @@ export function useAudioEngine({
       activeAudio.currentTime = 0;
       setCurrentTime(0);
       setDuration(currentTrack.duration || 0);
-
-      try {
-        activeAudio.volume = 0;
-      } catch {}
+      setIsInGap(false);
+      setGapRemainingSeconds(0);
 
       if (isPlaying) {
         activeAudio.play().catch(() => {
           // Playback might be blocked by browser autoplay policies
         });
-
-        if (typeof document !== 'undefined' && document.hidden) {
-          try {
-            activeAudio.volume = 1;
-          } catch {}
-          return;
-        }
-
-        // Fade in the first ~0.5s of the newly started track.
-        if (fadeRafRef.current !== null) {
-          cancelAnimationFrame(fadeRafRef.current);
-        }
-
-        const fadeDurationMs = 500;
-        const start = performance.now();
-
-        const step = () => {
-          const now = performance.now();
-          const ratio = Math.min(1, Math.max(0, (now - start) / fadeDurationMs));
-          const eased = 1 - Math.cos((ratio * Math.PI) / 2);
-
-          try {
-            activeAudio.volume = eased;
-          } catch {}
-
-          if (ratio < 1 && isPlaying) {
-            fadeRafRef.current = requestAnimationFrame(step);
-          } else {
-            fadeRafRef.current = null;
-            try {
-              activeAudio.volume = 1;
-            } catch {}
-          }
-        };
-
-        fadeRafRef.current = requestAnimationFrame(step);
       }
       return;
     }
@@ -177,16 +125,9 @@ export function useAudioEngine({
       return;
     }
 
-    // If we already performed an internal crossfade into this track, do NOT
-    // reinitialize playback here; just let the UI props catch up.
-    if (autoAdvanceRef.current && currentTrack.id === lastTrackIdRef.current) {
-      autoAdvanceRef.current = false;
-      return;
-    }
-
     // Any subsequent track change (auto-advance, preempt, manual Next):
     // stop both, clear the inactive, and hard-switch the host element to the
-    // new track with full volume and a short fade-in.
+    // new track with no fades and no overlap.
     autoAdvanceRef.current = false;
     clearPendingAdvance();
 
@@ -198,64 +139,25 @@ export function useAudioEngine({
       other.removeAttribute('src');
       try {
         other.volume = 1;
-      } catch {}
+      } catch { }
     }
 
     if (host) {
       host.pause();
       host.src = resolveUploadsUrl(currentTrack.filePath);
       host.currentTime = 0;
-      try {
-        host.volume = 0;
-      } catch {}
 
       if (isPlaying) {
         host.play().catch(() => {
           // Playback might be blocked by browser autoplay policies
         });
-
-        if (typeof document !== 'undefined' && document.hidden) {
-          try {
-            host.volume = 1;
-          } catch {}
-          return;
-        }
-
-        // Fade in the first ~0.5s of the newly started track.
-        if (fadeRafRef.current !== null) {
-          cancelAnimationFrame(fadeRafRef.current);
-        }
-
-        const fadeDurationMs = 500;
-        const start = performance.now();
-
-        const step = () => {
-          const now = performance.now();
-          const ratio = Math.min(1, Math.max(0, (now - start) / fadeDurationMs));
-          const eased = 1 - Math.cos((ratio * Math.PI) / 2);
-
-          try {
-            host.volume = eased;
-          } catch {}
-
-          if (ratio < 1 && isPlaying) {
-            fadeRafRef.current = requestAnimationFrame(step);
-          } else {
-            fadeRafRef.current = null;
-            try {
-              host.volume = 1;
-            } catch {}
-          }
-        };
-
-        fadeRafRef.current = requestAnimationFrame(step);
       }
     }
-
-    activeIndexRef.current = host === primaryAudioRef.current ? 0 : 1;
     lastTrackIdRef.current = currentTrack.id;
     setCurrentTime(0);
     setDuration(currentTrack.duration || 0);
+    setIsInGap(false);
+    setGapRemainingSeconds(0);
   }, [currentTrack, isPlaying, transitionMode, gapSeconds, crossfadeSeconds, nextTrack]);
 
   // Play / pause audio when isPlaying changes
@@ -303,128 +205,18 @@ export function useAudioEngine({
       const effectiveDuration = duration || audio.duration || 0;
       if (!isPlaying) return;
 
-      // True crossfade: start incoming track N seconds before end, fade volumes.
-      const mode = transitionModeRef.current;
-      const cfSeconds = Number.isFinite(crossfadeSecondsRef.current)
-        ? Math.max(0, crossfadeSecondsRef.current)
-        : 0;
+      // Gap-only mode: no fades, no overlap, no crossfade.
+      void effectiveDuration;
+    };
 
-      const next = nextTrackRef.current;
-      if (mode === 'crossfade' && cfSeconds > 0 && effectiveDuration > 0 && next && next.filePath) {
-        const remaining = effectiveDuration - audio.currentTime;
-        const state = crossfadeStateRef.current;
-        if (remaining <= cfSeconds && remaining >= 0 && state.phase === 'idle') {
-          const outgoingIndex = activeIndexRef.current;
-          const incomingIndex = outgoingIndex === 0 ? 1 : 0;
-          const incomingAudio = getAudioByIndex(incomingIndex);
-          const outgoingAudio = getAudioByIndex(outgoingIndex);
-          if (incomingAudio && outgoingAudio) {
-            // Cancel any gap timer that might be queued.
-            if (endDelayTimeoutRef.current !== null) {
-              window.clearTimeout(endDelayTimeoutRef.current);
-              endDelayTimeoutRef.current = null;
-            }
-            pendingAdvanceUntilMsRef.current = null;
+    const handleProgress = (audio: HTMLAudioElement) => {
+      if (audio !== getActiveAudio()) return;
+      // Heartbeat signal
+    };
 
-            // Load + start incoming.
-            incomingAudio.pause();
-            incomingAudio.src = resolveUploadsUrl(next.filePath);
-            incomingAudio.currentTime = 0;
-            try {
-              incomingAudio.volume = 0;
-              outgoingAudio.volume = 1;
-            } catch {}
-            if (isPlaying) {
-              incomingAudio.play().catch(() => {});
-            }
-
-            const durationMs = cfSeconds * 1000;
-            crossfadeStateRef.current = {
-              phase: 'fading',
-              startedAtMs: performance.now(),
-              durationMs,
-              outgoingIndex,
-              incomingIndex,
-            };
-
-            const step = () => {
-              const st = crossfadeStateRef.current;
-              if (st.phase !== 'fading') return;
-              const now = performance.now();
-              const t = Math.min(1, Math.max(0, (now - st.startedAtMs) / st.durationMs));
-              const eased = 1 - Math.cos((t * Math.PI) / 2);
-              const outVol = 1 - eased;
-              const inVol = eased;
-              const outEl = getAudioByIndex(st.outgoingIndex);
-              const inEl = getAudioByIndex(st.incomingIndex);
-              if (outEl) {
-                try {
-                  outEl.volume = outVol;
-                } catch {}
-              }
-              if (inEl) {
-                try {
-                  inEl.volume = inVol;
-                } catch {}
-              }
-
-              if (t < 1 && isPlaying) {
-                fadeRafRef.current = requestAnimationFrame(step);
-                return;
-              }
-
-              // Crossfade complete: swap active audio, stop outgoing, and
-              // advance app queue state.
-              fadeRafRef.current = null;
-              crossfadeStateRef.current = { phase: 'idle' };
-
-              if (outEl) {
-                outEl.pause();
-                outEl.removeAttribute('src');
-                try {
-                  outEl.volume = 1;
-                } catch {}
-              }
-              if (inEl) {
-                try {
-                  inEl.volume = 1;
-                } catch {}
-              }
-
-              activeIndexRef.current = st.incomingIndex;
-              lastTrackIdRef.current = next.id;
-              setCurrentTime(0);
-              setDuration(next.duration || 0);
-
-              autoAdvanceRef.current = true;
-              onNext();
-            };
-
-            if (fadeRafRef.current !== null) {
-              cancelAnimationFrame(fadeRafRef.current);
-            }
-            fadeRafRef.current = requestAnimationFrame(step);
-            return;
-          }
-        }
-      }
-
-      // Fallback gentle tail fade only when not crossfading.
-      const tailFadeWindow = 0.5;
-      if (effectiveDuration > 0 && audio.currentTime > 0) {
-        const remaining = effectiveDuration - audio.currentTime;
-        if (remaining <= tailFadeWindow && remaining >= 0) {
-          const linear = Math.max(0, Math.min(1, remaining / tailFadeWindow));
-          const eased = Math.sin((linear * Math.PI) / 2);
-          try {
-            audio.volume = eased;
-          } catch {}
-        } else if (fadeRafRef.current === null && crossfadeStateRef.current.phase === 'idle') {
-          try {
-            audio.volume = 1;
-          } catch {}
-        }
-      }
+    const handleError = (audio: HTMLAudioElement) => {
+      if (audio !== getActiveAudio()) return;
+      console.error(`[AudioEngine] Playback error:`, audio.error);
     };
 
     const handleLoadedMetadata = (audio: HTMLAudioElement) => {
@@ -437,20 +229,24 @@ export function useAudioEngine({
     const handleEnded = (audio: HTMLAudioElement) => {
       if (audio !== getActiveAudio()) return;
 
-      // If a crossfade is in progress, ended is not authoritative (we may have
-      // already swapped to the incoming track).
-      if (crossfadeStateRef.current.phase !== 'idle') {
-        return;
-      }
-
       clearPendingAdvance();
 
-      setCurrentTime(0);
+      // Keep the playhead pinned at the end during the gap, so the UI doesn't
+      // jump back to 0:00 while we're waiting to advance.
+      try {
+        const effectiveDuration = duration || audio.duration || 0;
+        if (Number.isFinite(effectiveDuration) && effectiveDuration > 0) {
+          setCurrentTime(effectiveDuration);
+        } else {
+          setCurrentTime(0);
+        }
+      } catch {
+        setCurrentTime(0);
+      }
 
-      const mode = transitionModeRef.current;
       const gap = Number.isFinite(gapSecondsRef.current) ? Math.max(0, gapSecondsRef.current) : 0;
       const hasNext = Boolean(nextTrackRef.current);
-      const delayMs = mode === 'gap' && hasNext ? Math.max(0, gap * 1000) : 0;
+      const delayMs = hasNext ? Math.max(0, gap * 1000) : 0;
 
       if (delayMs <= 0) {
         autoAdvanceRef.current = true;
@@ -458,17 +254,59 @@ export function useAudioEngine({
         return;
       }
 
-      pendingAdvanceUntilMsRef.current = Date.now() + delayMs;
-      endDelayTimeoutRef.current = window.setTimeout(() => {
-        endDelayTimeoutRef.current = null;
-        const until = pendingAdvanceUntilMsRef.current;
-        if (until != null && Date.now() < until) {
+      pendingAdvanceRemainingMsRef.current = delayMs;
+      pendingAdvanceLastTickMsRef.current = Date.now();
+      setIsInGap(true);
+      setGapRemainingSeconds(Math.max(0, Math.ceil(delayMs / 1000)));
+    };
+
+    const ensurePoll = () => {
+      if (pollIntervalRef.current !== null) return;
+
+      // Background throttling can pause timeupdate, preventing crossfade start.
+      // Use a small interval as a fallback to drive crossfade/advance decisions.
+      pollIntervalRef.current = window.setInterval(() => {
+        if (!currentTrack) return;
+        const audio = getActiveAudio();
+        if (!audio) return;
+
+        // While in a gap (silence), keep counting down deterministically.
+        // The countdown pauses if playback is paused.
+        const remaining = pendingAdvanceRemainingMsRef.current;
+        if (remaining != null) {
+          const now = Date.now();
+          const lastTick = pendingAdvanceLastTickMsRef.current ?? now;
+          const dt = Math.max(0, now - lastTick);
+          pendingAdvanceLastTickMsRef.current = now;
+
+          if (isPlaying) {
+            const nextRemaining = remaining - dt;
+            pendingAdvanceRemainingMsRef.current = nextRemaining;
+
+            const secondsLeft = Math.max(0, Math.ceil(nextRemaining / 1000));
+            setIsInGap(secondsLeft > 0);
+            setGapRemainingSeconds(secondsLeft);
+
+            if (nextRemaining <= 0) {
+              pendingAdvanceRemainingMsRef.current = null;
+              pendingAdvanceLastTickMsRef.current = null;
+              setIsInGap(false);
+              setGapRemainingSeconds(0);
+              autoAdvanceRef.current = true;
+              onNext();
+            }
+          } else {
+            const secondsLeft = Math.max(0, Math.ceil(remaining / 1000));
+            setIsInGap(secondsLeft > 0);
+            setGapRemainingSeconds(secondsLeft);
+          }
           return;
         }
-        pendingAdvanceUntilMsRef.current = null;
-        autoAdvanceRef.current = true;
-        onNext();
-      }, delayMs);
+
+        if (isPlaying) {
+          handleTimeUpdate(audio);
+        }
+      }, 250);
     };
 
     const attach = (audio: HTMLAudioElement | null) => {
@@ -476,13 +314,22 @@ export function useAudioEngine({
       const onTimeUpdate = () => handleTimeUpdate(audio);
       const onLoadedMetadata = () => handleLoadedMetadata(audio);
       const onEnded = () => handleEnded(audio);
+      const onProgress = () => handleProgress(audio);
+      const onError = () => handleError(audio);
+
       audio.addEventListener('timeupdate', onTimeUpdate);
       audio.addEventListener('loadedmetadata', onLoadedMetadata);
       audio.addEventListener('ended', onEnded);
+      audio.addEventListener('progress', onProgress);
+      audio.addEventListener('error', onError);
+
+      ensurePoll();
       return () => {
         audio.removeEventListener('timeupdate', onTimeUpdate);
         audio.removeEventListener('loadedmetadata', onLoadedMetadata);
         audio.removeEventListener('ended', onEnded);
+        audio.removeEventListener('progress', onProgress);
+        audio.removeEventListener('error', onError);
       };
     };
 
@@ -492,6 +339,10 @@ export function useAudioEngine({
     return () => {
       detachA?.();
       detachB?.();
+      if (pollIntervalRef.current !== null) {
+        window.clearInterval(pollIntervalRef.current);
+        pollIntervalRef.current = null;
+      }
     };
   }, [onNext, duration, currentTrack, isPlaying]);
 
@@ -513,14 +364,6 @@ export function useAudioEngine({
       if (!isPlaying || !currentTrack) return;
       const audio = getActiveAudio();
       if (!audio) return;
-
-      const pendingUntil = pendingAdvanceUntilMsRef.current;
-      if (pendingUntil != null && Date.now() >= pendingUntil) {
-        pendingAdvanceUntilMsRef.current = null;
-        autoAdvanceRef.current = true;
-        onNext();
-        return;
-      }
 
       if (!audio.paused) return;
       audio.play().catch(() => {
@@ -544,7 +387,7 @@ export function useAudioEngine({
       if (!audio.paused && audio.volume === 0) {
         try {
           audio.volume = 1;
-        } catch {}
+        } catch { }
       }
     };
 
@@ -562,11 +405,33 @@ export function useAudioEngine({
     };
   }, [isPlaying, currentTrack]);
 
+  const handleSoftRestart = () => {
+    const audio = getActiveAudio();
+    if (!audio || !currentTrack) return;
+
+    console.log('[AudioEngine] Soft restart triggered');
+    const lastPos = audio.currentTime;
+    const currentSrc = audio.src;
+
+    audio.pause();
+    audio.src = '';
+    audio.load();
+    audio.src = currentSrc;
+    audio.currentTime = lastPos;
+
+    if (isPlaying) {
+      audio.play().catch(err => console.error('[AudioEngine] Soft restart play failed:', err));
+    }
+  };
+
   return {
     primaryAudioRef,
     secondaryAudioRef,
     currentTime,
     duration,
+    isInGap,
+    gapRemainingSeconds,
     handleSeek,
+    handleSoftRestart,
   };
 }

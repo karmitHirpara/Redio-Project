@@ -4,9 +4,12 @@ import { v4 as uuidv4 } from 'uuid';
 import path from 'path';
 import fs from 'fs';
 import crypto from 'crypto';
+import { spawn } from 'child_process';
+import ffmpegPath from 'ffmpeg-static';
 import { fileURLToPath } from 'url';
 import { dirname } from 'path';
 import { query, run, get } from '../config/database.js';
+import { emitQueueUpdated } from './queue.js';
 import { isS3UploadStorage, s3PutFile, s3ObjectExists, s3DeleteObject, s3CopyObject, s3KeyFromUploadsPath } from '../services/objectStorage.js';
 
 const router = express.Router();
@@ -147,6 +150,27 @@ const sha256File = (absolutePath) =>
     stream.on('end', () => resolve(hash.digest('hex')));
   });
 
+/**
+ * Extracts duration from an audio file using ffmpeg.
+ */
+const getDuration = (filePath) =>
+  new Promise((resolve) => {
+    const ff = spawn(ffmpegPath, ['-i', filePath]);
+    let output = '';
+    ff.stderr.on('data', (data) => { output += data.toString(); });
+    ff.on('close', () => {
+      const match = output.match(/Duration: (\d+):(\d+):(\d+\.\d+)/);
+      if (match) {
+        const h = parseInt(match[1]);
+        const m = parseInt(match[2]);
+        const s = parseFloat(match[3]);
+        resolve(Math.round(h * 3600 + m * 60 + s));
+      } else {
+        resolve(0);
+      }
+    });
+  });
+
 const uploadConfig = {
   storage: hashingDiskStorage,
   fileFilter: (req, file, cb) => {
@@ -165,10 +189,21 @@ if (Number.isFinite(MAX_UPLOAD_BYTES) && MAX_UPLOAD_BYTES > 0) {
 
 const upload = multer(uploadConfig);
 
-// Get all tracks
+// Get all tracks with pagination support
 router.get('/', async (req, res) => {
   try {
-    const tracks = await query('SELECT * FROM tracks ORDER BY date_added DESC');
+    const limit = parseInt(req.query.limit, 10) || 0;
+    const offset = parseInt(req.query.offset, 10) || 0;
+
+    let sql = 'SELECT * FROM tracks ORDER BY date_added DESC';
+    const params = [];
+
+    if (limit > 0) {
+      sql += ' LIMIT ? OFFSET ?';
+      params.push(limit, offset);
+    }
+
+    const tracks = await query(sql, params);
     res.json(tracks);
   } catch (error) {
     res.status(500).json({ error: error.message });
@@ -352,6 +387,191 @@ router.get('/:id', async (req, res) => {
   }
 });
 
+// Edit an existing track by trimming audio in-place (local disk only)
+router.post('/:id/edit', async (req, res) => {
+  try {
+    if (useS3) {
+      return res.status(400).json({ error: 'Edit Song is not supported in S3 storage mode' });
+    }
+
+    const id = String(req.params.id || '');
+    const startSecondsRaw = req.body?.startSeconds;
+    const endSecondsRaw = req.body?.endSeconds;
+    const segmentsRaw = req.body?.segments;
+
+    if (!id) return res.status(400).json({ error: 'Missing track id' });
+    const hasSegments = Array.isArray(segmentsRaw) && segmentsRaw.length > 0;
+    const hasTrim = startSecondsRaw !== undefined || endSecondsRaw !== undefined;
+    if (!hasSegments && !hasTrim) {
+      return res.status(400).json({ error: 'Provide segments or startSeconds/endSeconds' });
+    }
+
+    const track = await get('SELECT * FROM tracks WHERE id = ?', [id]);
+    if (!track) {
+      return res.status(404).json({ error: 'Track not found' });
+    }
+
+    const rel = String(track.file_path || '');
+    if (!rel) {
+      return res.status(400).json({ error: 'Track has no file_path' });
+    }
+
+    const absInput = resolveUploadPath(rel);
+    if (!fs.existsSync(absInput)) {
+      return res.status(404).json({ error: 'Audio file not found on disk' });
+    }
+
+    if (!ffmpegPath) {
+      return res.status(500).json({ error: 'FFmpeg binary not available' });
+    }
+
+    const ext = path.extname(absInput).toLowerCase();
+    const tmpOut = `${absInput}.tmp-${uuidv4()}${ext || ''}`;
+
+    // Encode settings by extension. We re-encode for consistent trimming.
+    const encodeArgs = (() => {
+      if (ext === '.mp3') return ['-c:a', 'libmp3lame', '-q:a', '2'];
+      if (ext === '.wav') return ['-c:a', 'pcm_s16le'];
+      if (ext === '.ogg') return ['-c:a', 'libvorbis', '-q:a', '5'];
+      if (ext === '.flac') return ['-c:a', 'flac'];
+      if (ext === '.m4a' || ext === '.mp4' || ext === '.aac') return ['-c:a', 'aac', '-b:a', '192k'];
+      // Fallback: let ffmpeg choose
+      return [];
+    })();
+
+    let args;
+    let durationSeconds;
+
+    if (hasSegments) {
+      const segments = (segmentsRaw || [])
+        .map((s) => ({
+          startSeconds: Number(s?.startSeconds),
+          endSeconds: Number(s?.endSeconds),
+        }))
+        .filter((s) => Number.isFinite(s.startSeconds) && Number.isFinite(s.endSeconds))
+        .map((s) => ({
+          startSeconds: Math.max(0, s.startSeconds),
+          endSeconds: Math.max(0, s.endSeconds),
+        }))
+        .map((s) => ({
+          startSeconds: Math.min(s.startSeconds, s.endSeconds),
+          endSeconds: Math.max(s.startSeconds, s.endSeconds),
+        }))
+        .filter((s) => s.endSeconds > s.startSeconds)
+        .sort((a, b) => a.startSeconds - b.startSeconds);
+
+      if (segments.length === 0) {
+        return res.status(400).json({ error: 'segments is empty or invalid' });
+      }
+
+      durationSeconds = segments.reduce((sum, s) => sum + (s.endSeconds - s.startSeconds), 0);
+
+      // Build filter_complex to trim each segment, reset timestamps, then concat.
+      // Note: audio only
+      const parts = segments
+        .map((s, idx) => {
+          const a = `[0:a]atrim=start=${s.startSeconds}:end=${s.endSeconds},asetpts=PTS-STARTPTS[a${idx}]`;
+          return a;
+        })
+        .join(';');
+
+      const concatInputs = segments.map((_, idx) => `[a${idx}]`).join('');
+      const filter = `${parts};${concatInputs}concat=n=${segments.length}:v=0:a=1[aout]`;
+
+      args = [
+        '-y',
+        '-i',
+        absInput,
+        '-filter_complex',
+        filter,
+        '-map',
+        '[aout]',
+        ...encodeArgs,
+        tmpOut,
+      ];
+    } else {
+      const start = Number(startSecondsRaw);
+      const end = Number(endSecondsRaw);
+      if (!Number.isFinite(start) || start < 0) {
+        return res.status(400).json({ error: 'startSeconds must be a number >= 0' });
+      }
+      if (!Number.isFinite(end) || end <= 0) {
+        return res.status(400).json({ error: 'endSeconds must be a number > 0' });
+      }
+      if (end <= start) {
+        return res.status(400).json({ error: 'endSeconds must be greater than startSeconds' });
+      }
+
+      durationSeconds = Math.max(0, end - start);
+
+      // Use -ss after -i for accuracy.
+      args = [
+        '-y',
+        '-i',
+        absInput,
+        '-ss',
+        String(start),
+        '-t',
+        String(durationSeconds),
+        ...encodeArgs,
+        tmpOut,
+      ];
+    }
+
+    await new Promise((resolve, reject) => {
+      const child = spawn(ffmpegPath, args, { windowsHide: true });
+      let stderr = '';
+      child.stderr.on('data', (d) => {
+        stderr += d.toString();
+      });
+      child.on('error', (e) => reject(e));
+      child.on('close', (code) => {
+        if (code === 0) return resolve();
+        reject(new Error(stderr || `ffmpeg exited with code ${code}`));
+      });
+    });
+
+    if (!fs.existsSync(tmpOut)) {
+      return res.status(500).json({ error: 'Failed to write trimmed audio file' });
+    }
+
+    const stat = fs.statSync(tmpOut);
+    const newHash = await sha256File(tmpOut);
+    const newDuration = Math.max(0, Math.round(Number(durationSeconds || 0)));
+
+    // Atomic replace
+    const backup = `${absInput}.bak-${uuidv4()}`;
+    fs.renameSync(absInput, backup);
+    try {
+      fs.renameSync(tmpOut, absInput);
+    } catch (e) {
+      try {
+        fs.renameSync(backup, absInput);
+      } catch {
+        // ignore
+      }
+      throw e;
+    }
+    try {
+      if (fs.existsSync(backup)) fs.unlinkSync(backup);
+    } catch {
+      // ignore
+    }
+
+    await run('UPDATE tracks SET duration = ?, size = ?, hash = ? WHERE id = ?', [
+      newDuration,
+      stat.size,
+      newHash,
+      id,
+    ]);
+
+    const updated = await get('SELECT * FROM tracks WHERE id = ?', [id]);
+    return res.json(updated);
+  } catch (error) {
+    return res.status(500).json({ error: error.message });
+  }
+});
+
 // Upload track
 router.post('/upload', (req, res, next) => {
   upload.single('file')(req, res, (err) => {
@@ -419,7 +639,13 @@ router.post('/upload', (req, res, next) => {
     }
 
     const trackId = uuidv4();
-    const { name, artist, duration } = req.body;
+    let { name, artist, duration } = req.body;
+
+    // MISSION-CRITICAL: If duration is missing, detect it on the backend.
+    // This offloads work from the frontend and ensures persistence.
+    if (!duration || parseInt(duration) === 0) {
+      duration = await getDuration(uploadedPath);
+    }
 
     if (useS3) {
       const key = s3KeyFromUploadsPath(req.file.filename);
@@ -493,6 +719,9 @@ router.delete('/:id', async (req, res) => {
 
     // Delete from database (cascades to playlist_tracks and queue)
     await run('DELETE FROM tracks WHERE id = ?', [req.params.id]);
+
+    // Broadcast updated queue state since track deletion cascades to queue
+    await emitQueueUpdated(req.app);
 
     res.json({ message: 'Track deleted successfully' });
   } catch (error) {

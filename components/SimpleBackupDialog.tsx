@@ -4,8 +4,9 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle } from './ui/dialog';
 import { ScrollArea } from './ui/scroll-area';
 import { Checkbox } from './ui/checkbox';
 import { RadioGroup, RadioGroupItem } from './ui/radio-group';
+import { Progress } from './ui/progress';
 import { toast } from 'sonner';
-import { backupAPI, type DataCategory } from '../services/api';
+import { ApiError, backupAPI, type DataCategory } from '../services/api';
 import { Database, Upload, Download, CheckCircle, XCircle } from 'lucide-react';
 
 interface SimpleBackupDialogProps {
@@ -18,10 +19,44 @@ export function SimpleBackupDialog({ open, onOpenChange }: SimpleBackupDialogPro
   const [validationResult, setValidationResult] = useState<any>(null);
   const [showValidationDialog, setShowValidationDialog] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const progressIntervalRef = useRef<number | null>(null);
+  const statusPollIntervalRef = useRef<number | null>(null);
+  const [activeOperation, setActiveOperation] = useState<'create' | 'upload' | 'restore' | null>(null);
+  const [progressValue, setProgressValue] = useState<number>(0);
+  const [progressLabel, setProgressLabel] = useState<string>('');
   const [dailyEnabled, setDailyEnabled] = useState(false);
   const [backupDirectoryPath, setBackupDirectoryPath] = useState<string>('');
   const [backupTimeOfDay, setBackupTimeOfDay] = useState<string>('02:00 AM');
   const [savingDailyConfig, setSavingDailyConfig] = useState(false);
+
+  const stopProgressTimers = () => {
+    if (progressIntervalRef.current != null) {
+      window.clearInterval(progressIntervalRef.current);
+      progressIntervalRef.current = null;
+    }
+    if (statusPollIntervalRef.current != null) {
+      window.clearInterval(statusPollIntervalRef.current);
+      statusPollIntervalRef.current = null;
+    }
+  };
+
+  const startSimulatedProgress = (label: string, startAt: number, cap: number) => {
+    stopProgressTimers();
+    setProgressLabel(label);
+    setProgressValue(startAt);
+    progressIntervalRef.current = window.setInterval(() => {
+      setProgressValue((prev) => {
+        const next = prev + Math.max(1, Math.round((cap - prev) * 0.08));
+        return next >= cap ? cap : next;
+      });
+    }, 220);
+  };
+
+  useEffect(() => {
+    return () => {
+      stopProgressTimers();
+    };
+  }, []);
 
   const categories = useMemo(
     () =>
@@ -128,26 +163,67 @@ export function SimpleBackupDialog({ open, onOpenChange }: SimpleBackupDialogPro
   };
 
   const handleCreateBackup = async () => {
+    setActiveOperation('create');
     setLoading(true);
     try {
-      // Open file picker to select folder
-      const dirHandle = await (window as any).showDirectoryPicker({
-        mode: 'readwrite'
-      });
-      
-      // Create backup
-      const result = await backupAPI.create({ description: 'Manual backup' });
-      
-      // Get the backup file
+      setProgressLabel('Initializing backup…');
+      setProgressValue(0);
+      statusPollIntervalRef.current = window.setInterval(() => {
+        backupAPI
+          .getStatus()
+          .then((status) => {
+            const p = status?.currentJob?.progress;
+            const step = status?.currentJob?.currentStep;
+            if (typeof step === 'string' && step.trim()) {
+              setProgressLabel(step);
+            }
+            if (typeof p === 'number' && Number.isFinite(p)) {
+              setProgressValue(Math.round(p));
+            }
+          })
+          .catch(() => {
+          });
+      }, 500);
+
+      const w = window as any;
+      if (w?.redioBackup?.selectDirectory) {
+        const res = await w.redioBackup.selectDirectory();
+        if (!res?.ok || res?.canceled || !res?.path) {
+          return;
+        }
+
+        const outDir = String(res.path);
+        const result = await backupAPI.create({ description: 'Manual backup', includeAudioFiles: true, outputDir: outDir });
+        stopProgressTimers();
+        setProgressValue(100);
+        toast.success(`Backup saved to ${outDir}/${result.backup.filename}`);
+        onOpenChange(false);
+        return;
+      }
+
+      // Browser fallback: File System Access API download.
+      const dirHandle = await (window as any).showDirectoryPicker({ mode: 'readwrite' });
+
+      const result = await backupAPI.create({ description: 'Manual backup', includeAudioFiles: true });
+
       const backupResponse = await fetch(`/api/backup/download/${result.backup.filename}`);
+      if (!backupResponse.ok) {
+        let details = '';
+        try {
+          details = await backupResponse.text();
+        } catch {
+        }
+        throw new Error(details || `Download failed (${backupResponse.status})`);
+      }
       const blob = await backupResponse.blob();
-      
-      // Save to selected folder
+
       const fileHandle = await dirHandle.getFileHandle(result.backup.filename, { create: true });
       const writable = await fileHandle.createWritable();
       await writable.write(blob);
       await writable.close();
-      
+
+      stopProgressTimers();
+      setProgressValue(100);
       toast.success(`Backup saved to ${result.backup.filename}`);
       onOpenChange(false);
     } catch (error: any) {
@@ -155,8 +231,12 @@ export function SimpleBackupDialog({ open, onOpenChange }: SimpleBackupDialogPro
         // User cancelled folder selection
         return;
       }
-      toast.error('Failed to create backup');
+      const message = String(error?.message || '').trim();
+      toast.error(message ? `Failed to create backup: ${message}` : 'Failed to create backup');
     } finally {
+      stopProgressTimers();
+      setActiveOperation(null);
+      setProgressLabel('');
       setLoading(false);
     }
   };
@@ -164,25 +244,30 @@ export function SimpleBackupDialog({ open, onOpenChange }: SimpleBackupDialogPro
   const handleUpload = async (event: React.ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
     if (!file) return;
-    
-    if (!file.name.toLowerCase().endsWith('.sqlite')) {
-      toast.error('Only .sqlite files are allowed');
+
+    const lower = file.name.toLowerCase();
+    if (!(lower.endsWith('.sqlite') || lower.endsWith('.tar.gz') || lower.endsWith('.tgz'))) {
+      toast.error('Only .sqlite or .tar.gz backup files are allowed');
       return;
     }
-    
+
+    setActiveOperation('upload');
     setLoading(true);
-    
+
     try {
+      startSimulatedProgress('Uploading…', 10, 80);
+
       // Upload file
       console.log('Starting upload for file:', file.name);
       const result = await backupAPI.upload(file);
       console.log('Upload result:', result);
-      
+
       // Validate database structure
+      startSimulatedProgress('Validating…', 82, 95);
       const validation = await backupAPI.validate(result.filename);
       console.log('Validation result:', validation);
       setValidationResult(validation);
-      
+
       if (validation.isValid) {
         toast.success('Database structure is valid. You can now restore.');
         setShowValidationDialog(true);
@@ -194,6 +279,10 @@ export function SimpleBackupDialog({ open, onOpenChange }: SimpleBackupDialogPro
       console.error('Upload error:', error);
       toast.error(`Failed to upload or validate database: ${error.message || 'Unknown error'}`);
     } finally {
+      stopProgressTimers();
+      setProgressValue(0);
+      setProgressLabel('');
+      setActiveOperation(null);
       setLoading(false);
       if (fileInputRef.current) {
         fileInputRef.current.value = '';
@@ -212,9 +301,11 @@ export function SimpleBackupDialog({ open, onOpenChange }: SimpleBackupDialogPro
       toast.error('Select at least one component to restore');
       return;
     }
-    
+
+    setActiveOperation('restore');
     setLoading(true);
     try {
+      startSimulatedProgress('Restoring…', 10, 90);
       const result = await backupAPI.restore(validationResult.filename, {
         conflictResolution: restoreMode === 'merge' ? 'merge' : 'overwrite',
         selectiveRestore: {
@@ -222,13 +313,24 @@ export function SimpleBackupDialog({ open, onOpenChange }: SimpleBackupDialogPro
           mode: 'include',
         },
       });
-      
+
+      stopProgressTimers();
+      setProgressValue(100);
       toast.success('Restore completed');
       setShowValidationDialog(false);
       onOpenChange(false);
-    } catch (error) {
-      toast.error('Failed to restore database');
+    } catch (error: any) {
+      const message =
+        error instanceof ApiError
+          ? error.message
+          : String(error?.message || error?.error || '').trim();
+
+      toast.error(message ? `Failed to restore database: ${message}` : 'Failed to restore database');
     } finally {
+      stopProgressTimers();
+      setProgressValue(0);
+      setProgressLabel('');
+      setActiveOperation(null);
       setLoading(false);
     }
   };
@@ -243,7 +345,7 @@ export function SimpleBackupDialog({ open, onOpenChange }: SimpleBackupDialogPro
               Backup & Restore
             </DialogTitle>
           </DialogHeader>
-          
+
           <div className="p-5 space-y-4">
             {/* Automatic Daily Backup */}
             <div className="p-4 rounded-lg border border-border bg-muted/20 space-y-3">
@@ -276,8 +378,11 @@ export function SimpleBackupDialog({ open, onOpenChange }: SimpleBackupDialogPro
               <div className="space-y-3">
                 <div>
                   <div className="text-[11px] text-muted-foreground mb-1">Backup folder</div>
-                  <div className="flex items-center gap-2">
-                    <div className="flex-1 min-w-0 px-3 py-2 rounded-md border border-border bg-background text-[11px] text-foreground/90 truncate">
+                  <div className="flex items-center gap-2 min-w-0 max-w-full overflow-hidden">
+                    <div
+                      className="flex-1 min-w-0 px-3 py-2 rounded-md border border-border bg-background text-[11px] text-foreground/90 truncate"
+                      title={backupDirectoryPath || ''}
+                    >
                       {backupDirectoryPath || 'Loading...'}
                     </div>
                     <Button
@@ -285,7 +390,7 @@ export function SimpleBackupDialog({ open, onOpenChange }: SimpleBackupDialogPro
                       variant="outline"
                       onClick={() => void chooseBackupDirectory()}
                       disabled={savingDailyConfig}
-                      className="h-7 px-2 text-[11px]"
+                      className="h-7 px-2 text-[11px] shrink-0"
                     >
                       Change
                     </Button>
@@ -326,15 +431,21 @@ export function SimpleBackupDialog({ open, onOpenChange }: SimpleBackupDialogPro
               <p className="text-xs text-muted-foreground mb-3">
                 Generate a full database backup and save it to your chosen folder.
               </p>
-              <Button 
-                onClick={handleCreateBackup} 
+              {loading && activeOperation === 'create' && (
+                <div className="mb-3 space-y-2">
+                  <div className="text-[11px] text-muted-foreground">{progressLabel || 'Creating backup…'}</div>
+                  <Progress value={progressValue} />
+                </div>
+              )}
+              <Button
+                onClick={handleCreateBackup}
                 disabled={loading}
                 className="w-full h-9"
               >
                 {loading ? 'Creating Backup...' : 'Create Backup'}
               </Button>
             </div>
-            
+
             {/* Upload Database Section */}
             <div className="p-4 rounded-lg border border-border bg-muted/20">
               <h3 className="font-medium text-foreground mb-1 flex items-center gap-2 text-sm">
@@ -342,12 +453,18 @@ export function SimpleBackupDialog({ open, onOpenChange }: SimpleBackupDialogPro
                 Upload Database
               </h3>
               <p className="text-xs text-muted-foreground mb-3">
-                Upload a .sqlite file to restore. Database structure will be validated.
+                Upload a .sqlite or .tar.gz backup file to restore. Database structure will be validated.
               </p>
+              {loading && activeOperation === 'upload' && (
+                <div className="mb-3 space-y-2">
+                  <div className="text-[11px] text-muted-foreground">{progressLabel || 'Uploading…'}</div>
+                  <Progress value={progressValue} />
+                </div>
+              )}
               <input
                 ref={fileInputRef}
                 type="file"
-                accept=".sqlite"
+                accept=".sqlite,.tar.gz,.tgz,application/x-sqlite3,application/gzip,application/x-gzip,application/x-tgz"
                 onChange={handleUpload}
                 className="hidden"
                 id="database-upload"
@@ -361,12 +478,12 @@ export function SimpleBackupDialog({ open, onOpenChange }: SimpleBackupDialogPro
                 {loading ? 'Uploading...' : 'Upload Database'}
               </Button>
             </div>
-            
-            
+
+
           </div>
         </DialogContent>
       </Dialog>
-      
+
       {/* Validation Result Dialog */}
       <Dialog open={showValidationDialog} onOpenChange={setShowValidationDialog}>
         <DialogContent className="max-w-md bg-gradient-to-br from-slate-900 via-slate-800 to-slate-900 text-white border-slate-700 shadow-2xl">
@@ -384,7 +501,7 @@ export function SimpleBackupDialog({ open, onOpenChange }: SimpleBackupDialogPro
               Database Validation
             </DialogTitle>
           </DialogHeader>
-          
+
           {validationResult && (
             <div className="space-y-4">
               {validationResult.isValid ? (
@@ -463,23 +580,31 @@ export function SimpleBackupDialog({ open, onOpenChange }: SimpleBackupDialogPro
                   </RadioGroup>
                 </div>
               )}
-              
+
               <div className="flex justify-end gap-3 pt-4 border-t border-slate-700">
-                <Button 
-                  variant="outline" 
+                <Button
+                  variant="outline"
                   onClick={() => setShowValidationDialog(false)}
                   className="border-slate-600/50 text-slate-300 hover:bg-slate-700/50 hover:text-white"
                 >
                   Cancel
                 </Button>
                 {validationResult?.isValid && (
-                  <Button 
-                    onClick={handleRestore}
-                    disabled={loading}
-                    className="bg-gradient-to-r from-green-600 to-green-700 hover:from-green-700 hover:to-green-800 text-white shadow-lg hover:shadow-xl transition-all duration-300"
-                  >
-                    {loading ? 'Restoring...' : 'Restore Database'}
-                  </Button>
+                  <div className="flex-1">
+                    {/* {loading && activeOperation === 'restore' && (
+                      <div className="mb-2 space-y-2">
+                        <div className="text-xs text-slate-300">{progressLabel || 'Restoring…'}</div>
+                        <Progress value={progressValue} className="bg-green-900/30" />
+                      </div>
+                    )} */}
+                    <Button
+                      onClick={handleRestore}
+                      disabled={loading}
+                      className="bg-gradient-to-r from-green-600 to-green-700 hover:from-green-700 hover:to-green-800 text-white shadow-lg hover:shadow-xl transition-all duration-300"
+                    >
+                      {loading ? 'Restoring...' : 'Restore Database'}
+                    </Button>
+                  </div>
                 )}
               </div>
             </div>

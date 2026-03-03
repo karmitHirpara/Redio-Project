@@ -49,8 +49,69 @@ router.put('/settings', async (req, res) => {
       settings[row.key] = row.value;
     }
 
+    // If any playback-related settings were updated, broadcast an event
+    if (keys.some(k => k.startsWith('playback.'))) {
+      const broadcastEvent = req.app.get('broadcastEvent');
+      if (typeof broadcastEvent === 'function') {
+        broadcastEvent({ type: 'playback-state-updated', settings });
+      }
+    }
+
     res.json({ ok: true, settings });
   } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+router.delete('/settings/factory-reset', async (req, res) => {
+  try {
+    // Begin transaction for atomic reset
+    await run('BEGIN TRANSACTION');
+
+    // Clear all data from tables but preserve schemas
+    const tables = [
+      'tracks', 'playlists', 'playlist_tracks', 'queue', 
+      'schedules', 'playback_history', 'settings', 'folders', 
+      'folder_tracks', 'tracks_fts'
+    ];
+
+    for (const table of tables) {
+      try {
+        await run(`DELETE FROM ${table}`);
+      } catch (error) {
+        // Ignore errors for tables that might not exist (e.g., tracks_fts)
+        if (!error.message.includes('no such table')) {
+          throw error;
+        }
+      }
+    }
+
+    // Reset sequences and auto-increment counters
+    try {
+      await run('DELETE FROM sqlite_sequence');
+    } catch (error) {
+      // Ignore if sequence table doesn't exist
+    }
+
+    // Commit transaction
+    await run('COMMIT');
+
+    // Trigger vacuum to optimize database after clearing
+    // Run this asynchronously after response to avoid blocking
+    setImmediate(() => {
+      run('VACUUM').catch(() => {
+        // Ignore vacuum errors
+      });
+    });
+
+    res.json({ ok: true, message: 'Factory reset completed successfully' });
+  } catch (error) {
+    // Rollback on error
+    try {
+      await run('ROLLBACK');
+    } catch (rollbackError) {
+      // Ignore rollback errors
+    }
     res.status(500).json({ error: error.message });
   }
 });

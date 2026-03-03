@@ -1,8 +1,9 @@
 // TrackRow.tsx (modified)
-import { memo } from 'react';
+import { memo, useState } from 'react';
 import { Music, Plus } from 'lucide-react';
 import { Track, Playlist } from '../types';
 import { formatDuration, formatFileSize, cn } from '../lib/utils';
+import { EditSongDialog } from './EditSongDialog';
 import {
   ContextMenu,
   ContextMenuContent,
@@ -29,6 +30,7 @@ interface TrackRowProps {
   onKeyDown?: (e: React.KeyboardEvent) => void;
   getDragPayload?: () => { trackIds: string[]; sourceFolderId?: string };
   startTimeLabel?: string; // optional: scheduled start time for this track
+  onTrackUpdated?: (track: Track) => void;
 }
 
 export const TrackRow = memo(function TrackRow({
@@ -47,16 +49,17 @@ export const TrackRow = memo(function TrackRow({
   onKeyDown,
   getDragPayload,
   startTimeLabel,
+  onTrackUpdated,
 }: TrackRowProps) {
+  const [editOpen, setEditOpen] = useState(false);
   const rowClasses = cn(
-    'group flex items-center gap-2 w-full transition-all duration-200 ease-out outline-none',
-    'px-2 py-1 rounded-sm hover:shadow-md',
+    'group flex items-center gap-2 w-full transition-all duration-150 ease-out outline-none border border-transparent select-none',
+    'px-2 py-0.5 rounded-sm h-8',
     isSelected
-      ? 'bg-sky-200 text-sky-950 dark:bg-sky-700/70 dark:text-white shadow-sm border border-sky-300/50 dark:border-sky-600/50'
+      ? 'bg-primary/15 text-foreground dark:bg-primary/20 shadow-[inset_0_0_0_1px_rgba(var(--primary),0.2)]'
       : isFocused
-        ? 'bg-sky-100 text-foreground dark:bg-sky-800/50 dark:text-foreground shadow-sm border border-sky-200/50 dark:border-sky-700/30'
-        : 'bg-transparent hover:bg-sky-200/55 text-foreground dark:hover:bg-sky-700/35 dark:text-foreground hover:border-sky-300/35 dark:hover:border-sky-500/25 border border-transparent hover:shadow-sm',
-    isRecentlyMoved && !isSelected && 'bg-sky-50 dark:bg-sky-800/30 border border-sky-200/40 dark:border-sky-700/25'
+        ? 'bg-accent/50 text-foreground dark:bg-accent/30 shadow-[inset_0_0_0_1px_rgba(var(--primary),0.3)]'
+        : 'hover:bg-accent/40 dark:hover:bg-accent/20 hover:shadow-sm'
   );
 
   return (
@@ -107,12 +110,13 @@ export const TrackRow = memo(function TrackRow({
           }}
           onPointerDown={(e) => {
             if (onSelect) {
-              // If modifier key is pressed, or if item is NOT selected, select immediately.
-              // This allows "Range Select" or "Toggle" or "Select New" to happen on mouse down.
-              // If item IS selected and no modifier, we wait for Click (MouseUp) to clear others,
-              // so that Dragging the selection doesn't clear it.
-              if (e.metaKey || e.ctrlKey || e.shiftKey || !isSelected) {
-                onSelect(track.id, e);
+              // Only allow selection from the main row if NO multi-select modifiers are active.
+              // Multi-select (Ctrl/Cmd/Shift) is now restricted to the music icon specifically
+              // to prevent accidental mode switching when clicking text or buttons.
+              if (!e.metaKey && !e.ctrlKey && !e.shiftKey) {
+                if (!isSelected) {
+                  onSelect(track.id, e);
+                }
               }
             }
           }}
@@ -127,19 +131,37 @@ export const TrackRow = memo(function TrackRow({
           onBlur={() => { }}
           onKeyDown={onKeyDown}
         >
-          <Music className="w-3.5 h-3.5 text-current opacity-70 flex-shrink-0" />
+          <Music
+            className={cn(
+              "w-3.5 h-3.5 flex-shrink-0 transition-colors cursor-pointer",
+              isSelected ? "text-primary" : "text-muted-foreground opacity-70"
+            )}
+            onPointerDown={(e) => {
+              // The Music icon is the dedicated handle for multi-selection (Ctrl/Cmd/Shift).
+              if (onSelect && (e.metaKey || e.ctrlKey || e.shiftKey)) {
+                e.stopPropagation();
+                onSelect(track.id, e);
+              }
+            }}
+          />
 
-          <div className="flex-1 min-w-0 grid grid-cols-[minmax(0,1fr)_56px_80px] items-center gap-1.5 select-text">
-            <div className="truncate text-current text-xs font-medium">{track.name}</div>
-            <div className="text-[10px] text-current text-right tabular-nums opacity-90">
+          <div className="flex-1 min-w-0 grid grid-cols-[minmax(0,1fr)_48px_72px] items-center gap-2 select-text px-1">
+            <div className={cn(
+              "truncate text-xs font-medium",
+              isSelected ? "text-foreground" : "text-foreground/90"
+            )}>
+              {track.name}
+            </div>
+            <div className="text-[10px] text-muted-foreground/80 text-right tabular-nums">
               {formatDuration(track.duration)}
             </div>
-            <div className="text-[10px] text-current text-right tabular-nums opacity-80">
+            <div className="text-[10px] text-muted-foreground/70 text-right tabular-nums overflow-hidden text-ellipsis">
               {startTimeLabel ? startTimeLabel : formatFileSize(track.size)}
             </div>
           </div>
 
           <button
+            onPointerDown={(e) => e.stopPropagation()}
             onClick={(e) => {
               e.stopPropagation();
               onAddToQueue(track);
@@ -154,6 +176,14 @@ export const TrackRow = memo(function TrackRow({
 
       <ContextMenuContent>
         <ContextMenuItem onClick={() => onAddToQueue(track)}>Add to Queue</ContextMenuItem>
+
+        <ContextMenuItem
+          onClick={() => {
+            setEditOpen(true);
+          }}
+        >
+          Edit Song
+        </ContextMenuItem>
 
         <ContextMenuSub>
           <ContextMenuSubTrigger>Add to Playlist</ContextMenuSubTrigger>
@@ -177,6 +207,13 @@ export const TrackRow = memo(function TrackRow({
           </ContextMenuItem>
         )}
       </ContextMenuContent>
+
+      <EditSongDialog
+        open={editOpen}
+        onOpenChange={setEditOpen}
+        track={track}
+        onTrackUpdated={onTrackUpdated}
+      />
     </ContextMenu>
   );
 });

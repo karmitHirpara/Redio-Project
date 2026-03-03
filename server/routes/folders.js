@@ -164,23 +164,32 @@ router.delete('/:id', async (req, res) => {
   }
 });
 
-// Get tracks for a folder
+// Get tracks for a folder with pagination support
 router.get('/:id/tracks', async (req, res) => {
   try {
+    const limit = parseInt(req.query.limit, 10) || 0;
+    const offset = parseInt(req.query.offset, 10) || 0;
+
     const folder = await get('SELECT * FROM folders WHERE id = ?', [req.params.id]);
     if (!folder) {
       return res.status(404).json({ error: 'Folder not found' });
     }
 
-    const tracks = await query(
-      `SELECT t.*
+    let sql = `
+       SELECT t.*
        FROM tracks t
        JOIN folder_tracks ft ON t.id = ft.track_id
        WHERE ft.folder_id = ?
-       ORDER BY t.date_added DESC`,
-      [req.params.id]
-    );
+       ORDER BY t.date_added DESC
+    `;
+    const params = [req.params.id];
 
+    if (limit > 0) {
+      sql += ' LIMIT ? OFFSET ?';
+      params.push(limit, offset);
+    }
+
+    const tracks = await query(sql, params);
     res.json(tracks);
   } catch (error) {
     res.status(500).json({ error: error.message });

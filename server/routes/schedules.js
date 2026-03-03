@@ -36,6 +36,19 @@ router.post('/', async (req, res) => {
       return res.status(404).json({ error: 'Playlist not found' });
     }
 
+    // Prevent duplicate pending schedules for the same playlist
+    const existing = await get(
+      `SELECT id
+       FROM schedules
+       WHERE playlist_id = ?
+         AND status = 'pending'
+       LIMIT 1`,
+      [playlistId],
+    );
+    if (existing?.id) {
+      return res.status(409).json({ error: 'This playlist already has a pending schedule' });
+    }
+
     // Validate schedule type
     if (type === 'datetime' && !dateTime) {
       return res.status(400).json({ error: 'Date/time is required for datetime schedules' });

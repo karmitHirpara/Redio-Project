@@ -47,6 +47,59 @@ function ensureCoreSchema(database) {
       )
     `);
 
+    database.run(
+      `CREATE VIRTUAL TABLE IF NOT EXISTS tracks_fts USING fts5(
+        track_id UNINDEXED,
+        name,
+        artist,
+        original_filename,
+        tokenize='unicode61 remove_diacritics 2'
+      )`,
+      (ftsErr) => {
+        if (ftsErr) {
+          console.warn('FTS5 not available; library search will use fallback', ftsErr.message);
+          return;
+        }
+
+        database.run(
+          `CREATE TRIGGER IF NOT EXISTS tracks_fts_ai AFTER INSERT ON tracks BEGIN
+            INSERT INTO tracks_fts(track_id, name, artist, original_filename)
+            VALUES (new.id, new.name, new.artist, new.original_filename);
+          END;`,
+        );
+
+        database.run(
+          `CREATE TRIGGER IF NOT EXISTS tracks_fts_ad AFTER DELETE ON tracks BEGIN
+            DELETE FROM tracks_fts WHERE track_id = old.id;
+          END;`,
+        );
+
+        database.run(
+          `CREATE TRIGGER IF NOT EXISTS tracks_fts_au AFTER UPDATE ON tracks BEGIN
+            DELETE FROM tracks_fts WHERE track_id = old.id;
+            INSERT INTO tracks_fts(track_id, name, artist, original_filename)
+            VALUES (new.id, new.name, new.artist, new.original_filename);
+          END;`,
+        );
+
+        database.get('SELECT COUNT(1) AS c FROM tracks_fts', (countErr, row) => {
+          if (countErr) return;
+          const c = Number(row?.c || 0);
+          if (c > 0) return;
+
+          database.run(
+            `INSERT INTO tracks_fts(track_id, name, artist, original_filename)
+             SELECT id, name, artist, original_filename FROM tracks`,
+            (fillErr) => {
+              if (fillErr) {
+                console.warn('Failed to backfill tracks_fts', fillErr.message);
+              }
+            },
+          );
+        });
+      },
+    );
+
     database.run(`
       CREATE TABLE IF NOT EXISTS playlists (
         id TEXT PRIMARY KEY,
@@ -263,8 +316,13 @@ function ensureCoreSchema(database) {
       { sql: 'CREATE INDEX IF NOT EXISTS idx_queue_track_id ON queue (track_id)', table: 'queue' },
       { sql: 'CREATE INDEX IF NOT EXISTS idx_queue_order ON queue (order_position)', table: 'queue' },
       { sql: 'CREATE INDEX IF NOT EXISTS idx_history_played_at ON playback_history (played_at)', table: 'playback_history' },
+      { sql: 'CREATE INDEX IF NOT EXISTS idx_history_track_id ON playback_history (track_id)', table: 'playback_history' },
       { sql: 'CREATE INDEX IF NOT EXISTS idx_schedules_status_date_time ON schedules (status, date_time)', table: 'schedules' },
       { sql: 'CREATE INDEX IF NOT EXISTS idx_schedules_queue_song ON schedules (queue_song_id)', table: 'schedules' },
+      { sql: 'CREATE INDEX IF NOT EXISTS idx_tracks_hash ON tracks (hash)', table: 'tracks' },
+      { sql: 'CREATE INDEX IF NOT EXISTS idx_tracks_date_added ON tracks (date_added)', table: 'tracks' },
+      { sql: 'CREATE INDEX IF NOT EXISTS idx_tracks_name ON tracks (name COLLATE NOCASE)', table: 'tracks' },
+      { sql: 'CREATE INDEX IF NOT EXISTS idx_tracks_artist ON tracks (artist COLLATE NOCASE)', table: 'tracks' },
     ];
 
     database.all("SELECT name FROM sqlite_master WHERE type='table'", (e, rows) => {

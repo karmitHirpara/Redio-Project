@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react';
-import { Clock, AlertCircle, ChevronDown, ChevronRight, Download, Trash, History, Music } from 'lucide-react';
+import { Clock, AlertCircle, ChevronDown, ChevronRight, Download, Trash, History } from 'lucide-react';
 import type { Cell, Row } from 'exceljs';
 import {
   Dialog,
@@ -62,18 +62,33 @@ export function HistoryDialog({ open, onOpenChange }: HistoryDialogProps) {
     });
   }, []);
 
+  const istDateKeyFormatter = useMemo(() => {
+    return new Intl.DateTimeFormat('en-CA', {
+      timeZone: 'Asia/Kolkata',
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+    });
+  }, []);
+
+  const [hasMore, setHasMore] = useState(true);
+  const [offset, setOffset] = useState(0);
+  const PAGE_SIZE = 100;
+
   useEffect(() => {
     if (!open) return;
     let cancelled = false;
 
-    const load = async (showSpinner: boolean) => {
+    const loadInitial = async () => {
       setError(null);
       try {
-        if (!cancelled && showSpinner) setLoading(true);
-        const data: HistoryEntry[] = await historyAPI.get(100);
+        if (!cancelled && !hasLoadedOnce) setLoading(true);
+        const data: HistoryEntry[] = await historyAPI.get(PAGE_SIZE, 0);
         if (!cancelled) {
           setEntries(data);
-          if (showSpinner && !hasLoadedOnce) {
+          setOffset(data.length);
+          setHasMore(data.length === PAGE_SIZE);
+          if (!hasLoadedOnce) {
             setHasLoadedOnce(true);
           }
         }
@@ -82,55 +97,38 @@ export function HistoryDialog({ open, onOpenChange }: HistoryDialogProps) {
           setError(err.message || 'Failed to load history');
         }
       } finally {
-        if (!cancelled && showSpinner) setLoading(false);
+        if (!cancelled) setLoading(false);
       }
     };
 
-    // Initial load when dialog opens: show spinner only if we haven't loaded before
-    load(!hasLoadedOnce);
-    // Poll periodically while open so history stays in sync as songs play, without spinner
-    const intervalId = window.setInterval(() => load(false), 5000);
+    loadInitial();
+
+    const onHistoryChanged = () => {
+      void loadInitial();
+    };
+    window.addEventListener('redio:history-changed', onHistoryChanged);
 
     return () => {
       cancelled = true;
-      window.clearInterval(intervalId);
+      window.removeEventListener('redio:history-changed', onHistoryChanged);
     };
   }, [open, hasLoadedOnce]);
 
-  useEffect(() => {
-    if (hasLoadedOnce) return;
-    let cancelled = false;
-    const prefetch = async () => {
-      try {
-        const data: HistoryEntry[] = await historyAPI.get(100);
-        if (!cancelled) {
-          setEntries(data);
-          setHasLoadedOnce(true);
-        }
-      } catch {
-        // ignore background prefetch errors
-      }
-    };
+  const loadMore = async () => {
+    if (loading || !hasMore) return;
 
-    const idle = (window as any).requestIdleCallback as
-      | ((cb: () => void, opts?: { timeout: number }) => number)
-      | undefined;
-    const cancelIdle = (window as any).cancelIdleCallback as ((id: number) => void) | undefined;
-
-    if (idle) {
-      const id = idle(() => void prefetch(), { timeout: 1500 });
-      return () => {
-        cancelled = true;
-        if (cancelIdle) cancelIdle(id);
-      };
+    try {
+      setLoading(true);
+      const data: HistoryEntry[] = await historyAPI.get(PAGE_SIZE, offset);
+      setEntries(prev => [...prev, ...data]);
+      setOffset(prev => prev + data.length);
+      setHasMore(data.length === PAGE_SIZE);
+    } catch (err: any) {
+      setError(err.message || 'Failed to load more history');
+    } finally {
+      setLoading(false);
     }
-
-    const id = window.setTimeout(() => void prefetch(), 350);
-    return () => {
-      cancelled = true;
-      window.clearTimeout(id);
-    };
-  }, [hasLoadedOnce]);
+  };
 
   const formatTime = (iso: string) => {
     const d = new Date(iso);
@@ -139,31 +137,20 @@ export function HistoryDialog({ open, onOpenChange }: HistoryDialogProps) {
 
   const formatDateKey = (iso: string) => {
     const d = new Date(iso);
-    const year = d.getFullYear();
-    const month = String(d.getMonth() + 1).padStart(2, '0');
-    const day = String(d.getDate()).padStart(2, '0');
-    // YYYY-MM-DD in the user's local calendar, so "today" groups correctly
-    return `${year}-${month}-${day}`;
+    return istDateKeyFormatter.format(d);
   };
 
   const formatDateLabel = (dateKey: string) => {
+    const todayKey = istDateKeyFormatter.format(new Date());
+    const y = new Date();
+    y.setDate(y.getDate() - 1);
+    const yesterdayKey = istDateKeyFormatter.format(y);
+
+    if (dateKey === todayKey) return 'Today';
+    if (dateKey === yesterdayKey) return 'Yesterday';
+
     const [year, month, day] = dateKey.split('-').map(Number);
     const d = new Date(year, (month || 1) - 1, day || 1);
-
-    // Safari style: "Today", "Yesterday", or "October 12, 2023"
-    const today = new Date();
-    const isToday = d.getDate() === today.getDate() &&
-      d.getMonth() === today.getMonth() &&
-      d.getFullYear() === today.getFullYear();
-
-    const yesterday = new Date(today);
-    yesterday.setDate(yesterday.getDate() - 1);
-    const isYesterday = d.getDate() === yesterday.getDate() &&
-      d.getMonth() === yesterday.getMonth() &&
-      d.getFullYear() === yesterday.getFullYear();
-
-    if (isToday) return 'Today';
-    if (isYesterday) return 'Yesterday';
 
     return d.toLocaleDateString('en-US', {
       weekday: 'long',
@@ -171,6 +158,17 @@ export function HistoryDialog({ open, onOpenChange }: HistoryDialogProps) {
       day: 'numeric',
       year: 'numeric'
     });
+  };
+
+  const getExportFilename = (dateKey: string) => {
+    const [year, month, day] = dateKey.split('-').map(Number);
+    const d = new Date(year, (month || 1) - 1, day || 1);
+    
+    return d.toLocaleDateString('en-US', {
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit'
+    }).replace(/\//g, '-');
   };
 
   const groupedByDate = useMemo(() => {
@@ -197,7 +195,13 @@ export function HistoryDialog({ open, onOpenChange }: HistoryDialogProps) {
 
   // Restore and save scroll position
   const handleScroll = (e: React.UIEvent<HTMLDivElement>) => {
-    persistentScrollTop = e.currentTarget.scrollTop;
+    const { scrollTop, scrollHeight, clientHeight } = e.currentTarget;
+    persistentScrollTop = scrollTop;
+
+    // Load more when user is 200px from the bottom
+    if (scrollHeight - scrollTop - clientHeight < 200) {
+      void loadMore();
+    }
   };
 
   useEffect(() => {
@@ -348,24 +352,38 @@ export function HistoryDialog({ open, onOpenChange }: HistoryDialogProps) {
     }
   };
 
-  const handleAction = async (entry: HistoryEntry, action: 'putBackToLibrary' | 'addToQueue' | 'delete') => {
+  const handleAction = async (entry: HistoryEntry, action: 'addToQueue' | 'delete') => {
     try {
       if (action === 'delete') {
         await historyAPI.delete(entry.id);
         setEntries(prev => prev.filter(e => e.id !== entry.id));
         toast.success('Removed from history');
+        window.dispatchEvent(new Event('redio:history-changed'));
         return;
       }
 
-      const data = await historyAPI.action(entry.id, action === 'addToQueue' ? 'addToQueue' : 'putBackToLibrary');
-
-      if (action === 'addToQueue') {
-        toast.success('Added back to queue');
+      const data = await historyAPI.action(entry.id, 'addToQueue');
+      if (data?.message) {
+        toast.success(data.message);
       } else {
-        toast.success(data?.message || 'Track is in library');
+        toast.success('Action completed');
       }
-    } catch (err: any) {
-      toast.error(err.message || 'Action failed');
+      window.dispatchEvent(new Event('redio:history-changed'));
+    } catch (error: any) {
+      console.error('Failed to perform history action', error);
+      toast.error(error?.message || 'Failed to perform action');
+    }
+  };
+
+  const handleDeleteDay = async (dayEntries: HistoryEntry[]) => {
+    try {
+      await Promise.all(dayEntries.map(entry => historyAPI.delete(entry.id)));
+      setEntries(prev => prev.filter(e => !dayEntries.some(de => de.id === e.id)));
+      toast.success(`Removed ${dayEntries.length} entries from history`);
+      window.dispatchEvent(new Event('redio:history-changed'));
+    } catch (error: any) {
+      console.error('Failed to delete day entries', error);
+      toast.error(error?.message || 'Failed to remove entries');
     }
   };
 
@@ -375,19 +393,11 @@ export function HistoryDialog({ open, onOpenChange }: HistoryDialogProps) {
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="sm:max-w-2xl w-[95vw] gap-0 p-0 overflow-hidden bg-background border-border shadow-xl rounded-lg">
-        <DialogHeader className="px-5 py-3.5 border-b border-border bg-muted/40 flex flex-row items-center justify-between space-y-0">
-          <div className="flex flex-col">
-            <DialogTitle className="flex items-center gap-2 text-base font-semibold tracking-tight text-foreground">
-              <History className="w-4 h-4 text-primary" />
-              History
-            </DialogTitle>
-          </div>
-          <div className="flex items-center gap-2 px-6">
-            <span className="text-[10px] text-muted-foreground bg-muted px-2 py-0.5 rounded-full border border-border">
-              {totalEntries} tracks
-            </span>
-            
-          </div>
+        <DialogHeader className="px-5 py-3.5 border-b border-border bg-muted/40">
+          <DialogTitle className="flex items-center gap-2 text-base font-semibold tracking-tight text-foreground">
+            <History className="w-4 h-4 text-primary" />
+            History
+          </DialogTitle>
         </DialogHeader>
 
         <div className="flex-1 overflow-hidden bg-background">
@@ -420,31 +430,45 @@ export function HistoryDialog({ open, onOpenChange }: HistoryDialogProps) {
                   const label = formatDateLabel(dateKey);
 
                   return (
-                    <div key={dateKey} className="group">
-                      <div
-                        className="sticky top-0 z-10 flex items-center justify-between px-4 py-2 bg-muted/90 backdrop-blur-sm border-b border-border/60 text-xs font-medium text-muted-foreground cursor-pointer hover:bg-muted transition-colors"
-                        onClick={() => toggleDate(dateKey)}
-                      >
-                        <div className="flex items-center gap-2">
-                          <span className={cn("transition-transform duration-200 text-muted-foreground/60", expanded ? "rotate-90" : "")}>
-                            <ChevronRight className="w-3.5 h-3.5" />
-                          </span>
-                          <span className="font-semibold text-foreground uppercase tracking-wide text-[11px]">{label}</span>
-                        </div>
+                    <>
+                      <ContextMenu key={dateKey}>
+                        <ContextMenuTrigger>
+                          <div
+                            className="sticky top-0 z-10 flex items-center justify-between gap-3 px-4 py-2 bg-muted/90 backdrop-blur-sm border-b border-border/60 text-xs font-medium text-muted-foreground cursor-pointer hover:bg-muted transition-colors max-w-full overflow-hidden"
+                            onClick={() => toggleDate(dateKey)}
+                          >
+                            <div className="flex items-center gap-2 min-w-0">
+                              <span className={cn("transition-transform duration-200 text-muted-foreground/60", expanded ? "rotate-90" : "")}>
+                                <ChevronRight className="w-3.5 h-3.5" />
+                              </span>
+                              <span className="font-semibold text-foreground uppercase tracking-wide text-[11px] truncate">{label}</span>
+                            </div>
 
-                        <Button
-                          variant="ghost"
-                          size="sm"
-                          className="h-5 gap-1.5 px-2 text-[10px] text-muted-foreground/70 hover:text-primary hover:bg-primary/5"
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            void downloadXlsx(`History ${label}.xlsx`, dayEntries);
-                          }}
-                        >
-                          <Download className="w-3 h-3" />
-                          <span className="">Download Excel</span>
-                        </Button>
-                      </div>
+                            <Button
+                              variant="ghost"
+                              size="sm"
+                              className="h-5 gap-1.5 px-2 text-[10px] text-muted-foreground/70 hover:text-primary hover:bg-primary/5 shrink-0 max-w-[160px]"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                const filename = `History ${getExportFilename(dateKey)}.xlsx`;
+                                void downloadXlsx(filename, dayEntries);
+                              }}
+                            >
+                              <Download className="w-3 h-3" />
+                              <span className="truncate">Download</span>
+                            </Button>
+                          </div>
+                        </ContextMenuTrigger>
+                        <ContextMenuContent>
+                          <ContextMenuItem
+                            onClick={() => handleDeleteDay(dayEntries)}
+                            className="text-destructive focus:text-destructive gap-2"
+                          >
+                            <Trash className="w-4 h-4" />
+                            Remove All
+                          </ContextMenuItem>
+                        </ContextMenuContent>
+                      </ContextMenu>
 
                       <AnimatePresence initial={false}>
                         {expanded && (
@@ -461,6 +485,7 @@ export function HistoryDialog({ open, onOpenChange }: HistoryDialogProps) {
                                 const startTime = start.toLocaleTimeString('en-IN', {
                                   hour: '2-digit',
                                   minute: '2-digit',
+                                  second: '2-digit',
                                   hour12: true
                                 });
 
@@ -471,6 +496,7 @@ export function HistoryDialog({ open, onOpenChange }: HistoryDialogProps) {
                                     {
                                       hour: '2-digit',
                                       minute: '2-digit',
+                                      second: '2-digit',
                                       hour12: true,
                                     },
                                   )
@@ -479,25 +505,25 @@ export function HistoryDialog({ open, onOpenChange }: HistoryDialogProps) {
                                 return (
                                   <ContextMenu key={entry.id}>
                                     <ContextMenuTrigger>
-                                      <div className="flex items-center gap-3 px-4 py-2.5 hover:bg-accent/40 dark:hover:bg-accent/20 transition-colors text-sm group/item">
+                                      <div className="flex items-center gap-3 px-4 py-2.5 hover:bg-accent/40 dark:hover:bg-accent/20 transition-colors text-sm group/item max-w-full overflow-hidden">
                                         <div className="flex-1 min-w-0">
-                                          <div className="font-medium text-foreground truncate text-[13px] leading-tight group-hover/item:text-primary transition-colors">
+                                          <div
+                                            className="font-medium text-foreground text-[13px] leading-tight group-hover/item:text-primary transition-colors line-clamp-2"
+                                            title={entry.track_name || 'Unknown Track'}
+                                          >
                                             {entry.track_name || 'Unknown Track'}
-                                          </div>
-                                          <div className="text-[11px] text-muted-foreground truncate mt-0.5">
-                                            {entry.track_artist || 'Unknown Artist'}
                                           </div>
                                         </div>
 
-                                        <div className="flex flex-col items-end gap-0.5 text-[10px] font-mono text-muted-foreground/70 min-w-[7.5rem]">
-                                          <span className="flex items-center justify-end gap-1.5 w-full" title="Starting time">
-                                            <span className="opacity-70">Start</span>
-                                            <span>{startTime}</span>
-                                          </span>
-                                          <span className="flex items-center justify-end gap-1.5 w-full" title="Ending time">
-                                            <span className="opacity-70">End</span>
-                                            <span>{endTime}</span>
-                                          </span>
+                                        <div className="flex flex-col items-end gap-1 text-[10px] font-mono text-muted-foreground/70 min-w-[8rem] shrink-0 border-l border-border/20 pl-3">
+                                          <div className="flex items-center justify-end gap-2 w-full text-right" title="Starting time">
+                                            <span className="opacity-50 text-[9px] uppercase tracking-tighter">Start</span>
+                                            <span className="text-foreground/90">{startTime}</span>
+                                          </div>
+                                          <div className="flex items-center justify-end gap-2 w-full text-right" title="Ending time">
+                                            <span className="opacity-50 text-[9px] uppercase tracking-tighter">End</span>
+                                            <span className="text-foreground/90">{endTime}</span>
+                                          </div>
                                         </div>
                                       </div>
                                     </ContextMenuTrigger>
@@ -505,10 +531,6 @@ export function HistoryDialog({ open, onOpenChange }: HistoryDialogProps) {
                                       <ContextMenuItem onClick={() => handleAction(entry, 'addToQueue')} className="gap-2">
                                         <History className="w-4 h-4" />
                                         Play Again
-                                      </ContextMenuItem>
-                                      <ContextMenuItem onClick={() => handleAction(entry, 'putBackToLibrary')} className="gap-2">
-                                        <Music className="w-4 h-4" />
-                                        Show in Library
                                       </ContextMenuItem>
                                       <ContextMenuItem
                                         onClick={() => handleAction(entry, 'delete')}
@@ -525,7 +547,7 @@ export function HistoryDialog({ open, onOpenChange }: HistoryDialogProps) {
                           </motion.div>
                         )}
                       </AnimatePresence>
-                    </div>
+                    </>
                   );
                 })}
               </div>

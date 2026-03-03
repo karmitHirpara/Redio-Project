@@ -1,23 +1,25 @@
 import express from 'express';
 import { v4 as uuidv4 } from 'uuid';
 import { query, run, get } from '../config/database.js';
+import { emitQueueUpdated } from './queue.js';
 
 const router = express.Router();
 
-// Get recent playback history
+// Get recent playback history with pagination support
 router.get('/', async (req, res) => {
   try {
     const limit = parseInt(req.query.limit, 10) || 100;
+    const offset = parseInt(req.query.offset, 10) || 0;
     const history = await query(
       `SELECT * FROM (
          SELECT h.*, t.name as track_name, t.artist as track_artist
          FROM playback_history h
          LEFT JOIN tracks t ON h.track_id = t.id
          ORDER BY h.played_at DESC
-         LIMIT ?
+         LIMIT ? OFFSET ?
        ) recent
-       ORDER BY played_at ASC`,
-      [limit]
+       ORDER BY played_at DESC`,
+      [limit, offset]
     );
     res.json(history);
   } catch (error) {
@@ -104,9 +106,9 @@ router.delete('/', async (req, res) => {
   try {
     const result = await run('DELETE FROM playback_history');
     console.log(`Cleared ${result.changes} history entries`);
-    res.json({ 
+    res.json({
       message: `Cleared ${result.changes} history entries`,
-      count: result.changes 
+      count: result.changes
     });
   } catch (error) {
     console.error('Error clearing history:', error);
@@ -138,20 +140,26 @@ router.post('/:id/actions', async (req, res) => {
 
     switch (action) {
       case 'addToQueue': {
-        // Reuse queue insert semantics
+        // Append track to the end of the queue
         const track = await get('SELECT * FROM tracks WHERE id = ?', [entry.track_id]);
         if (!track) {
           return res.status(404).json({ error: 'Track not found for this history entry' });
         }
         const { v4: uuid } = await import('uuid');
         const queueId = uuid();
+
         const maxPos = await get('SELECT MAX(order_position) as max FROM queue');
         const position = (maxPos?.max ?? -1) + 1;
+
         await run(
           `INSERT INTO queue (id, track_id, from_playlist, order_position)
            VALUES (?, ?, ?, ?)`,
           [queueId, entry.track_id, null, position]
         );
+
+        // Broadcast updated queue state
+        await emitQueueUpdated(req.app);
+
         return res.json({ message: 'Added to queue' });
       }
       case 'deleteFromAll': {

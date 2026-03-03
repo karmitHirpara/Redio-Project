@@ -15,6 +15,8 @@ interface QueuePanelProps {
   now?: Date | null;
   playlists: Playlist[];
   onAddQueueItemToPlaylist: (item: QueueItem, playlistId: string) => void;
+  pendingNextQueueItemId?: string | null;
+  gapRemainingSeconds?: number;
   locked?: boolean;
   selectedQueueItemId?: string | null;
   onSelectQueueItem?: (id: string) => void;
@@ -30,6 +32,8 @@ export function QueuePanel({
   now,
   playlists,
   onAddQueueItemToPlaylist,
+  pendingNextQueueItemId = null,
+  gapRemainingSeconds,
   locked = false,
   selectedQueueItemId = null,
   onSelectQueueItem,
@@ -148,6 +152,7 @@ export function QueuePanel({
             {queue.map((item, index) => {
               const entry = timingByQueueItemId.get(item.id);
               const isCurrent = Boolean(currentQueueItemId && item.id === currentQueueItemId);
+              const isPendingNext = Boolean(pendingNextQueueItemId && item.id === pendingNextQueueItemId);
               const np = isCurrent ? timing?.nowPlaying : undefined;
 
               const startTime = (isCurrent ? np?.start : entry?.start) ?? undefined;
@@ -158,7 +163,10 @@ export function QueuePanel({
                   key={item.id}
                   item={item}
                   isPlaying={item.id === currentQueueItemId}
-                  isNext={index === 0 && item.id !== currentQueueItemId}
+                  isNext={isPendingNext || (index === 0 && item.id !== currentQueueItemId)}
+                  pendingGapRemainingSeconds={
+                    isPendingNext && typeof gapRemainingSeconds === 'number' ? gapRemainingSeconds : undefined
+                  }
                   onRemoveFromQueue={onRemoveFromQueue}
                   onSelect={(id) => {
                     if (locked) return;

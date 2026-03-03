@@ -4,7 +4,7 @@ import { query, run, get } from '../config/database.js';
 
 const router = express.Router();
 
-const emitQueueUpdated = async (app) => {
+export const emitQueueUpdated = async (app) => {
   const broadcastEvent = app.get('broadcastEvent');
   if (typeof broadcastEvent !== 'function') return;
 

@@ -1,5 +1,6 @@
 import { query, run, get } from '../config/database.js';
 import crypto from 'crypto';
+import { validateTrack } from './preFlightScan.js';
 
 // Helper to emit the latest queue over WebSocket, mirroring queue.js behaviour
 async function emitQueueUpdated(app) {
@@ -44,7 +45,7 @@ function emitPlaylistLocked(app, playlistId, locked) {
 }
 
 // Atomically fire a single datetime schedule by ID.
-// - Appends its playlist tracks to the queue
+// - Appends its playlist tracks to the queue (skipping invalid ones)
 // - Marks the schedule as completed
 // - Emits queue-updated over WebSocket
 export async function fireScheduleAtomically(scheduleId, app) {
@@ -82,6 +83,41 @@ export async function fireScheduleAtomically(scheduleId, app) {
       return true;
     }
 
+    // MISSION-CRITICAL: Pre-validate tracks before adding to queue
+    const validTracks = [];
+    for (const track of tracks) {
+      const validation = await validateTrack(track.id);
+      if (validation.ok) {
+        validTracks.push(track);
+      } else {
+        console.error(`[Scheduler] Skipping invalid track "${track.name}" (${track.id}): ${validation.error}`);
+        // Log to broadcast so UI can show warning if needed
+        const broadcastEvent = app.get('broadcastEvent');
+        if (typeof broadcastEvent === 'function') {
+          broadcastEvent({
+            type: 'schedule-track-skipped',
+            scheduleId,
+            trackId: track.id,
+            trackName: track.name,
+            error: validation.error
+          });
+        }
+      }
+    }
+
+    if (validTracks.length === 0) {
+      console.warn(`[Scheduler] Schedule ${scheduleId} results in 0 valid tracks. Completing without enqueuing.`);
+      const nowIso = new Date().toISOString();
+      await run(
+        `UPDATE schedules
+         SET status = 'completed', updated_at = ?, fired_at = ?, completed_at = ?
+         WHERE id = ?`,
+        [nowIso, nowIso, nowIso, scheduleId],
+      );
+      await run('COMMIT');
+      return true;
+    }
+
     // If requested, lock the playlist right as it starts.
     if (schedule.lock_playlist) {
       await run('UPDATE playlists SET locked = 1 WHERE id = ?', [schedule.playlist_id]);
@@ -90,11 +126,11 @@ export async function fireScheduleAtomically(scheduleId, app) {
     // Prepend scheduled tracks to the top of the queue while preserving
     // everything that was already queued.
     // Shift the existing queue block down by N positions.
-    await run('UPDATE queue SET order_position = order_position + ?', [tracks.length]);
+    await run('UPDATE queue SET order_position = order_position + ?', [validTracks.length]);
 
     // Insert scheduled tracks at positions 0..N-1
     let cursor = 0;
-    for (const track of tracks) {
+    for (const track of validTracks) {
       const queueId = crypto.randomUUID();
       await run(
         `INSERT INTO queue (id, track_id, from_playlist, order_position)

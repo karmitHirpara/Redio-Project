@@ -21,6 +21,7 @@ interface PlaylistNavigatorProps {
   scheduledPlaylists: ScheduledPlaylist[];
   onDeleteSchedule: (scheduleId: string) => void | Promise<void>;
   onDropTrackOnPlaylistHeader?: (playlistId: string, trackIds: string[]) => void;
+  onDropFolderOnPlaylistHeader?: (playlistId: string, folderIds: string[]) => void;
   onDropFilesOnPlaylistHeader?: (playlistId: string, files: File[]) => void;
 }
 
@@ -37,6 +38,7 @@ export function PlaylistNavigator({
   scheduledPlaylists,
   onDeleteSchedule,
   onDropTrackOnPlaylistHeader,
+  onDropFolderOnPlaylistHeader,
   onDropFilesOnPlaylistHeader,
 }: PlaylistNavigatorProps) {
   const [searchQuery, setSearchQuery] = useState('');
@@ -133,14 +135,14 @@ export function PlaylistNavigator({
             const nextSchedule = nextScheduleByPlaylist[playlist.id];
             const scheduleLabel = nextSchedule?.dateTime
               ? nextSchedule.dateTime.toLocaleString('en-IN', {
-                  timeZone: 'Asia/Kolkata',
-                  month: 'short',
-                  day: '2-digit',
-                  hour: '2-digit',
-                  minute: '2-digit',
-                  second: '2-digit',
-                  hour12: true,
-                })
+                timeZone: 'Asia/Kolkata',
+                month: 'short',
+                day: '2-digit',
+                hour: '2-digit',
+                minute: '2-digit',
+                second: '2-digit',
+                hour12: true,
+              })
               : undefined;
 
             return (
@@ -154,9 +156,9 @@ export function PlaylistNavigator({
                   reduceMotion
                     ? undefined
                     : {
-                        duration: 0.16,
-                        ease: 'easeOut',
-                      }
+                      duration: 0.16,
+                      ease: 'easeOut',
+                    }
                 }
                 className={cn(
                   'relative rounded-md',
@@ -166,8 +168,9 @@ export function PlaylistNavigator({
                   const types = Array.from(e.dataTransfer.types);
                   const hasTrackId = types.includes('application/x-track-id');
                   const hasTracks = types.includes('application/x-redio-tracks');
+                  const hasFolder = types.includes('application/x-redio-folder');
                   const hasFiles = types.includes('Files');
-                  if ((hasTrackId && onDropTrackOnPlaylistHeader) || (hasTracks && onDropTrackOnPlaylistHeader) || (hasFiles && onDropFilesOnPlaylistHeader)) {
+                  if ((hasTrackId && onDropTrackOnPlaylistHeader) || (hasTracks && onDropTrackOnPlaylistHeader) || (hasFolder && onDropFolderOnPlaylistHeader) || (hasFiles && onDropFilesOnPlaylistHeader)) {
                     e.preventDefault();
                     if (dragOverPlaylistId !== playlist.id) {
                       setDragOverPlaylistId(playlist.id);
@@ -183,7 +186,23 @@ export function PlaylistNavigator({
                   const types = Array.from(e.dataTransfer.types);
                   const hasTrackId = types.includes('application/x-track-id');
                   const hasTracks = types.includes('application/x-redio-tracks');
+                  const hasFolder = types.includes('application/x-redio-folder');
                   const hasFiles = types.includes('Files');
+
+                  if (hasFolder && onDropFolderOnPlaylistHeader) {
+                    try {
+                      const payload = JSON.parse(e.dataTransfer.getData('application/x-redio-folder') || '{}');
+                      const folderIds = payload.folderIds || (payload.folderId ? [payload.folderId] : []);
+                      if (folderIds.length === 0) return;
+                      e.preventDefault();
+                      e.stopPropagation();
+                      setDragOverPlaylistId(null);
+                      onDropFolderOnPlaylistHeader(playlist.id, folderIds);
+                      return;
+                    } catch {
+                      // ignore
+                    }
+                  }
 
                   if (hasTracks && onDropTrackOnPlaylistHeader) {
                     try {
@@ -259,7 +278,7 @@ export function PlaylistNavigator({
                       if (entry.isDirectory) {
                         const reader = entry.createReader();
                         const all: any[] = [];
-                        for (;;) {
+                        for (; ;) {
                           const batch: any[] = await new Promise((resolve) => {
                             reader.readEntries((entries: any[]) => resolve(entries || []));
                           });

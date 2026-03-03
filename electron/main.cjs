@@ -107,6 +107,8 @@ async function ensureLicenseOrQuit() {
   // Allow developers to bypass licensing during local development.
   if (!app.isPackaged) return true;
   if (process.env.REDIO_LICENSE_BYPASS === '1') return true;
+  // TEMPORARY: Skip licensing in packaged builds for distribution without license files
+  return true;
 
   const defaultLicensePath = getDefaultLicensePath({ app });
 
@@ -238,6 +240,8 @@ async function ensureActivationOrQuit({ publicKeyPem }) {
   if (!app.isPackaged) return true;
   if (process.env.REDIO_LICENSE_BYPASS === '1') return true;
   if (!licenseInfo || !licenseInfo.payload || !licenseInfo.payload.licenseId) return true;
+  // TEMPORARY: Skip activation in packaged builds for distribution without license files
+  return true;
 
   const defaultActivationPath = getDefaultActivationPath({ app });
 

@@ -1,13 +1,22 @@
-import { useEffect, useRef, useState } from 'react';
-import { X, Search, Plus, GripVertical } from 'lucide-react';
+import { useEffect, useMemo, useRef, useState } from 'react';
+import { X, Search, Plus, GripVertical, Clock } from 'lucide-react';
 import { AnimatePresence, motion, useReducedMotion } from 'framer-motion';
 import { Button } from './ui/button';
 import { Input } from './ui/input';
 import { Playlist, Track } from '../types';
 import { TrackRow } from './TrackRow';
-import { formatDuration } from '../lib/utils';
+import { formatDuration, formatFileSize } from '../lib/utils';
 import { ConfirmDialog } from './ConfirmDialog';
 import { Progress } from './ui/progress';
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from './ui/dialog';
+import { Label } from './ui/label';
 
 interface PlaylistEditorProps {
   playlist: Playlist;
@@ -21,8 +30,10 @@ interface PlaylistEditorProps {
   onReorderTracks: (tracks: Track[]) => void;
   onImportFiles: (files: File[], insertIndex?: number, suppressDuplicateDialog?: boolean) => void;
   onQueueTrack: (track: Track) => void;
+  onTrackUpdated?: (track: Track) => void;
   scheduledStartTime?: Date | null;
   onDropTrackOnPlaylistPanel?: (trackIds: string[], insertIndex: number) => void;
+  onDropFolderOnPlaylistPanel?: (folderIds: string[], insertIndex: number) => void;
 }
 
 export function PlaylistEditor({
@@ -37,8 +48,10 @@ export function PlaylistEditor({
   onReorderTracks,
   onImportFiles,
   onQueueTrack,
+  onTrackUpdated,
   scheduledStartTime,
   onDropTrackOnPlaylistPanel,
+  onDropFolderOnPlaylistPanel,
 }: PlaylistEditorProps) {
   const reduceMotion = useReducedMotion() ?? false;
   const [searchQuery, setSearchQuery] = useState('');
@@ -49,6 +62,120 @@ export function PlaylistEditor({
   const [dropIndex, setDropIndex] = useState<number | null>(null);
   const dragStartOrderRef = useRef<Track[] | null>(null);
   const [flashTrackId, setFlashTrackId] = useState<string | null>(null);
+
+  const [previewBaseDateTime, setPreviewBaseDateTime] = useState<Date | null>(null);
+  const [previewTimeByTrackId, setPreviewTimeByTrackId] = useState<Record<string, { start: Date; end: Date }>>({});
+  const [previewHourKeyByTrackId, setPreviewHourKeyByTrackId] = useState<Record<string, string>>({});
+  const previewComputeRunRef = useRef(0);
+
+  const hasScheduledBase =
+    scheduledStartTime instanceof Date && !Number.isNaN(scheduledStartTime.getTime());
+
+  const effectiveBaseDateTime =
+    hasScheduledBase
+      ? scheduledStartTime
+      : previewBaseDateTime;
+
+  const [previewDialogOpen, setPreviewDialogOpen] = useState(false);
+  const [previewDialogDate, setPreviewDialogDate] = useState('');
+  const [previewDialogTime, setPreviewDialogTime] = useState('');
+
+  const getIstParts = (dt: Date) => {
+    const parts = new Intl.DateTimeFormat('en-IN', {
+      timeZone: 'Asia/Kolkata',
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+      hour: '2-digit',
+      minute: '2-digit',
+      second: '2-digit',
+      hour12: false,
+    }).formatToParts(dt);
+
+    const lookup: Record<string, string> = {};
+    parts.forEach((p) => {
+      if (p.type !== 'literal') lookup[p.type] = p.value;
+    });
+
+    return {
+      yyyy: lookup.year,
+      mm: lookup.month,
+      dd: lookup.day,
+      hh: lookup.hour,
+      mi: lookup.minute,
+      ss: lookup.second,
+    };
+  };
+
+  const istDateFromInputs = (dateStr: string, timeStr: string) => {
+    const d = String(dateStr || '').split('-');
+    const t = String(timeStr || '').split(':');
+    if (d.length !== 3 || t.length < 2) return null;
+
+    const year = Number(d[0]);
+    const month = Number(d[1]);
+    const day = Number(d[2]);
+    const hour = Number(t[0]);
+    const minute = Number(t[1]);
+    const second = t.length >= 3 ? Number(t[2]) : 0;
+
+    if (
+      !Number.isFinite(year) ||
+      !Number.isFinite(month) ||
+      !Number.isFinite(day) ||
+      !Number.isFinite(hour) ||
+      !Number.isFinite(minute) ||
+      !Number.isFinite(second)
+    ) {
+      return null;
+    }
+
+    const utcMs = Date.UTC(year, month - 1, day, hour, minute, second) - 330 * 60 * 1000;
+    const dt = new Date(utcMs);
+    return Number.isNaN(dt.getTime()) ? null : dt;
+  };
+
+  const persistPreviewBase = (dt: Date | null) => {
+    try {
+      if (!dt) {
+        window.localStorage.removeItem('redio.playlists.preview_base_datetime');
+      } else {
+        window.localStorage.setItem('redio.playlists.preview_base_datetime', dt.toISOString());
+      }
+    } catch {
+      // ignore
+    }
+    try {
+      window.dispatchEvent(new Event('redio:playlist-preview-base-changed'));
+    } catch {
+      // ignore
+    }
+  };
+
+  const computedPreviewDialogDateTime = useMemo(() => {
+    if (!previewDialogDate || !previewDialogTime) return null;
+    const normalizedTime = previewDialogTime.length === 5 ? `${previewDialogTime}:00` : previewDialogTime;
+    return istDateFromInputs(previewDialogDate, normalizedTime);
+  }, [previewDialogDate, previewDialogTime]);
+
+  useEffect(() => {
+    if (!previewDialogOpen) return;
+    if (hasScheduledBase) return;
+
+    try {
+      const raw = window.localStorage.getItem('redio.playlists.preview_base_datetime');
+      const dt = raw ? new Date(raw) : null;
+      const base = dt && !Number.isNaN(dt.getTime()) ? dt : new Date(Date.now() + 5 * 60 * 1000);
+      const { yyyy, mm, dd, hh, mi, ss } = getIstParts(base);
+      if (yyyy && mm && dd) setPreviewDialogDate(`${yyyy}-${mm}-${dd}`);
+      if (hh && mi && ss) setPreviewDialogTime(`${hh}:${mi}:${ss}`);
+    } catch {
+      const base = new Date(Date.now() + 5 * 60 * 1000);
+      const { yyyy, mm, dd, hh, mi, ss } = getIstParts(base);
+      if (yyyy && mm && dd) setPreviewDialogDate(`${yyyy}-${mm}-${dd}`);
+      if (hh && mi && ss) setPreviewDialogTime(`${hh}:${mi}:${ss}`);
+    }
+  }, [hasScheduledBase, previewDialogOpen]);
 
   useEffect(() => {
     if (!highlightTrackId) return;
@@ -63,6 +190,100 @@ export function PlaylistEditor({
   );
 
   const canReorder = !playlist.locked && !searchQuery;
+
+  useEffect(() => {
+    const readBase = () => {
+      try {
+        const raw = window.localStorage.getItem('redio.playlists.preview_base_datetime');
+        if (!raw) {
+          setPreviewBaseDateTime(null);
+          return;
+        }
+        const dt = new Date(raw);
+        if (Number.isNaN(dt.getTime())) {
+          setPreviewBaseDateTime(null);
+          return;
+        }
+        setPreviewBaseDateTime(dt);
+      } catch {
+        setPreviewBaseDateTime(null);
+      }
+    };
+
+    readBase();
+
+    const onChanged = () => readBase();
+    window.addEventListener('redio:playlist-preview-base-changed', onChanged as any);
+    window.addEventListener('storage', onChanged);
+    return () => {
+      window.removeEventListener('redio:playlist-preview-base-changed', onChanged as any);
+      window.removeEventListener('storage', onChanged);
+    };
+  }, []);
+
+  useEffect(() => {
+    const base = effectiveBaseDateTime;
+    const runId = ++previewComputeRunRef.current;
+
+    if (!base || !(base instanceof Date) || Number.isNaN(base.getTime())) {
+      setPreviewTimeByTrackId({});
+      setPreviewHourKeyByTrackId({});
+      return;
+    }
+
+    const tracks = playlist.tracks;
+    const total = tracks.length;
+
+    const nextTimes: Record<string, { start: Date; end: Date }> = {};
+    const nextHourKey: Record<string, string> = {};
+    let cursorMs = base.getTime();
+
+    const formatHourKey = (dt: Date) => {
+      // Hour bucket in IST
+      const parts = new Intl.DateTimeFormat('en-IN', {
+        timeZone: 'Asia/Kolkata',
+        year: 'numeric',
+        month: '2-digit',
+        day: '2-digit',
+        hour: '2-digit',
+        hour12: false,
+      }).formatToParts(dt);
+      const lookup: Record<string, string> = {};
+      for (const p of parts) {
+        if (p.type !== 'literal') lookup[p.type] = p.value;
+      }
+      return `${lookup.year}-${lookup.month}-${lookup.day} ${lookup.hour}`;
+    };
+
+    let i = 0;
+    const step = () => {
+      if (previewComputeRunRef.current !== runId) return;
+
+      const chunkEnd = Math.min(total, i + 250);
+      for (; i < chunkEnd; i += 1) {
+        const t = tracks[i];
+        const start = new Date(cursorMs);
+        const durSec = Number(t.duration || 0);
+        const end = new Date(cursorMs + Math.max(0, durSec) * 1000);
+        nextTimes[t.id] = { start, end };
+        nextHourKey[t.id] = formatHourKey(start);
+        cursorMs = end.getTime();
+      }
+
+      // publish progressively (non-blocking for huge playlists)
+      setPreviewTimeByTrackId((prev) => (previewComputeRunRef.current === runId ? { ...prev, ...nextTimes } : prev));
+      setPreviewHourKeyByTrackId((prev) => (previewComputeRunRef.current === runId ? { ...prev, ...nextHourKey } : prev));
+
+      if (i < total) {
+        window.setTimeout(step, 0);
+      }
+    };
+
+    // reset maps for fresh run
+    setPreviewTimeByTrackId({});
+    setPreviewHourKeyByTrackId({});
+    window.setTimeout(step, 0);
+  }, [effectiveBaseDateTime, playlist.tracks]);
 
   const handleDragStart = (index: number) => {
     if (!canReorder) return;
@@ -135,9 +356,55 @@ export function PlaylistEditor({
     dragStartOrderRef.current = null;
   };
 
-  // Precompute per-track start time labels when a scheduled start time is available
+  const previewLabelByTrackId: Record<string, string> = {};
+  const previewTooltipByTrackId: Record<string, string> = {};
+  const hourHeaderByKey: Record<string, string> = {};
+
+  if (effectiveBaseDateTime) {
+    for (const t of playlist.tracks) {
+      const span = previewTimeByTrackId[t.id];
+      if (!span) continue;
+      const startLabel = span.start
+        .toLocaleTimeString('en-IN', {
+          timeZone: 'Asia/Kolkata',
+          hour: '2-digit',
+          minute: '2-digit',
+          second: '2-digit',
+          hour12: true,
+        })
+        .toUpperCase();
+      const endLabel = span.end
+        .toLocaleTimeString('en-IN', {
+          timeZone: 'Asia/Kolkata',
+          hour: '2-digit',
+          minute: '2-digit',
+          second: '2-digit',
+          hour12: true,
+        })
+        .toUpperCase();
+
+      previewLabelByTrackId[t.id] = startLabel;
+      previewTooltipByTrackId[t.id] = `${startLabel} → ${endLabel} • ${formatFileSize(t.size)}`;
+
+      const hourKey = previewHourKeyByTrackId[t.id];
+      if (hourKey && !hourHeaderByKey[hourKey]) {
+        hourHeaderByKey[hourKey] = span.start.toLocaleString('en-IN', {
+          timeZone: 'Asia/Kolkata',
+          weekday: 'short',
+          year: 'numeric',
+          month: 'short',
+          day: '2-digit',
+          hour: '2-digit',
+          minute: '2-digit',
+          hour12: true,
+        });
+      }
+    }
+  }
+
+  // Fallback: keep existing scheduledStartTime display when no preview base is set
   const startTimeByTrackId: Record<string, string> = {};
-  if (scheduledStartTime instanceof Date && !isNaN(scheduledStartTime.getTime())) {
+  if (!effectiveBaseDateTime && scheduledStartTime instanceof Date && !isNaN(scheduledStartTime.getTime())) {
     let cursor = new Date(scheduledStartTime.getTime());
     for (const t of playlist.tracks) {
       const label = cursor.toLocaleTimeString(undefined, {
@@ -154,6 +421,65 @@ export function PlaylistEditor({
 
   return (
     <div className="h-full flex flex-col bg-background">
+      <Dialog open={previewDialogOpen} onOpenChange={setPreviewDialogOpen}>
+        <DialogContent className="sm:max-w-[420px]">
+          <DialogHeader>
+            <DialogTitle>Preview Timing</DialogTitle>
+            <DialogDescription>
+              Temporary timing preview for playlist ordering only. Does not schedule automation.
+            </DialogDescription>
+          </DialogHeader>
+
+          <div className="space-y-4">
+            <div className="grid grid-cols-2 gap-3">
+              <div className="space-y-1.5">
+                <Label className="text-xs">Base date (IST)</Label>
+                <Input
+                  type="date"
+                  value={previewDialogDate}
+                  onChange={(e) => setPreviewDialogDate(e.target.value)}
+                  disabled={hasScheduledBase}
+                />
+              </div>
+              <div className="space-y-1.5">
+                <Label className="text-xs">Base time (IST)</Label>
+                <Input
+                  type="time"
+                  step={1}
+                  value={previewDialogTime}
+                  onChange={(e) => setPreviewDialogTime(e.target.value)}
+                  disabled={hasScheduledBase}
+                />
+              </div>
+            </div>
+          </div>
+
+          <DialogFooter className="gap-2 sm:gap-2">
+            <Button
+              type="button"
+              variant="outline"
+              onClick={() => {
+                persistPreviewBase(null);
+                setPreviewDialogOpen(false);
+              }}
+              disabled={hasScheduledBase}
+            >
+              Clear
+            </Button>
+            <Button
+              type="button"
+              onClick={() => {
+                persistPreviewBase(computedPreviewDialogDateTime);
+                setPreviewDialogOpen(false);
+              }}
+              disabled={hasScheduledBase || !computedPreviewDialogDateTime}
+            >
+              Apply
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
       <ConfirmDialog
         open={queueConfirmOpen}
         title="Queue this playlist?"
@@ -178,6 +504,17 @@ export function PlaylistEditor({
             </div>
           </div>
           <div className="flex items-center gap-2">
+            {!hasScheduledBase && (
+              <Button
+                size="sm"
+                variant="outline"
+                onClick={() => setPreviewDialogOpen(true)}
+                title="Preview timing (temporary)"
+              >
+                <Clock className="w-4 h-4 mr-2" />
+                Preview
+              </Button>
+            )}
             <Button
               size="sm"
               variant="secondary"
@@ -229,12 +566,12 @@ export function PlaylistEditor({
         </div>
 
         {importProgress && (
-          <div className="space-y-1">
-            <div className="flex items-center justify-between text-[11px] text-muted-foreground">
+          <div className="rounded-md border border-border/60 bg-muted/20 px-2 py-1.5">
+            <div className="flex items-center justify-between text-[10px] leading-4 text-muted-foreground">
               <span className="truncate pr-3">{importProgress.label}</span>
-              <span>{Math.round(importProgress.percent)}%</span>
+              <span className="tabular-nums">{Math.round(importProgress.percent)}%</span>
             </div>
-            <Progress value={importProgress.percent} />
+            <Progress value={importProgress.percent} className="h-1.5 mt-1" />
           </div>
         )}
 
@@ -251,8 +588,9 @@ export function PlaylistEditor({
           const types = Array.from(e.dataTransfer.types);
           const hasTrackId = types.includes('application/x-track-id');
           const hasTracks = types.includes('application/x-redio-tracks');
+          const hasFolder = types.includes('application/x-redio-folder');
           const hasFiles = types.includes('Files');
-          if ((hasTrackId && onDropTrackOnPlaylistPanel) || (hasTracks && onDropTrackOnPlaylistPanel) || hasFiles) {
+          if ((hasTrackId && onDropTrackOnPlaylistPanel) || (hasTracks && onDropTrackOnPlaylistPanel) || (hasFolder && onDropFolderOnPlaylistPanel) || hasFiles) {
             e.preventDefault();
           }
         }}
@@ -260,9 +598,24 @@ export function PlaylistEditor({
           const types = Array.from(e.dataTransfer.types);
           const hasTrackId = types.includes('application/x-track-id');
           const hasTracks = types.includes('application/x-redio-tracks');
+          const hasFolder = types.includes('application/x-redio-folder');
           const hasFiles = types.includes('Files');
           e.preventDefault();
           e.stopPropagation();
+
+          if (hasFolder && onDropFolderOnPlaylistPanel) {
+            try {
+              const payload = JSON.parse(e.dataTransfer.getData('application/x-redio-folder') || '{}');
+              const folderIds = payload.folderIds || (payload.folderId ? [payload.folderId] : []);
+              if (folderIds.length === 0) return;
+              const insertAt = dropIndex !== null ? dropIndex : filteredTracks.length;
+              onDropFolderOnPlaylistPanel(folderIds, insertAt);
+              setDropIndex(null);
+              return;
+            } catch {
+              // ignore
+            }
+          }
 
           if (hasTracks && onDropTrackOnPlaylistPanel) {
             try {
@@ -306,6 +659,30 @@ export function PlaylistEditor({
           <div className="space-y-1">
             <AnimatePresence mode="popLayout" initial={false}>
               {filteredTracks.map((track, index) => (
+                <div key={`${track.id}-hourwrap`} className="space-y-1">
+                  {effectiveBaseDateTime && index === 0 ? (
+                    <div className="px-2 pt-1">
+                      <div className="inline-flex items-center rounded-md border border-border/60 bg-muted/20 px-2 py-1 text-[10px] text-muted-foreground">
+                        {hasScheduledBase ? 'Scheduled start (IST): ' : 'Preview base (IST): '}
+                        {effectiveBaseDateTime.toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' })}
+                      </div>
+                    </div>
+                  ) : null}
+
+                  {effectiveBaseDateTime ? (() => {
+                    const hourKey = previewHourKeyByTrackId[track.id];
+                    const prevId = filteredTracks[index - 1]?.id;
+                    const prevKey = prevId ? previewHourKeyByTrackId[prevId] : null;
+                    if (!hourKey) return null;
+                    if (hourKey === prevKey) return null;
+                    return (
+                      <div className="px-2 pt-2">
+                        <div className="text-[11px] font-medium text-muted-foreground">{hourHeaderByKey[hourKey] || ''}</div>
+                        <div className="h-px bg-border/70 mt-1" />
+                      </div>
+                    );
+                  })() : null}
+
                 <motion.div
                   key={track.id}
                   layout
@@ -336,8 +713,8 @@ export function PlaylistEditor({
                         : { duration: 0.18, ease: 'easeOut' }
                   }
                   className={`flex items-center gap-2 cursor-default select-none relative hover:bg-accent/10 ${dropIndex === index || dropIndex === index + 1
-                      ? 'bg-accent/15 ring-1 ring-accent/60'
-                      : ''
+                    ? 'bg-accent/15 ring-1 ring-accent/60'
+                    : ''
                     }`}
                   draggable={canReorder}
                   onDragStart={() => handleDragStart(index)}
@@ -377,17 +754,21 @@ export function PlaylistEditor({
                   </span>
                   <GripVertical className="w-4 h-4 text-muted-foreground cursor-grab" />
                   <div className="flex-1">
-                    <TrackRow
-                      track={track}
-                      onAddToQueue={onQueueTrack}
-                      onAddToPlaylist={() => { }}
-                      playlists={[]}
-                      onRemove={onRemoveTrack}
-                      showRemove={!playlist.locked}
-                      startTimeLabel={startTimeByTrackId[track.id]}
-                    />
+                    <div title={effectiveBaseDateTime ? (previewTooltipByTrackId[track.id] || '') : ''}>
+                      <TrackRow
+                        track={track}
+                        onAddToQueue={onQueueTrack}
+                        onAddToPlaylist={() => { }}
+                        playlists={[]}
+                        onRemove={onRemoveTrack}
+                        showRemove={!playlist.locked}
+                        startTimeLabel={effectiveBaseDateTime ? previewLabelByTrackId[track.id] : startTimeByTrackId[track.id]}
+                        onTrackUpdated={onTrackUpdated}
+                      />
+                    </div>
                   </div>
                 </motion.div>
+                </div>
               ))}
             </AnimatePresence>
           </div>

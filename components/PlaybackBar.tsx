@@ -1,5 +1,4 @@
-import { useEffect, useState } from 'react';
-import type React from 'react';
+import { useEffect, useRef, useState } from 'react';
 import {
   Lock as LockIcon,
   Pause,
@@ -14,6 +13,8 @@ import { Slider } from './ui/slider';
 import { Track } from '../types';
 import { formatDuration } from '../lib/utils';
 import { useAudioEngine } from '../hooks/useAudioEngine';
+import { usePlaybackWatchdog } from '../hooks/usePlaybackWatchdog';
+import { useAudioProcessing } from '../hooks/useAudioProcessing';
 import type { UseAudioDevicesResult } from '../hooks/useAudioDevices';
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from './ui/tooltip';
 import {
@@ -24,6 +25,7 @@ import {
   SelectValue,
 } from './ui/select';
 import { StepperInput } from './ui/stepper-input';
+import { AudioProcessingDialog } from './AudioProcessingDialog';
 import {
   AlertDialog,
   AlertDialogAction,
@@ -41,6 +43,10 @@ interface PlaybackBarProps {
    * The upcoming track in the queue, used for future enhancements.
    */
   nextTrack: Track | null;
+  scheduledGapOverride?: {
+    nextTrack: Track;
+    remainingSeconds: number;
+  } | null;
   isPlaying: boolean;
   onPlayPause: () => void;
   onNext: () => void;
@@ -55,11 +61,14 @@ interface PlaybackBarProps {
   audioDevices: UseAudioDevicesResult;
   onSeek?: (seconds: number) => void;
   onProgress?: (seconds: number) => void;
+  restoreSeekSeconds?: number | null;
+  onGapStateChange?: (state: { isInGap: boolean; gapRemainingSeconds: number }) => void;
 }
 
 export function PlaybackBar({
   currentTrack,
   nextTrack,
+  scheduledGapOverride = null,
   isPlaying,
   onPlayPause,
   onNext,
@@ -74,14 +83,26 @@ export function PlaybackBar({
   audioDevices,
   onSeek,
   onProgress,
+  restoreSeekSeconds,
+  onGapStateChange,
 }: PlaybackBarProps) {
   const [showPauseConfirm, setShowPauseConfirm] = useState(false);
   const [adjustOpen, setAdjustOpen] = useState(false);
+  const [audioProcessingOpen, setAudioProcessingOpen] = useState(false);
   const [volume, setVolume] = useState(1);
   const SEEK_LOCK_KEY = 'redio.playback.seekLocked';
   const [seekLocked, setSeekLocked] = useState(false);
 
-  const { primaryAudioRef, secondaryAudioRef, currentTime, duration, handleSeek } = useAudioEngine({
+  const {
+    primaryAudioRef,
+    secondaryAudioRef,
+    currentTime,
+    duration,
+    handleSeek,
+    isInGap,
+    gapRemainingSeconds,
+    handleSoftRestart,
+  } = useAudioEngine({
     currentTrack,
     nextTrack,
     isPlaying,
@@ -90,6 +111,55 @@ export function PlaybackBar({
     crossfadeSeconds,
     onNext,
   });
+
+  usePlaybackWatchdog({
+    isPlaying,
+    currentTime,
+    onRecover: handleSoftRestart,
+    enabled: isLive, // Only enable watchdog in Live mode
+  });
+
+  useEffect(() => {
+    if (!onGapStateChange) return;
+    onGapStateChange({ isInGap, gapRemainingSeconds });
+  }, [gapRemainingSeconds, isInGap, onGapStateChange]);
+
+  const restoreAppliedRef = useRef(false);
+
+  useEffect(() => {
+    if (!currentTrack) return;
+    if (!Number.isFinite(restoreSeekSeconds as any)) return;
+    const seconds = Math.max(0, Number(restoreSeekSeconds));
+    if (seconds <= 0) return;
+
+    if (restoreAppliedRef.current) return;
+
+    handleSeek([seconds]);
+    if (onSeek) {
+      onSeek(seconds);
+    }
+
+    restoreAppliedRef.current = true;
+  }, [currentTrack, handleSeek, onSeek, restoreSeekSeconds]);
+
+  const audioProcessing = useAudioProcessing({
+    primaryAudioRef,
+    secondaryAudioRef,
+  });
+
+  useEffect(() => {
+    if (!audioProcessing.supportsOutputDeviceSelection) return;
+    audioProcessing.ensureRunning();
+    audioProcessing.setOutputDeviceId(audioDevices.selectedDeviceId).catch(() => {
+      // ignore
+    });
+  }, [audioDevices.selectedDeviceId, audioProcessing]);
+
+  useEffect(() => {
+    if (audioProcessingOpen) {
+      audioProcessing.ensureRunning();
+    }
+  }, [audioProcessing, audioProcessingOpen]);
 
   useEffect(() => {
     try {
@@ -121,6 +191,14 @@ export function PlaybackBar({
   }, [volume, primaryAudioRef, secondaryAudioRef]);
 
   const volumePercent = Math.round(volume * 100);
+
+  const showPendingLine =
+    transitionMode === 'gap' &&
+    ((isInGap && Boolean(nextTrack)) ||
+      (Boolean(scheduledGapOverride?.nextTrack) && Number.isFinite(scheduledGapOverride?.remainingSeconds as any)));
+
+  const pendingTrack = (isInGap && nextTrack) ? nextTrack : scheduledGapOverride?.nextTrack ?? null;
+  const pendingRemainingSeconds = isInGap ? gapRemainingSeconds : (scheduledGapOverride?.remainingSeconds ?? 0);
 
   useEffect(() => {
     if (!onProgress) return;
@@ -173,6 +251,11 @@ export function PlaybackBar({
                   </Tooltip>
                 </TooltipProvider>
                 <div className="text-xs text-muted-foreground truncate">{currentTrack.artist}</div>
+                {showPendingLine && pendingTrack && (
+                  <div className="text-[11px] text-muted-foreground truncate mt-0.5">
+                    Next pending: {pendingTrack.name} ({formatDuration(pendingRemainingSeconds)})
+                  </div>
+                )}
               </div>
             </>
           ) : (
@@ -198,11 +281,11 @@ export function PlaybackBar({
                   seekLocked
                     ? undefined
                     : (vals: number[]) => {
-                        const seconds = vals[0] ?? 0;
-                        if (onSeek) {
-                          onSeek(seconds);
-                        }
+                      const seconds = vals[0] ?? 0;
+                      if (onSeek) {
+                        onSeek(seconds);
                       }
+                    }
                 }
                 className="flex-1 h-1.5"
               />
@@ -278,21 +361,35 @@ export function PlaybackBar({
                     }}
                   />
 
-                  <div className="text-xs text-muted-foreground">Sound</div>
-                  <StepperInput
-                    value={volumePercent}
-                    min={0}
-                    max={100}
-                    step={1}
-                    showButtons={false}
-                    onChange={(v) => setVolume(Math.min(1, Math.max(0, v / 100)))}
-                  />
                 </div>
+
+                <div className="my-2 h-px bg-border" />
+
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="sm"
+                  className="w-full justify-start h-8 px-2 text-xs"
+                  onClick={() => {
+                    setAdjustOpen(false);
+                    setAudioProcessingOpen(true);
+                  }}
+                >
+                  Audio Processing
+                </Button>
               </div>
             )}
           </div>
         </div>
       </div>
+
+      <AudioProcessingDialog
+        open={audioProcessingOpen}
+        onOpenChange={setAudioProcessingOpen}
+        settings={audioProcessing.settings}
+        onChange={audioProcessing.setSettings}
+        onSetEqGain={audioProcessing.setEqGain}
+      />
 
       {/* Pause Confirmation Dialog */}
       <AlertDialog open={showPauseConfirm} onOpenChange={setShowPauseConfirm}>

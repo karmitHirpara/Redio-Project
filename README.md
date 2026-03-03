@@ -322,6 +322,32 @@ Full step-by-step commands are in `SETUP.md`.
 
 - All times use IST (`Asia/Kolkata`).
 
+### Playlist Preview Timing (UI-only)
+
+The Playlist Editor (right panel) includes a **Preview** timing tool to estimate per-track start times while you reorder or build a playlist.
+
+- **Where**
+  - Open a playlist in the Playlist Editor.
+  - Click **Preview** (next to **Queue**).
+
+- **What it does**
+  - Lets you set a temporary **Preview base date/time (IST)**.
+  - The Playlist Editor will compute and display a per-track **estimated start time** (and show details like end time + size via hover tooltip).
+  - Updates instantly when you add/remove/reorder tracks.
+
+- **Isolation / safety**
+  - This is **preview-only** and does **not** create schedules.
+  - Does **not** modify the scheduler engine, queue, playback, or automation.
+  - The base value is stored locally in the browser via:
+    - `localStorage['redio.playlists.preview_base_datetime']`
+
+- **Scheduled playlists override preview**
+  - If a playlist is officially scheduled (datetime schedule), the Playlist Editor always displays timing based on the **actual scheduled start time**.
+  - In that case, the **Preview** option is hidden/disabled because it is not required.
+
+- **Reset / clear**
+  - Use the **Clear** action inside the Preview Timing dialog to remove the preview base.
+
 ### Datetime schedules
 
 - When triggered:

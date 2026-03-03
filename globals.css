@@ -32,7 +32,7 @@
   --input-background: #f3f3f5;
   --switch-background: #cbced4;
 
-  --ring: rgba(99,102,241,0.5);
+  --ring: rgba(99, 102, 241, 0.5);
 
   --chart-1: oklch(0.646 0.222 41.116);
   --chart-2: oklch(0.6 0.118 184.704);
@@ -50,7 +50,7 @@
   --sidebar-accent: #f3f3f5;
   --sidebar-accent-foreground: #111827;
   --sidebar-border: #e6e6e6;
-  --sidebar-ring: rgba(99,102,241,0.5);
+  --sidebar-ring: rgba(99, 102, 241, 0.5);
 
   /* font weights */
   --font-weight-medium: 550;
@@ -108,10 +108,10 @@
   /* you can override any variables for an explicit light variant */
   --background: #ffffff;
   --foreground: #111827;
-  --border: rgba(0,0,0,0.1);
+  --border: rgba(0, 0, 0, 0.1);
   --input: transparent;
   --input-background: #f3f3f5;
-  --ring: rgba(99,102,241,0.5);
+  --ring: rgba(99, 102, 241, 0.5);
 }
 
 /* Tailwind directives - only include once, after variables */
@@ -119,69 +119,70 @@
 @tailwind components;
 @tailwind utilities;
 
- :root.theme-transition,
- :root.theme-transition * {
-   transition-property: background-color, color, border-color, fill, stroke;
-   transition-duration: 220ms;
-   transition-timing-function: ease-out;
- }
+:root.theme-transition,
+:root.theme-transition * {
+  transition-property: background-color, color, border-color, fill, stroke;
+  transition-duration: 220ms;
+  transition-timing-function: ease-out;
+}
 
- @media (prefers-reduced-motion: reduce) {
-   :root.theme-transition,
-   :root.theme-transition * {
-     transition: none !important;
-   }
- }
+@media (prefers-reduced-motion: reduce) {
 
- .schedule-datetime-input {
-   color-scheme: light;
-   background: #ffffff;
-   color: #0f172a;
-   -webkit-text-fill-color: #0f172a;
-   caret-color: #0f172a;
- }
+  :root.theme-transition,
+  :root.theme-transition * {
+    transition: none !important;
+  }
+}
 
- .schedule-datetime-input::selection {
-   background: rgba(99, 102, 241, 0.22);
-   color: #0b1220;
- }
+.schedule-datetime-input {
+  color-scheme: light;
+  background: #ffffff;
+  color: #0f172a;
+  -webkit-text-fill-color: #0f172a;
+  caret-color: #0f172a;
+}
 
- .schedule-datetime-input::placeholder {
-   color: rgba(15, 23, 42, 0.45);
- }
+.schedule-datetime-input::selection {
+  background: rgba(99, 102, 241, 0.22);
+  color: #0b1220;
+}
 
- .schedule-datetime-input::-webkit-datetime-edit,
- .schedule-datetime-input::-webkit-datetime-edit-fields-wrapper,
- .schedule-datetime-input::-webkit-datetime-edit-text,
- .schedule-datetime-input::-webkit-datetime-edit-year-field,
- .schedule-datetime-input::-webkit-datetime-edit-month-field,
- .schedule-datetime-input::-webkit-datetime-edit-day-field,
- .schedule-datetime-input::-webkit-datetime-edit-hour-field,
- .schedule-datetime-input::-webkit-datetime-edit-minute-field,
- .schedule-datetime-input::-webkit-datetime-edit-second-field,
- .schedule-datetime-input::-webkit-datetime-edit-ampm-field {
-   color: #0f172a;
-   opacity: 1;
-   -webkit-text-fill-color: #0f172a;
- }
+.schedule-datetime-input::placeholder {
+  color: rgba(15, 23, 42, 0.45);
+}
 
- .schedule-datetime-input::-webkit-datetime-edit-year-field:focus,
- .schedule-datetime-input::-webkit-datetime-edit-month-field:focus,
- .schedule-datetime-input::-webkit-datetime-edit-day-field:focus,
- .schedule-datetime-input::-webkit-datetime-edit-hour-field:focus,
- .schedule-datetime-input::-webkit-datetime-edit-minute-field:focus,
- .schedule-datetime-input::-webkit-datetime-edit-second-field:focus,
- .schedule-datetime-input::-webkit-datetime-edit-ampm-field:focus {
-   background: rgba(99, 102, 241, 0.22);
-   color: #0b1220;
-   -webkit-text-fill-color: #0b1220;
- }
+.schedule-datetime-input::-webkit-datetime-edit,
+.schedule-datetime-input::-webkit-datetime-edit-fields-wrapper,
+.schedule-datetime-input::-webkit-datetime-edit-text,
+.schedule-datetime-input::-webkit-datetime-edit-year-field,
+.schedule-datetime-input::-webkit-datetime-edit-month-field,
+.schedule-datetime-input::-webkit-datetime-edit-day-field,
+.schedule-datetime-input::-webkit-datetime-edit-hour-field,
+.schedule-datetime-input::-webkit-datetime-edit-minute-field,
+.schedule-datetime-input::-webkit-datetime-edit-second-field,
+.schedule-datetime-input::-webkit-datetime-edit-ampm-field {
+  color: #0f172a;
+  opacity: 1;
+  -webkit-text-fill-color: #0f172a;
+}
 
- .schedule-datetime-input::-webkit-datetime-edit-fields-wrapper:focus,
- .schedule-datetime-input::-webkit-datetime-edit:focus {
-   color: #0f172a;
-   -webkit-text-fill-color: #0f172a;
- }
+.schedule-datetime-input::-webkit-datetime-edit-year-field:focus,
+.schedule-datetime-input::-webkit-datetime-edit-month-field:focus,
+.schedule-datetime-input::-webkit-datetime-edit-day-field:focus,
+.schedule-datetime-input::-webkit-datetime-edit-hour-field:focus,
+.schedule-datetime-input::-webkit-datetime-edit-minute-field:focus,
+.schedule-datetime-input::-webkit-datetime-edit-second-field:focus,
+.schedule-datetime-input::-webkit-datetime-edit-ampm-field:focus {
+  background: rgba(99, 102, 241, 0.22);
+  color: #0b1220;
+  -webkit-text-fill-color: #0b1220;
+}
+
+.schedule-datetime-input::-webkit-datetime-edit-fields-wrapper:focus,
+.schedule-datetime-input::-webkit-datetime-edit:focus {
+  color: #0f172a;
+  -webkit-text-fill-color: #0f172a;
+}
 
 /* Provide a theme map if you use a theme plugin (keeps backwards-compatible names) */
 @theme inline {
@@ -213,6 +214,7 @@
 
 /* base layer rules that rely on Tailwind utilities (these classes must be generated by Tailwind config) */
 @layer base {
+
   /* apply a default border and outline style to everything (optional) */
   * {
     @apply border-border;
@@ -256,13 +258,52 @@
 /* Example base typography (unchanged) */
 @layer base {
   :where(:not(:has([class*=' text-']), :not(:has([class^='text-'])))) {
-    h1 { font-size: var(--text-2xl); font-weight: var(--font-weight-medium); line-height: 1.5; }
-    h2 { font-size: var(--text-xl);  font-weight: var(--font-weight-medium); line-height: 1.5; }
-    h3 { font-size: var(--text-lg);  font-weight: var(--font-weight-medium); line-height: 1.5; }
-    h4 { font-size: var(--text-base); font-weight: var(--font-weight-medium); line-height: 1.5; }
-    p  { font-size: var(--text-base); font-weight: var(--font-weight-normal); line-height: 1.5; }
-    label { font-size: var(--text-base); font-weight: var(--font-weight-medium); line-height: 1.5; }
-    button { font-size: var(--text-base); font-weight: var(--font-weight-medium); line-height: 1.5; }
-    input  { font-size: var(--text-base); font-weight: var(--font-weight-normal); line-height: 1.5; }
+    h1 {
+      font-size: var(--text-2xl);
+      font-weight: var(--font-weight-medium);
+      line-height: 1.5;
+    }
+
+    h2 {
+      font-size: var(--text-xl);
+      font-weight: var(--font-weight-medium);
+      line-height: 1.5;
+    }
+
+    h3 {
+      font-size: var(--text-lg);
+      font-weight: var(--font-weight-medium);
+      line-height: 1.5;
+    }
+
+    h4 {
+      font-size: var(--text-base);
+      font-weight: var(--font-weight-medium);
+      line-height: 1.5;
+    }
+
+    p {
+      font-size: var(--text-base);
+      font-weight: var(--font-weight-normal);
+      line-height: 1.5;
+    }
+
+    label {
+      font-size: var(--text-base);
+      font-weight: var(--font-weight-medium);
+      line-height: 1.5;
+    }
+
+    button {
+      font-size: var(--text-base);
+      font-weight: var(--font-weight-medium);
+      line-height: 1.5;
+    }
+
+    input {
+      font-size: var(--text-base);
+      font-weight: var(--font-weight-normal);
+      line-height: 1.5;
+    }
   }
 }

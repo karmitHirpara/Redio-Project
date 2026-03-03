@@ -1,4 +1,5 @@
-import { memo } from 'react';
+import { memo, forwardRef } from 'react';
+import type React from 'react';
 import { GripVertical, X, Play, Music } from 'lucide-react';
 import { QueueItem, Playlist } from '../types';
 import { formatDuration, cn } from '../lib/utils';
@@ -14,6 +15,7 @@ interface QueueItemRowProps {
   item: QueueItem;
   isPlaying: boolean;
   isNext: boolean;
+  pendingGapRemainingSeconds?: number;
   onRemoveFromQueue: (id: string) => void;
   onSelect: (id: string) => void;
   selected: boolean;
@@ -30,23 +32,27 @@ interface QueueItemRowProps {
   locked?: boolean;
 }
 
-export const QueueItemRow = memo(function QueueItemRow({
-  item,
-  isPlaying,
-  isNext,
-  onRemoveFromQueue,
-  onSelect,
-  selected,
-  index,
-  onDragStart,
-  onDragOverRow,
-  onDragEnd,
-  startTime,
-  endTime,
-  dropIndex,
-  reduceMotion,
-  locked = false,
-}: QueueItemRowProps) {
+export const QueueItemRow = memo(forwardRef<HTMLDivElement, QueueItemRowProps>(function QueueItemRow(
+  {
+    item,
+    isPlaying,
+    isNext,
+    pendingGapRemainingSeconds,
+    onRemoveFromQueue,
+    onSelect,
+    selected,
+    index,
+    onDragStart,
+    onDragOverRow,
+    onDragEnd,
+    startTime,
+    endTime,
+    dropIndex,
+    reduceMotion,
+    locked = false,
+  },
+  ref,
+) {
   const formatClock = (d?: Date) => {
     if (!d) return '';
     const raw = d.toLocaleTimeString('en-IN', {
@@ -68,6 +74,7 @@ export const QueueItemRow = memo(function QueueItemRow({
     <ContextMenu>
       <ContextMenuTrigger disabled={locked}>
         <motion.div
+          ref={ref}
           layout
           initial={reduceMotion ? false : { opacity: 0, y: -6 }}
           animate={reduceMotion ? undefined : { opacity: 1, y: 0 }}
@@ -140,6 +147,13 @@ export const QueueItemRow = memo(function QueueItemRow({
             </div>
 
             <div className="flex items-center gap-1.5 text-[10px] text-foreground tabular-nums flex-shrink-0">
+              {typeof pendingGapRemainingSeconds === 'number' && pendingGapRemainingSeconds > 0 && (
+                <>
+                  <span className="text-muted-foreground">Pending</span>
+                  <span className="text-muted-foreground">{formatDuration(pendingGapRemainingSeconds)}</span>
+                  <span className="mx-0.5 text-muted-foreground">•</span>
+                </>
+              )}
               {startTime && endTime && (
                 <>
                   <span>{formatClock(startTime)}</span>
@@ -174,4 +188,4 @@ export const QueueItemRow = memo(function QueueItemRow({
       )}
     </ContextMenu>
   );
-});
+}));

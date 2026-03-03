@@ -11,7 +11,7 @@ import { HistoryDialog } from './components/HistoryDialog';
 import { SimpleBackupDialog } from './components/SimpleBackupDialog';
 import { ConfirmDialog } from './components/ConfirmDialog';
 import { ErrorBoundary } from './components/ErrorBoundary';
-import { Clock, HardDriveDownload, ListMusic, ListOrdered, Music2, Speaker, Database, Settings, Shield, Sun, Moon } from 'lucide-react';
+import { Clock, HardDriveDownload, ListMusic, ListOrdered, Music2, Speaker, Database, Settings, Shield, Sun, Moon, Folder } from 'lucide-react';
 import { Button } from './components/ui/button';
 import { useTheme } from './hooks/useTheme';
 import { useResizable } from './hooks/useResizable';
@@ -68,6 +68,14 @@ export default function App() {
   const effectiveTransitionSeconds = transitionMode === 'gap' ? gapSeconds : crossfadeSeconds;
   const [nowPlayingStart, setNowPlayingStart] = useState<Date | null>(null);
   const [seekAnchor, setSeekAnchor] = useState<{ seconds: number; at: Date } | null>(null);
+  const [restoreSeekSeconds, setRestoreSeekSeconds] = useState<number | null>(null);
+  const [gapState, setGapState] = useState<{ isInGap: boolean; gapRemainingSeconds: number }>(() => ({
+    isInGap: false,
+    gapRemainingSeconds: 0,
+  }));
+  const [scheduledGapOverride, setScheduledGapOverride] = useState<
+    { nextTrack: Track; remainingSeconds: number } | null
+  >(null);
   const playbackPositionSecondsRef = useRef(0);
   const pauseStartedAtRef = useRef<Date | null>(null);
   const playbackStartedQueueItemIdRef = useRef<string | null>(null);
@@ -81,9 +89,12 @@ export default function App() {
   const [scheduleDialogOpen, setScheduleDialogOpen] = useState(false);
   const [historyOpen, setHistoryOpen] = useState(false);
   const [showBackupDialog, setShowBackupDialog] = useState(false);
+  const [showFactoryResetDialog, setShowFactoryResetDialog] = useState(false);
 
   const [libraryImportProgress, setLibraryImportProgress] = useState<{ percent: number; label: string } | null>(null);
-  const [playlistImportProgress, setPlaylistImportProgress] = useState<{ percent: number; label: string } | null>(null);
+  const [playlistImportProgress, setPlaylistImportProgress] = useState<
+    { percent: number; label: string; playlistId: string } | null
+  >(null);
   const [selectedPlaylistForSchedule, setSelectedPlaylistForSchedule] = useState<Playlist | null>(null);
   const [tracksToRemove, setTracksToRemove] = useState<Set<string> | null>(null);
   const [duplicatePrompt, setDuplicatePrompt] = useState<{
@@ -108,6 +119,8 @@ export default function App() {
     width: 420,
     height: 520,
   });
+
+  const [removePlayingTrackConfirm, setRemovePlayingTrackConfirm] = useState<string | null>(null);
 
   const toggleQueueDialog = () => setQueueDialogOpen((prev) => !prev);
 
@@ -146,6 +159,47 @@ export default function App() {
       })
       .toUpperCase();
   };
+
+  const normalizeServerTrack = useCallback((t: any): Track => {
+    return {
+      id: String(t.id),
+      name: String(t.name || ''),
+      artist: String(t.artist || ''),
+      duration: Number(t.duration || 0),
+      size: Number(t.size || 0),
+      filePath: resolveUploadsUrl(t.filePath || t.file_path),
+      hash: String(t.hash || ''),
+      dateAdded: t.date_added ? new Date(t.date_added) : new Date(),
+    };
+  }, []);
+
+  const handleTrackUpdated = useCallback(
+    (updatedAny: any) => {
+      const updated = normalizeServerTrack(updatedAny);
+
+      setTracks((prev) => prev.map((t) => (t.id === updated.id ? { ...t, ...updated } : t)));
+
+      setPlaylists((prev) =>
+        prev.map((p) => ({
+          ...p,
+          tracks: (p.tracks || []).map((t) => (t.id === updated.id ? { ...t, ...updated } : t)),
+          duration: p.duration,
+        })),
+      );
+
+      setQueue((prev) =>
+        prev.map((item) =>
+          item?.track?.id === updated.id
+            ? {
+              ...item,
+              track: { ...item.track, ...updated },
+            }
+            : item,
+        ),
+      );
+    },
+    [normalizeServerTrack],
+  );
 
   const yieldToBrowser = async () => {
     await new Promise<void>((resolve) => window.setTimeout(resolve, 0));
@@ -308,83 +362,100 @@ export default function App() {
     let failed = 0;
     const importedIds: string[] = [];
 
-    for (const file of files) {
-      const validation = isValidUploadFile(file);
-      if (!validation.ok) {
-        failed += 1;
-        continue;
-      }
+    // BATCH PROCESSING: Process N files at a time to maximize throughput 
+    // without starving the JS main thread or hitting browser socket limits.
+    const BATCH_SIZE = 4;
+    const fileQueue = [...files];
 
-      const detectedDuration = files.length > 120 ? 0 : await getAudioDuration(file);
-      const formData = new FormData();
-      formData.append('file', file);
-      if (detectedDuration > 0) formData.append('duration', String(detectedDuration));
+    const processBatch = async () => {
+      while (fileQueue.length > 0) {
+        const file = fileQueue.shift();
+        if (!file) break;
 
-      try {
-        const uploadData = await apiClient.request<any>('/tracks/upload', {
-          method: 'POST',
-          body: formData,
-          allowedStatuses: [409],
-        });
-
-        if (uploadData?.existingTrack) {
-          const existingTrack = uploadData.existingTrack;
-          const aliasName = getNextSequentialName(
-            String(existingTrack?.name || file.name || 'Track').replace(/ \((\d+)\)$/, ''),
-            tracks.map((t) => String(t.name || '')).filter(Boolean),
-          );
-          const t = await tracksAPI.alias(existingTrack.id, aliasName);
-          const mapped: Track = {
-            id: t.id,
-            name: t.name,
-            artist: t.artist,
-            duration: t.duration && t.duration > 0 ? t.duration : detectedDuration,
-            size: t.size,
-            filePath: resolveUploadsUrl((t as any).filePath || (t as any).file_path),
-            hash: t.hash,
-            dateAdded: (t as any).date_added ? new Date((t as any).date_added) : new Date(),
-          };
-          setTracks((prev) => [mapped, ...prev]);
-          importedIds.push(mapped.id);
-          if ((!t.duration || t.duration === 0) && mapped.filePath) {
-            hydrateTrackDurationInLibrary(mapped.id, mapped.filePath);
-          }
-          imported += 1;
-          continue;
-        }
-
-        if (!uploadData?.id) {
+        const validation = isValidUploadFile(file);
+        if (!validation.ok) {
           failed += 1;
           continue;
         }
 
-        const mapped: Track = {
-          id: uploadData.id,
-          name: uploadData.name,
-          artist: uploadData.artist,
-          duration: uploadData.duration && uploadData.duration > 0 ? uploadData.duration : detectedDuration,
-          size: uploadData.size,
-          filePath: resolveUploadsUrl(uploadData.filePath || uploadData.file_path),
-          hash: uploadData.hash,
-          dateAdded: uploadData.date_added ? new Date(uploadData.date_added) : new Date(),
-        };
-        setTracks((prev) => [mapped, ...prev]);
-        importedIds.push(mapped.id);
-        if ((!uploadData.duration || uploadData.duration === 0) && mapped.filePath) {
-          hydrateTrackDurationInLibrary(mapped.id, mapped.filePath);
+        // We no longer call getAudioDuration on the frontend.
+        // The backend tracks.js will detect it using ffmpeg if duration is missing.
+        const formData = new FormData();
+        formData.append('file', file);
+
+        try {
+          const uploadData = await apiClient.request<any>('/tracks/upload', {
+            method: 'POST',
+            body: formData,
+            allowedStatuses: [409],
+          });
+
+          if (uploadData?.existingTrack) {
+            const existingTrack = uploadData.existingTrack;
+            const aliasName = getNextSequentialName(
+              String(existingTrack?.name || file.name || 'Track').replace(/ \((\d+)\)$/, ''),
+              tracks.map((t) => String(t.name || '')).filter(Boolean),
+            );
+            const t = await tracksAPI.alias(existingTrack.id, aliasName);
+            const mapped: Track = {
+              id: t.id,
+              name: t.name,
+              artist: t.artist,
+              duration: t.duration || 0,
+              size: t.size,
+              filePath: resolveUploadsUrl((t as any).filePath || (t as any).file_path),
+              hash: t.hash,
+              dateAdded: (t as any).date_added ? new Date((t as any).date_added) : new Date(),
+            };
+            setTracks((prev) => [mapped, ...prev]);
+            importedIds.push(mapped.id);
+            imported += 1;
+            continue;
+          }
+
+          if (!uploadData?.id) {
+            failed += 1;
+            continue;
+          }
+
+          const mapped: Track = {
+            id: uploadData.id,
+            name: uploadData.name,
+            artist: uploadData.artist,
+            duration: uploadData.duration || 0,
+            size: uploadData.size,
+            filePath: resolveUploadsUrl(uploadData.filePath || uploadData.file_path),
+            hash: uploadData.hash,
+            dateAdded: uploadData.date_added ? new Date(uploadData.date_added) : new Date(),
+          };
+          setTracks((prev) => [mapped, ...prev]);
+          importedIds.push(mapped.id);
+          imported += 1;
+        } catch (err) {
+          console.error('Failed to import track', err);
+          failed += 1;
         }
-        imported += 1;
-      } catch (err) {
-        console.error('Failed to import track', err);
-        failed += 1;
       }
+    };
+
+    // Fire off batch workers
+    const workers = [];
+    for (let i = 0; i < Math.min(BATCH_SIZE, files.length); i++) {
+      workers.push(processBatch());
     }
+    await Promise.all(workers);
 
     if (folderId && importedIds.length > 0) {
       try {
         await foldersAPI.attachTracks(folderId, importedIds);
       } catch (err) {
         console.error('Failed to attach tracks to folder', err);
+      }
+
+      try {
+        window.dispatchEvent(new Event('redio:library-resync'));
+      } catch {
+        // ignore
       }
     }
 
@@ -521,6 +592,11 @@ export default function App() {
     }
 
     setLibraryImportProgress(null);
+    try {
+      window.dispatchEvent(new Event('redio:library-resync'));
+    } catch {
+      // ignore
+    }
     if (failed > 0) {
       toast.error('Folder import finished with errors', { description: `${failed} failed` });
     } else {
@@ -529,26 +605,13 @@ export default function App() {
   };
 
   const handleCreatePlaylist = async () => {
-    const name = 'New Playlist';
-    try {
-      const created = await playlistsAPI.create(name);
-      setPlaylists((prev) => [...prev, { ...(created as any), tracks: (created as any).tracks || [], duration: (created as any).duration || 0 }]);
-    } catch (err: any) {
-      toast.error(err?.message || 'Failed to create playlist');
-    }
+    setPlaylistNameDialog({ mode: 'create', name: '' });
   };
 
   const handleRenamePlaylist = async (playlistId: string) => {
     const playlist = playlists.find((p) => p.id === playlistId);
     if (!playlist) return;
-    const name = window.prompt('Rename playlist', playlist.name);
-    if (!name) return;
-    try {
-      const updated = await playlistsAPI.update(playlistId, { name });
-      setPlaylists((prev) => prev.map((p) => (p.id === playlistId ? { ...p, name: updated.name } : p)));
-    } catch (err: any) {
-      toast.error(err?.message || 'Failed to rename playlist');
-    }
+    setPlaylistNameDialog({ mode: 'rename', playlistId, name: playlist.name });
   };
 
   const handleDeletePlaylist = async (playlistId: string) => {
@@ -608,6 +671,7 @@ export default function App() {
       toast.error('Playlist is locked');
       return;
     }
+
     try {
       const ids = tracksToAdd.map((t) => t.id);
       await playlistsAPI.addTracks(playlistId, ids);
@@ -615,7 +679,7 @@ export default function App() {
         prev.map((p) => {
           if (p.id !== playlistId) return p;
           const combined = [...(p.tracks || []), ...tracksToAdd];
-          return { ...p, tracks: combined, duration: combined.reduce((sum, t) => sum + (t.duration || 0), 0) };
+          return { ...p, tracks: combined, duration: combined.reduce((sum, t) => sum + t.duration, 0) };
         })
       );
     } catch (err: any) {
@@ -623,16 +687,161 @@ export default function App() {
     }
   };
 
-  const handleRemoveFromQueue = async (id: string) => {
+  const handleDropFolderOnPlaylistHeader = async (playlistId: string, folderIds: string[]) => {
+    const safeFolderIds = Array.isArray(folderIds) ? folderIds : [];
+    if (safeFolderIds.length === 0) return;
+
     try {
-      await queueAPI.remove(id);
-    } catch {
+      const results = await Promise.all(safeFolderIds.map((id) => foldersAPI.getTracks(String(id))));
+      const rawTracks = results.flat().filter(Boolean) as any[];
+      const normalized: Track[] = rawTracks
+        .map((t: any) => ({
+          id: String(t?.id || ''),
+          name: String(t?.name || ''),
+          artist: String(t?.artist || ''),
+          duration: Number(t?.duration || 0),
+          size: Number(t?.size || 0),
+          filePath: resolveUploadsUrl(t?.filePath || t?.file_path),
+          hash: t?.hash,
+          dateAdded: t?.date_added ? new Date(t.date_added) : new Date(),
+        }))
+        .filter((t) => Boolean(t.id));
+
+      // De-dupe within the dropped folder(s) so optimistic UI does not show duplicates.
+      const uniqueNormalized: Track[] = Array.from(new Map(normalized.map((t) => [t.id, t] as const)).values());
+
+      const trackIds = uniqueNormalized.map((t) => t.id);
+      if (trackIds.length === 0) return;
+
+      // Merge any missing tracks into the global library cache so downstream
+      // playlist operations can resolve Track objects immediately.
+      setTracks((prev) => {
+        const byId = new Map(prev.map((t) => [t.id, t] as const));
+        for (const t of uniqueNormalized) {
+          if (!byId.has(t.id)) byId.set(t.id, t);
+        }
+        return Array.from(byId.values());
+      });
+
+      // Optimistic playlist update (instant UI), then persist.
+      setPlaylists((prev) =>
+        prev.map((p) => {
+          if (p.id !== playlistId) return p;
+          const existing = new Set((p.tracks || []).map((t) => t.id));
+          const toAdd = uniqueNormalized.filter((t) => !existing.has(t.id));
+          const combined = [...(p.tracks || []), ...toAdd];
+          return { ...p, tracks: combined, duration: combined.reduce((sum, t) => sum + (t.duration || 0), 0) };
+        })
+      );
+
+      await playlistsAPI.addTracks(playlistId, trackIds);
+    } catch (err) {
+      console.error('Failed to drop folder on playlist header', err);
+      toast.error('Failed to add folder tracks to playlist');
     }
+  };
+
+  const handleDropFolderOnPlaylistPanel = async (playlistId: string, folderIds: string[], insertIndex: number) => {
+    const safeFolderIds = Array.isArray(folderIds) ? folderIds : [];
+    if (safeFolderIds.length === 0) return;
+
+    try {
+      const results = await Promise.all(safeFolderIds.map((id) => foldersAPI.getTracks(String(id))));
+      const rawTracks = results.flat().filter(Boolean) as any[];
+      const normalized: Track[] = rawTracks
+        .map((t: any) => ({
+          id: String(t?.id || ''),
+          name: String(t?.name || ''),
+          artist: String(t?.artist || ''),
+          duration: Number(t?.duration || 0),
+          size: Number(t?.size || 0),
+          filePath: resolveUploadsUrl(t?.filePath || t?.file_path),
+          hash: t?.hash,
+          dateAdded: t?.date_added ? new Date(t.date_added) : new Date(),
+        }))
+        .filter((t) => Boolean(t.id));
+
+      // De-dupe within the dropped folder(s) so optimistic UI does not show duplicates.
+      const uniqueNormalized: Track[] = Array.from(new Map(normalized.map((t) => [t.id, t] as const)).values());
+
+      const trackIds = uniqueNormalized.map((t) => t.id);
+      if (trackIds.length === 0) return;
+
+      setTracks((prev) => {
+        const byId = new Map(prev.map((t) => [t.id, t] as const));
+        for (const t of uniqueNormalized) {
+          if (!byId.has(t.id)) byId.set(t.id, t);
+        }
+        return Array.from(byId.values());
+      });
+
+      // Optimistic insertion at drop index.
+      let nextOrderIds: string[] = [];
+      setPlaylists((prev) =>
+        prev.map((p) => {
+          if (p.id !== playlistId) return p;
+          const current = p.tracks || [];
+          const existing = new Set(current.map((t) => t.id));
+          const toAdd = uniqueNormalized.filter((t) => !existing.has(t.id));
+          const idx = Math.min(Math.max(insertIndex ?? current.length, 0), current.length);
+          const combined = [...current.slice(0, idx), ...toAdd, ...current.slice(idx)];
+          nextOrderIds = combined.map((t) => t.id);
+          return { ...p, tracks: combined, duration: combined.reduce((sum, t) => sum + (t.duration || 0), 0) };
+        })
+      );
+
+      await playlistsAPI.addTracks(playlistId, trackIds);
+
+      // Best-effort reorder persistence after insertion.
+      try {
+        if (nextOrderIds.length > 0) {
+          await playlistsAPI.reorder(playlistId, nextOrderIds);
+        }
+      } catch {
+        // ignore reorder errors
+      }
+    } catch (err) {
+      console.error('Failed to drop folder on playlist panel', err);
+      toast.error('Failed to add folder tracks to playlist');
+    }
+  };
+
+  const handleRemoveFromQueue = async (id: string) => {
+    // If trying to remove the currently playing track, show confirmation
+    if (id === currentQueueItemId) {
+      setRemovePlayingTrackConfirm(id);
+      return;
+    }
+
+    // Optimistic UI update: remove immediately without waiting for API
     setQueue((prev) => prev.filter((q) => q.id !== id));
+
+    // Update current item if needed
     if (currentQueueItemId === id) {
-      const next = queue.find((q) => q.id !== id);
-      setCurrentQueueItemId(next?.id ?? null);
+      const remaining = queue.filter((q) => q.id !== id);
+      setCurrentQueueItemId(remaining[0]?.id ?? null);
     }
+
+    // Fire-and-forget API call in background
+    queueAPI.remove(id).catch(() => {
+      // Silently ignore API errors; UI already reflects the change
+    });
+  };
+
+  const confirmRemovePlayingTrack = async () => {
+    const id = removePlayingTrackConfirm;
+    if (!id) return;
+    setRemovePlayingTrackConfirm(null);
+
+    // Optimistic UI update: remove immediately
+    setQueue((prev) => prev.filter((q) => q.id !== id));
+    const remaining = queue.filter((q) => q.id !== id);
+    setCurrentQueueItemId(remaining[0]?.id ?? null);
+
+    // Fire-and-forget API call
+    queueAPI.remove(id).catch(() => {
+      // Silently ignore API errors
+    });
   };
 
   const handleReorderQueue = async (items: QueueItem[]) => {
@@ -675,6 +884,31 @@ export default function App() {
     }
   };
 
+  const PLAYBACK_SNAPSHOT_KEY = 'redio.playback.snapshot.v1';
+  const hasRestoredPlaybackSnapshotRef = useRef(false);
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+
+    const id = window.setInterval(() => {
+      try {
+        const snapshot = {
+          v: 1,
+          at: Date.now(),
+          currentQueueItemId,
+          isPlaying,
+          positionSeconds: Number(playbackPositionSecondsRef.current) || 0,
+        };
+        window.localStorage.setItem(PLAYBACK_SNAPSHOT_KEY, JSON.stringify(snapshot));
+      } catch {
+      }
+    }, 1000);
+
+    return () => {
+      window.clearInterval(id);
+    };
+  }, [currentQueueItemId, isPlaying]);
+
   const startPlaybackHistoryIfNeeded = useCallback(
     async (track: Track, source: string, playedAt: Date) => {
       // If we already started a row for this exact track instance, do nothing.
@@ -714,6 +948,7 @@ export default function App() {
         historyEntryIdRef.current = entry?.id ?? null;
         historyEntryCreatePromiseRef.current = null;
         console.log(`History created: track ${track.name}, start: ${playedAtIso}`);
+        window.dispatchEvent(new Event('redio:history-changed'));
       } catch (error) {
         if (historyEntryCreateTokenRef.current === createToken) {
           historyEntryCreatePromiseRef.current = null;
@@ -792,6 +1027,7 @@ export default function App() {
           // Update with the precise end timestamp from top-center clock
           await historyAPI.update(historyId, { positionEnd, completed });
           console.log(`History updated: track ${track.name}, end time: ${endTimestamp.toISOString()}, position: ${positionEnd}s`);
+          window.dispatchEvent(new Event('redio:history-changed'));
           return;
         }
 
@@ -806,6 +1042,7 @@ export default function App() {
           fileStatus: 'ok',
         });
         console.log(`History created: track ${track.name}, start: ${baseStart.toISOString()}, end: ${endTimestamp.toISOString()}, position: ${positionEnd}s`);
+        window.dispatchEvent(new Event('redio:history-changed'));
       } catch (error) {
         console.error('Failed to finalize playback history', error);
       }
@@ -813,8 +1050,15 @@ export default function App() {
     [nowIst, nowPlayingStart],
   );
 
-  const leftPanel = useResizable({ initialWidth: 320, minWidth: 250, maxWidth: 500 });
+  const leftPanel = useResizable({ initialWidth: 420, minWidth: 320, maxWidth: 640 });
   const rightPanel = useResizable({ initialWidth: 320, minWidth: 250, maxWidth: 500, direction: 'rtl' });
+
+  const LIBRARY_RAIL_WIDTH = 52;
+  const [isLibraryPanelOpen, setIsLibraryPanelOpen] = useState(true);
+
+  const toggleLibraryPanel = useCallback(() => {
+    setIsLibraryPanelOpen((prev) => !prev);
+  }, []);
 
   const currentQueueItem = currentQueueItemId
     ? queue.find((item) => item.id === currentQueueItemId) || null
@@ -825,6 +1069,11 @@ export default function App() {
   const currentTrackIdRef = useRef<string | null>(null);
   const currentQueueItemIdRef = useRef<string | null>(null);
   const nowPlayingStartRef = useRef<Date | null>(null);
+  const transitionModeRef = useRef<'gap' | 'crossfade'>('gap');
+  const gapSecondsRef = useRef<number>(2);
+  const preemptTokenRef = useRef(0);
+  const preemptTimerRef = useRef<number | null>(null);
+  const scheduledGapTimerRef = useRef<number | null>(null);
   const hasLiveQueueRef = useRef(false);
   const pinnedQueueItemIdRef = useRef<string | null>(null);
 
@@ -839,6 +1088,27 @@ export default function App() {
     }
     return null;
   })();
+
+  const pendingNextQueueItemId =
+    gapState.isInGap && currentIndex >= 0 && currentIndex < queue.length - 1
+      ? queue[currentIndex + 1].id
+      : null;
+
+  // Keep a single authoritative notion of "what is the current queue item".
+  // This guarantees that when the queue transitions from empty -> non-empty
+  // (e.g. a track is added), the Playback Bar updates immediately.
+  useEffect(() => {
+    setCurrentQueueItemId((prev) => {
+      if (queue.length === 0) return null;
+      const headId = queue[0]?.id ?? null;
+      if (!prev) return headId;
+      return queue.some((q) => q.id === prev) ? prev : headId;
+    });
+  }, [queue]);
+
+  useEffect(() => {
+    setRestoreSeekSeconds(null);
+  }, [currentTrackId]);
 
   const timing = useQueueTiming({
     queue,
@@ -960,7 +1230,7 @@ export default function App() {
           size: t.size,
           filePath: resolveUploadsUrl((t as any).filePath || (t as any).file_path),
           hash: t.hash,
-          dateAdded: (t as any).date_added ? new Date((t as any).date_added) : new Date(),
+          dateAdded: (t as any).dateAdded ? new Date((t as any).dateAdded) : new Date(),
         };
         setTracks((prev) => [aliasTrack, ...prev]);
         trackToAttach = aliasTrack;
@@ -1019,6 +1289,18 @@ export default function App() {
 
     window.addEventListener('beforeunload', handler);
 
+    const onKeyDown = (e: KeyboardEvent) => {
+      const key = String(e.key || '').toLowerCase();
+      const isReload = key === 'f5' || ((e.metaKey || e.ctrlKey) && key === 'r');
+      if (!isReload) return;
+      e.preventDefault();
+      const ok = window.confirm('Reloading or closing will interrupt playback. Continue?');
+      if (ok) {
+        window.location.reload();
+      }
+    };
+    window.addEventListener('keydown', onKeyDown);
+
     // Also handle pagehide event for better mobile support
     const handlePageHide = () => {
       finalizeHistoryOnUnload();
@@ -1028,6 +1310,7 @@ export default function App() {
     return () => {
       window.removeEventListener('beforeunload', handler);
       window.removeEventListener('pagehide', handlePageHide);
+      window.removeEventListener('keydown', onKeyDown);
     };
   }, [finalizePlaybackHistory]);
 
@@ -1129,10 +1412,46 @@ export default function App() {
       setQueue(normalized);
 
       const headId = normalized[0]?.id ?? null;
-      setCurrentQueueItemId((prev) => {
-        if (!prev) return headId;
-        return normalized.some((q) => q.id === prev) ? prev : headId;
-      });
+
+      // Restore playback state once on app load, prioritizing backend settings over localStorage.
+      if (!hasRestoredPlaybackSnapshotRef.current) {
+        hasRestoredPlaybackSnapshotRef.current = true;
+
+        try {
+          const settingsPayload = await settingsAPI.getAll();
+          const backendId = settingsPayload?.settings?.['playback.current_item_id'];
+          const backendIsPlaying = settingsPayload?.settings?.['playback.is_playing'] === 'true';
+          const backendPos = Number(settingsPayload?.settings?.['playback.position_seconds'] || 0);
+
+          const raw = window.localStorage.getItem(PLAYBACK_SNAPSHOT_KEY);
+          const parsed = raw ? JSON.parse(raw) : null;
+
+          const desiredId = backendId || (typeof parsed?.currentQueueItemId === 'string' ? parsed.currentQueueItemId : null);
+          const desiredIsPlaying = backendId ? backendIsPlaying : Boolean(parsed?.isPlaying);
+          const desiredPos = backendId ? backendPos : Number(parsed?.positionSeconds || 0);
+
+          if (desiredId && normalized.some((q) => q.id === desiredId)) {
+            setCurrentQueueItemId(desiredId);
+            setIsPlaying(desiredIsPlaying);
+            setRestoreSeekSeconds(Number.isFinite(desiredPos) ? Math.max(0, desiredPos) : null);
+            setSeekAnchor(
+              Number.isFinite(desiredPos) && desiredPos > 0 ? { seconds: Math.max(0, desiredPos), at: new Date() } : null,
+            );
+          } else {
+            setCurrentQueueItemId(headId);
+            setIsPlaying(false);
+          }
+        } catch (err) {
+          console.error('Failed to restore playback state from backend', err);
+          setCurrentQueueItemId(headId);
+          setIsPlaying(false);
+        }
+      } else {
+        setCurrentQueueItemId((prev) => {
+          if (!prev) return headId;
+          return normalized.some((q) => q.id === prev) ? prev : headId;
+        });
+      }
     } catch (error) {
       console.error('Failed to resync queue', error);
     }
@@ -1168,7 +1487,6 @@ export default function App() {
     return () => window.removeEventListener('redio:resync', onResync);
   }, []);
 
-
   // Keep refs in sync with the latest current track so the WebSocket
   // handlers can safely reason about preemption.
   useEffect(() => {
@@ -1176,7 +1494,43 @@ export default function App() {
     currentTrackIdRef.current = currentTrackId;
     currentQueueItemIdRef.current = currentQueueItemId;
     nowPlayingStartRef.current = nowPlayingStart;
+    transitionModeRef.current = transitionMode;
+    gapSecondsRef.current = gapSeconds;
   }, [currentTrack, currentTrackId, currentQueueItemId, nowPlayingStart]);
+
+  const isPlayingRef = useRef(isPlaying);
+  useEffect(() => {
+    isPlayingRef.current = isPlaying;
+  }, [isPlaying]);
+
+  // Sync playback state TO backend when it changes locally
+  const lastPushedPlaybackStateRef = useRef<{ id: string | null; playing: boolean }>({ id: null, playing: false });
+  useEffect(() => {
+    if (!hasRestoredPlaybackSnapshotRef.current) return;
+
+    if (
+      lastPushedPlaybackStateRef.current.id === currentQueueItemId &&
+      lastPushedPlaybackStateRef.current.playing === isPlaying
+    ) {
+      return;
+    }
+
+    lastPushedPlaybackStateRef.current = { id: currentQueueItemId, playing: isPlaying };
+
+    const updates: Record<string, string> = {
+      'playback.current_item_id': currentQueueItemId || '',
+      'playback.is_playing': String(isPlaying),
+    };
+
+    // Also include position if we're pausing, to ensure resume works well
+    if (!isPlaying) {
+      updates['playback.position_seconds'] = String(Math.floor(playbackPositionSecondsRef.current || 0));
+    }
+
+    void settingsAPI.update(updates).catch(err => {
+      console.error('Failed to push playback state to backend', err);
+    });
+  }, [currentQueueItemId, isPlaying]);
 
   // WebSocket connection for real-time events.
   // If VITE_WS_URL is not set, default to the local backend WS endpoint
@@ -1279,6 +1633,26 @@ export default function App() {
             );
             return;
           }
+          if (data.type === 'playback-state-updated' && data.settings) {
+            const backendId = data.settings['playback.current_item_id'];
+            const backendIsPlaying = data.settings['playback.is_playing'] === 'true';
+            const backendPos = data.settings['playback.position_seconds'];
+
+            if (backendId !== undefined && backendId !== currentQueueItemIdRef.current) {
+              setCurrentQueueItemId(backendId);
+            }
+            if (backendIsPlaying !== undefined && backendIsPlaying !== isPlayingRef.current) {
+              setIsPlaying(backendIsPlaying);
+            }
+            if (backendPos !== undefined) {
+              const seconds = Number(backendPos);
+              if (Number.isFinite(seconds)) {
+                setRestoreSeekSeconds(seconds);
+                setSeekAnchor({ seconds, at: new Date() });
+              }
+            }
+            return;
+          }
           if (data.type === 'queue-updated' && Array.isArray(data.queue)) {
             const newQueue: QueueItem[] = (data.queue as any[]).map((item) => {
               const track = item?.track;
@@ -1302,6 +1676,21 @@ export default function App() {
             const firstQueueItemId = newQueue[0]?.id ?? null;
 
             if (data.reason === 'schedule-preempt' && firstQueueItemId) {
+              // Cancel any in-flight preempt timers.
+              if (preemptTimerRef.current != null) {
+                window.clearTimeout(preemptTimerRef.current);
+                preemptTimerRef.current = null;
+              }
+              if (scheduledGapTimerRef.current != null) {
+                window.clearInterval(scheduledGapTimerRef.current);
+                scheduledGapTimerRef.current = null;
+              }
+              setScheduledGapOverride(null);
+              const preemptToken = ++preemptTokenRef.current;
+
+              // MISSION-CRITICAL: Decouple history logging from playback transitions.
+              // We do NOT await this call because it performs async I/O that could
+              // block the entire WebSocket message loop or UI thread.
               const interruptedTrack = currentTrackRef.current;
               if (interruptedTrack) {
                 const now = Date.now();
@@ -1313,12 +1702,81 @@ export default function App() {
                 const interruptionTime = nowIst ?? new Date();
                 const interruptedSeconds = Math.max(playheadSeconds, wallClockElapsedSeconds);
                 const playedAtOverride = new Date(interruptionTime.getTime() - interruptedSeconds * 1000).toISOString();
-                await finalizePlaybackHistory(interruptedTrack, {
+
+                // Fire and forget (history is non-blocking for automation)
+                void finalizePlaybackHistory(interruptedTrack, {
                   completed: false,
                   source: 'queue',
                   playedAtOverride,
-                });
+                  endTimestampOverride: interruptionTime,
+                }).catch(err => console.error('[History] Failed to finalize non-blocking entry:', err));
               }
+
+              // HARD-STOP old track state and immediately select the new one.
+              setIsPlaying(false);
+              setCurrentQueueItemId(firstQueueItemId);
+              setRestoreSeekSeconds(null);
+              setSeekAnchor(null);
+
+              // Refresh schedules asynchronously.
+              void (async () => {
+                try {
+                  const serverSchedules = await schedulesAPI.getAll();
+                  const mapped: ScheduledPlaylist[] = (serverSchedules as any[]).map((s: any) => ({
+                    id: s.id,
+                    playlistId: s.playlist_id ?? s.playlistId,
+                    playlistName: String(s.playlist_name ?? s.playlistName ?? ''),
+                    type: s.type,
+                    dateTime: s.date_time ? new Date(s.date_time) : s.dateTime ? new Date(s.dateTime) : undefined,
+                    queueSongId: s.queue_song_id ?? s.queueSongId ?? undefined,
+                    triggerPosition: (s.trigger_position ?? s.triggerPosition) as any,
+                    lockPlaylist: Boolean(s.lock_playlist ?? s.lockPlaylist),
+                    status: s.status as ScheduledPlaylist['status'],
+                  }));
+                  setScheduledPlaylists(mapped);
+                } catch {
+                  // ignore
+                }
+              })();
+
+              const mode = transitionModeRef.current;
+              const gap = mode === 'gap' ? Math.max(0, Number(gapSecondsRef.current) || 0) : 0;
+
+              if (gap > 0) {
+                const headTrack = newQueue[0]?.track ?? null;
+                const endAt = Date.now() + gap * 1000;
+                if (headTrack) {
+                  setScheduledGapOverride({ nextTrack: headTrack, remainingSeconds: gap });
+                  scheduledGapTimerRef.current = window.setInterval(() => {
+                    const remaining = Math.max(0, Math.ceil((endAt - Date.now()) / 1000));
+                    setScheduledGapOverride((prev) => (prev ? { ...prev, remainingSeconds: remaining } : null));
+                    if (remaining <= 0) {
+                      if (scheduledGapTimerRef.current != null) {
+                        window.clearInterval(scheduledGapTimerRef.current);
+                        scheduledGapTimerRef.current = null;
+                      }
+                    }
+                  }, 250);
+                }
+                preemptTimerRef.current = window.setTimeout(() => {
+                  if (preemptTokenRef.current !== preemptToken) return;
+                  preemptTimerRef.current = null;
+                  if (scheduledGapTimerRef.current != null) {
+                    window.clearInterval(scheduledGapTimerRef.current);
+                    scheduledGapTimerRef.current = null;
+                  }
+                  setScheduledGapOverride(null);
+                  const startAt = nowIst ?? new Date();
+                  setNowPlayingStart(startAt);
+                  setIsPlaying(true);
+                }, gap * 1000);
+              } else {
+                setScheduledGapOverride(null);
+                const startAt = nowIst ?? new Date();
+                setNowPlayingStart(startAt);
+                setIsPlaying(true);
+              }
+              return;
             }
           }
         } catch (error) {
@@ -1495,28 +1953,37 @@ export default function App() {
   const handleAddToQueue = async (track: Track) => {
     if (!track?.id) return;
     const wasEmpty = queue.length === 0;
+
     try {
       const item = await queueAPI.add(track.id);
       const normalized: QueueItem = item?.track
         ? {
-            ...item,
-            track: {
-              ...item.track,
-              filePath: resolveUploadsUrl(item.track.filePath || (item.track as any).file_path),
-            },
-          }
+          ...item,
+          track: {
+            ...item.track,
+            filePath: resolveUploadsUrl(item.track.filePath || (item.track as any).file_path),
+          },
+        }
         : (item as any);
 
-      // Avoid double-adding when WebSocket is live; rely on backend broadcast.
+      // If the queue was empty, we must show the newly queued item immediately
+      // so the Playback Bar reflects it without waiting for WebSocket delivery.
+      if (wasEmpty) {
+        setQueue([normalized]);
+        setCurrentQueueItemId(normalized.id);
+        toast.success('Added to queue');
+        return;
+      }
+
+      // When WS is not connected, apply an optimistic update. When WS is live,
+      // rely on the backend queue-updated broadcast to be the authoritative source.
       if (!hasLiveQueueRef.current) {
         setQueue((prev) => [...prev, normalized]);
-        if (wasEmpty && !currentQueueItemId) {
-          setCurrentQueueItemId(normalized.id);
-        }
       }
+      toast.success('Added to queue');
     } catch (error: any) {
       console.error('Failed to add track to queue', error);
-      toast.error(error?.message || 'Failed to add track to queue');
+      toast.error(error.message || 'Failed to add track to queue');
     }
   };
 
@@ -1524,11 +1991,14 @@ export default function App() {
     playlistId: string,
     files: File[],
     insertIndex?: number,
-    suppressDuplicateDialog = false,
+    suppressDuplicateDialog?: boolean,
   ) => {
-    // ...
-    let playlist = playlists.find(p => p.id === playlistId);
-    const playlistWasMissing = !playlist;
+    if (!playlistId) {
+      throw new Error('Playlist ID is required');
+    }
+
+    let playlist: Playlist | undefined;
+    const playlistWasMissing = !playlists.find(p => p.id === playlistId);
     if (!playlist) {
       try {
         playlist = await playlistsAPI.getById(playlistId);
@@ -1553,14 +2023,24 @@ export default function App() {
       .map(t => String(t.name || ''))
       .filter(Boolean);
 
+    const totalFiles = files.length;
+    if (totalFiles > 0) {
+      setPlaylistImportProgress({ percent: 0, label: `Adding to playlist… 0/${totalFiles}`, playlistId });
+    }
+
     for (const file of files) {
       const index = importedTracks.length + duplicates + failed;
-      if (files.length >= 25) {
+      // Throttle UI updates for smoothness; still keep it responsive.
+      if (totalFiles > 0 && (index % 3 === 0 || index === totalFiles - 1)) {
         setPlaylistImportProgress({
-          percent: Math.min(100, (index / files.length) * 100),
-          label: `Adding to playlist… ${index}/${files.length}`,
+          percent: Math.min(100, (index / totalFiles) * 100),
+          label: `Adding to playlist… ${index}/${totalFiles}`,
+          playlistId,
         });
-        await yieldToBrowser();
+
+        if (totalFiles >= 25) {
+          await yieldToBrowser();
+        }
       }
       const validation = isValidUploadFile(file);
       if (!validation.ok) {
@@ -1620,7 +2100,7 @@ export default function App() {
             size: t.size,
             filePath: resolveUploadsUrl((t as any).filePath || (t as any).file_path),
             hash: t.hash,
-            dateAdded: (t as any).date_added ? new Date((t as any).date_added) : new Date(),
+            dateAdded: (t as any).dateAdded ? new Date((t as any).dateAdded) : new Date(),
           };
           importedTracks.push(mapped);
           existingNames.push(mapped.name);
@@ -1643,7 +2123,7 @@ export default function App() {
           size: t.size,
           filePath: resolveUploadsUrl(t.filePath || t.file_path),
           hash: t.hash,
-          dateAdded: t.date_added ? new Date(t.date_added) : new Date(),
+          dateAdded: t.dateAdded ? new Date(t.dateAdded) : new Date(),
         };
         importedTracks.push(mapped);
         existingNames.push(mapped.name);
@@ -1687,7 +2167,12 @@ export default function App() {
           const targetIndex = insertIndex != null ? Math.min(Math.max(insertIndex, 0), baseLen) : baseLen;
           const before = current.slice(0, targetIndex);
           const after = current.slice(targetIndex);
-          const combined = [...before, ...importedTracks, ...after];
+          const combined = [...before, ...importedTracks, ...after].reduce<Track[]>((acc, t) => {
+            if (!t?.id) return acc;
+            if (acc.some((x) => x.id === t.id)) return acc;
+            acc.push(t);
+            return acc;
+          }, []);
 
           newTracksForReorder = combined;
 
@@ -1728,11 +2213,16 @@ export default function App() {
     const safeFiles = Array.isArray(files) ? files : [];
     if (safeFiles.length === 0) return;
 
+    const audioFiles = safeFiles.filter((f) => isValidUploadFile(f).ok);
+    if (audioFiles.length === 0) return;
+
     try {
-      setPlaylistImportProgress({ percent: 0, label: 'Creating playlist…' });
+      setPlaylistImportProgress({ percent: 0, label: 'Creating playlist…', playlistId: '__creating__' });
       const created = await playlistsAPI.create(name);
       setPlaylists((prev) => [...prev, created as any]);
-      await handleImportFilesToPlaylist(created.id, safeFiles, undefined, true);
+      // Move progress to the created playlist so only that right panel shows it.
+      setPlaylistImportProgress({ percent: 0, label: 'Adding to playlist… 0/0', playlistId: created.id });
+      await handleImportFilesToPlaylist(created.id, audioFiles, undefined, true);
     } catch (err: any) {
       console.error('Failed to import folder into new playlist', err);
       toast.error(err?.message || 'Failed to import folder into playlist');
@@ -1838,6 +2328,14 @@ export default function App() {
         });
       }
     } catch (error: any) {
+      const status = error?.status ?? error?.response?.status;
+      if (status === 409) {
+        toast.error('Already scheduled', {
+          description: 'This playlist already has a pending schedule. Cancel it or wait until it triggers.',
+          duration: 3500,
+        });
+        return;
+      }
       console.error('Failed to create schedule', error);
       toast.error(error.message || 'Failed to create schedule');
     }
@@ -1847,6 +2345,29 @@ export default function App() {
     setScheduleDialogOpen(open);
     if (!open) {
       setSelectedPlaylistForSchedule(null);
+    }
+  };
+
+  const handleFactoryReset = async () => {
+    try {
+      await settingsAPI.factoryReset();
+      // Clear all local state
+      setTracks([]);
+      setPlaylists([]);
+      setQueue([]);
+      setCurrentQueueItemId(null);
+      setHistoryOpen(false);
+      setScheduleDialogOpen(false);
+      setShowBackupDialog(false);
+
+      // Show success message briefly before reload
+      setTimeout(() => {
+        // Reload the application to clean state
+        window.location.reload();
+      }, 1000);
+    } catch (error) {
+      console.error('Factory reset failed:', error);
+      // Keep dialog open on error so user can try again
     }
   };
 
@@ -2176,6 +2697,14 @@ export default function App() {
                   Backup & Restore
                 </DropdownMenuItem>
                 <DropdownMenuSeparator />
+                <DropdownMenuItem
+                  onClick={() => setShowFactoryResetDialog(true)}
+                  className="text-red-600 focus:text-red-600 dark:text-red-400 dark:focus:text-red-400"
+                >
+                  <Database className="w-4 h-4 mr-2" />
+                  Factory Reset
+                </DropdownMenuItem>
+                <DropdownMenuSeparator />
                 <DropdownMenuLabel>Appearance</DropdownMenuLabel>
                 <DropdownMenuItem onClick={toggleTheme}>
                   {theme === 'default' ? (
@@ -2200,41 +2729,71 @@ export default function App() {
 
       {/* Main two-panel layout: Library | Playlists */}
       <div className="flex flex-1 min-h-0 pb-20">
-        {/* Library (left) */}
-        <div className="flex-shrink-0 h-full" style={{ width: leftPanel.width }}>
-          <ErrorBoundary
-            title="Library"
-            resetKeys={[tracks.length, playlists.length]}
-            onError={(error) => {
-              console.error('Library panel crashed', error);
-              toast.error('Library panel crashed');
-            }}
+        {/* Library rail + panel (VS Code style) */}
+        <div
+          className="flex h-full flex-shrink-0 border-r border-border/70 bg-background/70 transition-[width] duration-200 ease-out"
+          style={{ width: LIBRARY_RAIL_WIDTH + (isLibraryPanelOpen ? leftPanel.width : 0) }}
+        >
+          {/* Rail */}
+          <div
+            className="h-full flex flex-col items-center py-2"
+            style={{ width: LIBRARY_RAIL_WIDTH }}
           >
-            <LibraryPanel
-              tracks={tracks}
-              playlists={playlists}
-              onAddToQueue={handleAddToQueue}
-              onAddToPlaylist={handleAddToPlaylist}
-              onSelectPlaylist={() => { }}
-              onCreatePlaylist={handleCreatePlaylist}
-              onRenamePlaylist={handleRenamePlaylist}
-              onDeletePlaylist={handleDeletePlaylist}
-              onToggleLockPlaylist={handleToggleLockPlaylist}
-              onRemoveTrack={handleRemoveTrack}
+            <Button
+              variant={isLibraryPanelOpen ? 'secondary' : 'ghost'}
+              size="icon"
+              onClick={toggleLibraryPanel}
+              title={isLibraryPanelOpen ? 'Collapse Library' : 'Expand Library'}
+              className="h-9 w-9"
+            >
+              <Folder className="h-5 w-5" />
+            </Button>
+          </div>
 
-              onRemoveTracks={handleRemoveTracks}
-              onImportTracks={handleImportTracks}
-              onImportFolder={handleImportFolder}
-              importProgress={libraryImportProgress}
-            />
-          </ErrorBoundary>
+          {/* Panel */}
+          <div
+            className="h-full overflow-hidden transition-[width] duration-200 ease-out"
+            style={{ width: isLibraryPanelOpen ? leftPanel.width : 0 }}
+          >
+            <div className="h-full" style={{ width: leftPanel.width }}>
+              <ErrorBoundary
+                title="Library"
+                resetKeys={[tracks.length, playlists.length]}
+                onError={(error) => {
+                  console.error('Library panel crashed', error);
+                  toast.error('Library panel crashed');
+                }}
+              >
+                <LibraryPanel
+                  tracks={tracks}
+                  playlists={playlists}
+                  onAddToQueue={handleAddToQueue}
+                  onAddToPlaylist={handleAddToPlaylist}
+                  onSelectPlaylist={() => { }}
+                  onCreatePlaylist={handleCreatePlaylist}
+                  onRenamePlaylist={handleRenamePlaylist}
+                  onDeletePlaylist={handleDeletePlaylist}
+                  onToggleLockPlaylist={handleToggleLockPlaylist}
+                  onRemoveTrack={handleRemoveTrack}
+
+                  onRemoveTracks={handleRemoveTracks}
+                  onImportTracks={handleImportTracks}
+                  onImportFolder={handleImportFolder}
+                  importProgress={libraryImportProgress}
+                  onTrackUpdated={handleTrackUpdated}
+                />
+              </ErrorBoundary>
+            </div>
+          </div>
         </div>
 
         {/* Resize handle between Library and Playlists */}
-        <ResizeHandle
-          onMouseDown={leftPanel.handleMouseDown}
-          isResizing={leftPanel.isResizing}
-        />
+        {isLibraryPanelOpen && (
+          <ResizeHandle
+            onMouseDown={leftPanel.handleMouseDown}
+            isResizing={leftPanel.isResizing}
+          />
+        )}
 
         {/* Playlists (center) */}
         <div className="flex-1 min-w-0 h-full">
@@ -2263,13 +2822,16 @@ export default function App() {
               queue={queue}
               onImportFilesToPlaylist={handleImportFilesToPlaylist}
               onQueueTrackFromPlaylist={handleAddToQueue}
+              onTrackUpdated={handleTrackUpdated}
               scheduledPlaylists={scheduledPlaylists}
               onDeleteSchedule={handleDeleteSchedule}
               onDropTrackOnPlaylistHeader={handleDropTrackOnPlaylistHeader}
+              onDropFolderOnPlaylistHeader={handleDropFolderOnPlaylistHeader}
               onDropFilesOnPlaylistHeader={handleOsDropFilesOnPlaylistHeader}
               onDropTrackOnPlaylistPanel={handleDropTrackOnPlaylistPanel}
+              onDropFolderOnPlaylistPanel={handleDropFolderOnPlaylistPanel}
               onDropFolderOnEmptyArea={handleDropFolderOnPlaylistEmptyArea}
-              importProgress={playlistImportProgress}
+              importProgress={playlistImportProgress ?? null}
             />
           </ErrorBoundary>
         </div>
@@ -2307,6 +2869,8 @@ export default function App() {
             locked={queueDialogLocked}
             selectedQueueItemId={selectedQueueItemId}
             onSelectQueueItem={setSelectedQueueItemId}
+            pendingNextQueueItemId={pendingNextQueueItemId}
+            gapRemainingSeconds={gapState.gapRemainingSeconds}
             showHeader={false}
           />
         </ErrorBoundary>
@@ -2317,6 +2881,7 @@ export default function App() {
         <PlaybackBar
           currentTrack={currentTrack}
           nextTrack={nextTrack}
+          scheduledGapOverride={scheduledGapOverride}
           isPlaying={isPlaying}
           onPlayPause={handlePlayPause}
           onNext={handleNext}
@@ -2331,6 +2896,8 @@ export default function App() {
           audioDevices={audioDevices}
           onSeek={handleSeekWithTiming}
           onProgress={handlePlaybackProgress}
+          restoreSeekSeconds={restoreSeekSeconds}
+          onGapStateChange={setGapState}
         />
       </div>
 
@@ -2342,6 +2909,9 @@ export default function App() {
           onOpenChange={handleScheduleDialogOpenChange}
           playlistName={selectedPlaylistForSchedule.name}
           queue={queue}
+          existingSchedule={
+            scheduledPlaylists.find((s) => s.playlistId === selectedPlaylistForSchedule.id) ?? null
+          }
           onSchedule={handleScheduleConfirm}
         />
       )}
@@ -2350,6 +2920,15 @@ export default function App() {
 
       <SimpleBackupDialog open={showBackupDialog} onOpenChange={setShowBackupDialog} />
 
+      <ConfirmDialog
+        open={showFactoryResetDialog}
+        title="Factory Reset"
+        description="This will completely erase all data including library, playlists, queue, history, and settings. The app will automatically restart to a clean state. This action cannot be undone."
+        confirmLabel="Factory Reset"
+        cancelLabel="Cancel"
+        onConfirm={handleFactoryReset}
+        onCancel={() => setShowFactoryResetDialog(false)}
+      />
 
       <ConfirmDialog
         open={tracksToRemove !== null}
@@ -2359,6 +2938,16 @@ export default function App() {
         cancelLabel="Cancel"
         onConfirm={confirmRemoveTracks}
         onCancel={() => setTracksToRemove(null)}
+      />
+
+      <ConfirmDialog
+        open={removePlayingTrackConfirm !== null}
+        title="Remove currently playing track?"
+        description="This will stop playback and remove the current track from the queue."
+        confirmLabel="Remove"
+        cancelLabel="Cancel"
+        onConfirm={confirmRemovePlayingTrack}
+        onCancel={() => setRemovePlayingTrackConfirm(null)}
       />
 
       <AnimatePresence>

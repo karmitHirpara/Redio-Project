@@ -217,6 +217,17 @@ export const tracksAPI = {
 
   getById: (id: string) => apiClient.get<Track>(`/tracks/${id}`),
 
+  edit: (
+    id: string,
+    data: {
+      startSeconds?: number;
+      endSeconds?: number;
+      autoSkipEnabled?: boolean;
+      autoGapEnabled?: boolean;
+      segments?: Array<{ startSeconds: number; endSeconds: number }>;
+    }
+  ) => apiClient.json<Track>(`/tracks/${id}/edit`, { method: 'POST', json: data }),
+
   upload: async (file: File, metadata: { name?: string; artist?: string; duration?: number }) => {
     const formData = new FormData();
     formData.append('file', file);
@@ -317,8 +328,31 @@ export const foldersAPI = {
     apiClient.json<any>(`/folders/${folderId}/parent`, { method: 'PUT', json: { parentId } }),
 };
 
+export type LibrarySearchResult = {
+  id: string;
+  name: string;
+  artist: string;
+  duration: number;
+  size: number;
+  file_path: string;
+  hash: string;
+  date_added: string;
+  folder_id?: string;
+  folder_name?: string;
+  folder_path?: string;
+};
+
+export const libraryAPI = {
+  search: (q: string, limit = 500) =>
+    apiClient.get<{ results: LibrarySearchResult[] }>(
+      `/library/search?q=${encodeURIComponent(q)}&limit=${encodeURIComponent(String(limit))}`,
+      { retries: 1, retryDelayMs: 250 },
+    ),
+};
+
 export const historyAPI = {
-  get: (limit = 100) => apiClient.get<any[]>(`/history?limit=${encodeURIComponent(String(limit))}`),
+  get: (limit = 100, offset = 0) =>
+    apiClient.get<any[]>(`/history?limit=${encodeURIComponent(String(limit))}&offset=${encodeURIComponent(String(offset))}`),
   create: (payload: {
     trackId: string;
     playedAt: string;
@@ -353,6 +387,11 @@ export const settingsAPI = {
     apiClient.json<{ ok: true; settings: Record<string, string> }>('/settings', {
       method: 'PUT',
       json: { updates },
+    }),
+  factoryReset: () =>
+    apiClient.json<{ ok: true; message: string }>('/settings/factory-reset', {
+      method: 'DELETE',
+      json: {},
     }),
 };
 
@@ -441,6 +480,8 @@ export type CreateBackupOptions = {
   categories?: DataCategory[];
   location?: string;
   description?: string;
+  includeAudioFiles?: boolean;
+  outputDir?: string;
 };
 
 export type RestoreOptions = {
@@ -484,7 +525,8 @@ export const backupAPI = {
   create: (options?: CreateBackupOptions) =>
     apiClient.request<{ ok: true; backup: { filename: string; path: string; bytes: number; checksum: string } }>('/backup', {
       method: 'POST',
-      json: options || {}
+      json: options || {},
+      timeoutMs: 0,
     }),
 
   // Status and job management
@@ -502,14 +544,16 @@ export const backupAPI = {
   validate: (filename: string) =>
     apiClient.json<{ isValid: boolean; errors?: string[]; filename: string }>('/backup/validate', {
       method: 'POST',
-      json: { filename }
+      json: { filename },
+      timeoutMs: 0,
     }),
 
   // Restore with options
   restore: (filename: string, options?: RestoreOptions) =>
     apiClient.json<RestoreResult>('/backup/restore', {
       method: 'POST',
-      json: { filename, ...options }
+      json: { filename, ...options },
+      timeoutMs: 0,
     }),
 
   // Configuration
@@ -544,6 +588,7 @@ export const backupAPI = {
     return apiClient.request<UploadResult>('/backup/upload', {
       method: 'POST',
       body: formData,
+      timeoutMs: 0,
     });
   },
 
