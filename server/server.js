@@ -6,8 +6,14 @@ import path, { dirname, join } from 'path';
 import fs from 'fs';
 import http from 'http';
 import { WebSocketServer } from 'ws';
+import chokidar from 'chokidar';
 import { runSchedulerTick } from './services/scheduler.js';
-import { isS3UploadStorage, getS3PublicBaseUrl } from './services/objectStorage.js';
+import { isS3UploadStorage, getS3PublicBaseUrl, s3KeyFromUploadsPath } from './services/objectStorage.js';
+import { get, query, run } from './config/database.js';
+import { emitQueueUpdated } from './routes/queue.js';
+import { runStartupSync } from './services/preFlightScan.js';
+import { sha256File, getDuration } from './services/audio.js';
+import { v4 as uuidv4 } from 'uuid';
 
 // Import routes
 import tracksRouter from './routes/tracks.js';
@@ -38,9 +44,18 @@ const uploadsDir = path.isAbsolute(rawUploadPath)
   ? rawUploadPath
   : join(__dirname, rawUploadPath);
 
-if (!fs.existsSync(uploadsDir)) {
-  fs.mkdirSync(uploadsDir, { recursive: true });
-}
+const rawQueueUploadPath = process.env.QUEUE_UPLOAD_PATH || '';
+const queueUploadsDir = rawQueueUploadPath
+  ? (path.isAbsolute(rawQueueUploadPath) ? rawQueueUploadPath : join(__dirname, rawQueueUploadPath))
+  : path.join(dirname(uploadsDir), 'queue_uploads');
+
+const libraryDir = path.join(uploadsDir, 'library');
+const playlistsDir = path.join(uploadsDir, 'playlists');
+
+if (!fs.existsSync(uploadsDir)) fs.mkdirSync(uploadsDir, { recursive: true });
+if (!fs.existsSync(libraryDir)) fs.mkdirSync(libraryDir, { recursive: true });
+if (!fs.existsSync(playlistsDir)) fs.mkdirSync(playlistsDir, { recursive: true });
+if (!fs.existsSync(queueUploadsDir)) fs.mkdirSync(queueUploadsDir, { recursive: true });
 
 app.disable('x-powered-by');
 
@@ -111,7 +126,17 @@ if (isS3UploadStorage() && getS3PublicBaseUrl()) {
     express.static(uploadsDir, {
       dotfiles: 'deny',
       index: false,
-      fallthrough: false,
+      fallthrough: true,
+      redirect: false,
+    }),
+  );
+
+  app.use(
+    '/uploads_queue',
+    express.static(queueUploadsDir, {
+      dotfiles: 'deny',
+      index: false,
+      fallthrough: true,
       redirect: false,
     }),
   );
@@ -239,12 +264,117 @@ server.listen(PORT, HOST, () => {
       console.error('Scheduler tick error', err);
     });
   }, intervalMs);
+
+  // Initialize file system watcher for local uploads
+  if (!isS3UploadStorage()) {
+    // Run initial pre-flight sync on both or just library?
+    runStartupSync(uploadsDir).catch((err) => console.error(err));
+
+    console.log(`👀 Starting file watcher natively on ${libraryDir}`);
+    fileWatcher = chokidar.watch(libraryDir, {
+      ignoreInitial: true,
+      persistent: true,
+      depth: 0,
+      awaitWriteFinish: {
+        stabilityThreshold: 2000,
+        pollInterval: 100
+      }
+    });
+
+    fileWatcher.on('add', async (filePath) => {
+      try {
+        const basename = path.basename(filePath);
+        // Only accept likely audio extensions to prevent picking up temp/system files
+        const ext = path.extname(basename).toLowerCase();
+        if (!['.mp3', '.wav', '.ogg', '.m4a', '.flac', '.aac'].includes(ext)) {
+          return;
+        }
+
+        const relativePath = `/uploads/library/${basename}`;
+
+        // Check if track already exists (duplicate event or already tracked)
+        const existing = await get('SELECT id FROM tracks WHERE file_path = ?', [relativePath]);
+        if (existing) {
+          return;
+        }
+
+        console.log(`[Watcher] New OS file detected: ${basename}. Processing for Library injection...`);
+
+        const stat = fs.statSync(filePath);
+        const duration = await getDuration(filePath);
+        const hash = await sha256File(filePath);
+
+        // Derive name and artist cleanly
+        const namePart = basename.replace(ext, '');
+        let trackName = namePart;
+        let artistName = 'Unknown Artist';
+        if (namePart.includes(' - ')) {
+          const parts = namePart.split(' - ');
+          artistName = parts[0].trim();
+          trackName = parts.slice(1).join(' - ').trim();
+        }
+
+        const trackId = uuidv4();
+
+        await run(
+          `INSERT INTO tracks (id, name, artist, duration, size, file_path, hash)
+           VALUES (?, ?, ?, ?, ?, ?, ?)`,
+          [
+            trackId,
+            trackName,
+            artistName,
+            duration,
+            stat.size,
+            relativePath,
+            hash,
+          ]
+        );
+
+        console.log(`[Watcher] Success! Added [${trackName}] to global library.`);
+        broadcastEvent({ type: 'tracksAdded' });
+      } catch (error) {
+        console.error('[Watcher] Error handling add event:', error);
+      }
+    });
+
+    fileWatcher.on('unlink', async (filePath) => {
+      try {
+        const basename = path.basename(filePath);
+        const relativePath = `/uploads/library/${basename}`;
+
+        // Find all tracks pointing to this file
+        const tracks = await query('SELECT * FROM tracks WHERE file_path = ?', [relativePath]);
+        if (tracks && tracks.length > 0) {
+          const trackIds = tracks.map(t => t.id);
+          console.log(`[Watcher] File deleted natively: ${basename}. Removing ${tracks.length} track(s)...`);
+
+          for (const trackId of trackIds) {
+            await run('DELETE FROM tracks WHERE id = ?', [trackId]);
+          }
+
+          // Emit events to sync clients
+          broadcastEvent({ type: 'tracksDeleted', trackIds });
+          await emitQueueUpdated(app);
+          broadcastEvent({ type: 'playlistsUpdated' });
+        }
+      } catch (error) {
+        console.error('[Watcher] Error handling unlink event:', error);
+      }
+    });
+  }
 });
+
+let fileWatcher = null;
 
 export const stopBackend = async () => {
   if (schedulerInterval) {
     clearInterval(schedulerInterval);
     schedulerInterval = null;
+  }
+
+  if (fileWatcher) {
+    await fileWatcher.close();
+    fileWatcher = null;
   }
 
   return new Promise((resolve) => {

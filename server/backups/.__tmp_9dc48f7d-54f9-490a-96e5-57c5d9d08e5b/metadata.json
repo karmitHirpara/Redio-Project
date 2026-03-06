@@ -1,0 +1,32 @@
+{
+  "id": "9dc48f7d-54f9-490a-96e5-57c5d9d08e5b",
+  "type": "full",
+  "categories": [
+    "library",
+    "playlists",
+    "queue",
+    "scheduler",
+    "history",
+    "configs"
+  ],
+  "size": 483328,
+  "checksum": "c97852cb44b39352d7fbd33d42dd2842d5d46c4c0639e8d4069a4ca6a1fd1fa6",
+  "createdAt": "2026-03-06T09:39:36.017Z",
+  "version": "1.0.0",
+  "appVersion": "1.0.0",
+  "location": "default",
+  "compressed": false,
+  "includesAudio": true,
+  "description": "Manual backup",
+  "forceFullBackup": true,
+  "database": {
+    "filename": "database.sqlite",
+    "bytes": 483328,
+    "checksum": "c97852cb44b39352d7fbd33d42dd2842d5d46c4c0639e8d4069a4ca6a1fd1fa6"
+  },
+  "queueDatabase": {
+    "filename": "queue.sqlite",
+    "bytes": 20480,
+    "checksum": "21bcb0e96187e050a15eb5a23b2f50e321d60ca3785d69dfaaceafd08dc9301f"
+  }
+}

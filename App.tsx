@@ -124,11 +124,19 @@ export default function App() {
 
   const toggleQueueDialog = () => setQueueDialogOpen((prev) => !prev);
 
-  const [playlistNameDialog, setPlaylistNameDialog] = useState<
-    | { mode: 'create'; name: string }
-    | { mode: 'rename'; playlistId: string; name: string }
-    | null
-  >(null);
+  const [playlistNameDialog, setPlaylistNameDialog] = useState<null | {
+    mode: 'create' | 'rename';
+    playlistId?: string;
+    name: string;
+  }>(null);
+
+  const [deletePlaylistConfirm, setDeletePlaylistConfirm] = useState<null | {
+    playlistId: string;
+    name: string;
+    trackCount: number;
+    mediaCount: number;
+    scheduledCount: number;
+  }>(null);
 
   const [recentPlaylistAdd, setRecentPlaylistAdd] = useState<
     | { playlistId: string; trackId: string; createdAt: number }
@@ -285,30 +293,43 @@ export default function App() {
     if (tracksToAttach.length === 0) return;
 
     try {
+      const beforeIds = new Set((playlist.tracks || []).map((t) => t.id));
+
       await playlistsAPI.addTracks(playlistId, tracksToAttach.map((t) => t.id));
 
-      let combined: Track[] = [];
-      setPlaylists((prev) =>
-        prev.map((p) => {
-          if (p.id !== playlistId) return p;
-          const current = p.tracks || [];
-          const idx = Math.min(Math.max(insertIndex ?? current.length, 0), current.length);
-          combined = [...current.slice(0, idx), ...tracksToAttach, ...current.slice(idx)];
-          return {
-            ...p,
-            tracks: combined,
-            duration: combined.reduce((sum, t) => sum + (t.duration || 0), 0),
-          };
-        })
-      );
+      const refreshed = await playlistsAPI.getById(playlistId);
+      const refreshedTracks: Track[] = (refreshed?.tracks || []).map((t: any) => normalizeServerTrack(t));
 
-      if (combined.length > 0) {
+      const newOnes = refreshedTracks.filter((t) => !beforeIds.has(t.id));
+      const existing = refreshedTracks.filter((t) => beforeIds.has(t.id));
+      const idx = Math.min(Math.max(insertIndex ?? existing.length, 0), existing.length);
+      const desiredOrder = [...existing.slice(0, idx), ...newOnes, ...existing.slice(idx)];
+
+      // Persist desired ordering (best-effort), then refresh again.
+      if (desiredOrder.length > 0) {
         try {
-          await playlistsAPI.reorder(playlistId, combined.map((t) => t.id));
+          await playlistsAPI.reorder(playlistId, desiredOrder.map((t) => t.id));
         } catch (err) {
           console.error('Failed to persist playlist reorder after drop', err);
         }
       }
+
+      const finalPlaylist = await playlistsAPI.getById(playlistId);
+      const finalTracks: Track[] = (finalPlaylist?.tracks || []).map((t: any) => normalizeServerTrack(t));
+
+      setPlaylists((prev) =>
+        prev.map((p) => {
+          if (p.id !== playlistId) return p;
+          const duration = finalTracks.reduce((sum, t) => sum + (t.duration || 0), 0);
+          return { ...p, ...finalPlaylist, tracks: finalTracks, duration } as any;
+        }),
+      );
+
+      setTracks((prev) => {
+        const byId = new Map(prev.map((t) => [t.id, t] as const));
+        for (const t of finalTracks) byId.set(t.id, t);
+        return Array.from(byId.values());
+      });
     } catch (err: any) {
       console.error('Failed to drop tracks on playlist panel', err);
       toast.error(err?.message || 'Failed to update playlist');
@@ -340,6 +361,7 @@ export default function App() {
         const created = await playlistsAPI.create(name);
         setPlaylists((prev) => [...prev, created as any]);
       } else {
+        if (!dialog.playlistId) return;
         const updated = await playlistsAPI.update(dialog.playlistId, { name });
         setPlaylists((prev) => prev.map((p) => (p.id === dialog.playlistId ? { ...p, name: updated.name } : p)));
       }
@@ -615,10 +637,41 @@ export default function App() {
   };
 
   const handleDeletePlaylist = async (playlistId: string) => {
-    if (!window.confirm('Delete this playlist?')) return;
     try {
-      await playlistsAPI.delete(playlistId);
+      const playlist = playlists.find((p) => p.id === playlistId);
+      if (!playlist) return;
+
+      const preview = await playlistsAPI.deletePreview(playlistId);
+      const requires = Boolean(preview?.requiresConfirmation);
+      const trackCount = Number(preview?.trackCount || 0);
+      const mediaCount = Number(preview?.mediaCount || 0);
+      const scheduledCount = Number(preview?.scheduledCount || 0);
+
+      if (requires) {
+        setDeletePlaylistConfirm({
+          playlistId,
+          name: playlist.name,
+          trackCount,
+          mediaCount,
+          scheduledCount,
+        });
+        return;
+      }
+
+      await playlistsAPI.deleteRecursive(playlistId, false);
       setPlaylists((prev) => prev.filter((p) => p.id !== playlistId));
+    } catch (err: any) {
+      toast.error(err?.message || 'Failed to delete playlist');
+    }
+  };
+
+  const confirmDeletePlaylist = async () => {
+    const pending = deletePlaylistConfirm;
+    if (!pending) return;
+    setDeletePlaylistConfirm(null);
+    try {
+      await playlistsAPI.deleteRecursive(pending.playlistId, true);
+      setPlaylists((prev) => prev.filter((p) => p.id !== pending.playlistId));
     } catch (err: any) {
       toast.error(err?.message || 'Failed to delete playlist');
     }
@@ -658,7 +711,15 @@ export default function App() {
         await playlistsAPI.addTracks(created.id, trackIds);
       }
       const fetched = await playlistsAPI.getById(created.id);
-      setPlaylists((prev) => [...prev, fetched as any]);
+      const fetchedTracks: Track[] = (fetched?.tracks || []).map((t: any) => normalizeServerTrack(t));
+      const duration = fetchedTracks.reduce((sum, t) => sum + (t.duration || 0), 0);
+      setPlaylists((prev) => [...prev, { ...(fetched as any), tracks: fetchedTracks, duration } as any]);
+
+      setTracks((prev) => {
+        const byId = new Map(prev.map((t) => [t.id, t] as const));
+        for (const t of fetchedTracks) byId.set(t.id, t);
+        return Array.from(byId.values());
+      });
     } catch (err: any) {
       toast.error(err?.message || 'Failed to duplicate playlist');
     }
@@ -673,15 +734,18 @@ export default function App() {
     }
 
     try {
-      const ids = tracksToAdd.map((t) => t.id);
-      await playlistsAPI.addTracks(playlistId, ids);
-      setPlaylists((prev) =>
-        prev.map((p) => {
-          if (p.id !== playlistId) return p;
-          const combined = [...(p.tracks || []), ...tracksToAdd];
-          return { ...p, tracks: combined, duration: combined.reduce((sum, t) => sum + t.duration, 0) };
-        })
-      );
+      await playlistsAPI.addTracks(playlistId, tracksToAdd.map((t) => t.id));
+
+      const refreshed = await playlistsAPI.getById(playlistId);
+      const refreshedTracks: Track[] = (refreshed?.tracks || []).map((t: any) => normalizeServerTrack(t));
+      const duration = refreshedTracks.reduce((sum, t) => sum + (t.duration || 0), 0);
+      setPlaylists((prev) => prev.map((p) => (p.id === playlistId ? ({ ...p, ...refreshed, tracks: refreshedTracks, duration } as any) : p)));
+
+      setTracks((prev) => {
+        const byId = new Map(prev.map((t) => [t.id, t] as const));
+        for (const t of refreshedTracks) byId.set(t.id, t);
+        return Array.from(byId.values());
+      });
     } catch (err: any) {
       toast.error(err?.message || 'Failed to add songs');
     }
@@ -723,18 +787,18 @@ export default function App() {
         return Array.from(byId.values());
       });
 
-      // Optimistic playlist update (instant UI), then persist.
-      setPlaylists((prev) =>
-        prev.map((p) => {
-          if (p.id !== playlistId) return p;
-          const existing = new Set((p.tracks || []).map((t) => t.id));
-          const toAdd = uniqueNormalized.filter((t) => !existing.has(t.id));
-          const combined = [...(p.tracks || []), ...toAdd];
-          return { ...p, tracks: combined, duration: combined.reduce((sum, t) => sum + (t.duration || 0), 0) };
-        })
-      );
-
       await playlistsAPI.addTracks(playlistId, trackIds);
+
+      const refreshed = await playlistsAPI.getById(playlistId);
+      const refreshedTracks: Track[] = (refreshed?.tracks || []).map((t: any) => normalizeServerTrack(t));
+      const duration = refreshedTracks.reduce((sum, t) => sum + (t.duration || 0), 0);
+      setPlaylists((prev) => prev.map((p) => (p.id === playlistId ? ({ ...p, ...refreshed, tracks: refreshedTracks, duration } as any) : p)));
+
+      setTracks((prev) => {
+        const byId = new Map(prev.map((t) => [t.id, t] as const));
+        for (const t of refreshedTracks) byId.set(t.id, t);
+        return Array.from(byId.values());
+      });
     } catch (err) {
       console.error('Failed to drop folder on playlist header', err);
       toast.error('Failed to add folder tracks to playlist');
@@ -775,31 +839,38 @@ export default function App() {
         return Array.from(byId.values());
       });
 
-      // Optimistic insertion at drop index.
-      let nextOrderIds: string[] = [];
-      setPlaylists((prev) =>
-        prev.map((p) => {
-          if (p.id !== playlistId) return p;
-          const current = p.tracks || [];
-          const existing = new Set(current.map((t) => t.id));
-          const toAdd = uniqueNormalized.filter((t) => !existing.has(t.id));
-          const idx = Math.min(Math.max(insertIndex ?? current.length, 0), current.length);
-          const combined = [...current.slice(0, idx), ...toAdd, ...current.slice(idx)];
-          nextOrderIds = combined.map((t) => t.id);
-          return { ...p, tracks: combined, duration: combined.reduce((sum, t) => sum + (t.duration || 0), 0) };
-        })
-      );
+      const playlist = playlists.find((p) => p.id === playlistId);
+      const beforeIds = new Set((playlist?.tracks || []).map((t) => t.id));
 
       await playlistsAPI.addTracks(playlistId, trackIds);
 
-      // Best-effort reorder persistence after insertion.
+      const refreshed = await playlistsAPI.getById(playlistId);
+      const refreshedTracks: Track[] = (refreshed?.tracks || []).map((t: any) => normalizeServerTrack(t));
+
+      const newOnes = refreshedTracks.filter((t) => !beforeIds.has(t.id));
+      const existing = refreshedTracks.filter((t) => beforeIds.has(t.id));
+      const idx = Math.min(Math.max(insertIndex ?? existing.length, 0), existing.length);
+      const desiredOrder = [...existing.slice(0, idx), ...newOnes, ...existing.slice(idx)];
+
       try {
-        if (nextOrderIds.length > 0) {
-          await playlistsAPI.reorder(playlistId, nextOrderIds);
+        if (desiredOrder.length > 0) {
+          await playlistsAPI.reorder(playlistId, desiredOrder.map((t) => t.id));
         }
       } catch {
         // ignore reorder errors
       }
+
+      const finalPlaylist = await playlistsAPI.getById(playlistId);
+      const finalTracks: Track[] = (finalPlaylist?.tracks || []).map((t: any) => normalizeServerTrack(t));
+      const duration = finalTracks.reduce((sum, t) => sum + (t.duration || 0), 0);
+
+      setPlaylists((prev) => prev.map((p) => (p.id === playlistId ? ({ ...p, ...finalPlaylist, tracks: finalTracks, duration } as any) : p)));
+
+      setTracks((prev) => {
+        const byId = new Map(prev.map((t) => [t.id, t] as const));
+        for (const t of finalTracks) byId.set(t.id, t);
+        return Array.from(byId.values());
+      });
     } catch (err) {
       console.error('Failed to drop folder on playlist panel', err);
       toast.error('Failed to add folder tracks to playlist');
@@ -1213,45 +1284,33 @@ export default function App() {
     }
 
     try {
-      const existingNames: string[] = (playlist.tracks || []).map((t) => String(t.name || '')).filter(Boolean);
-      const baseName = String(track.name || 'Track').replace(/ \((\d+)\)$/, '');
-      const namePattern = new RegExp(`^${escapeRegExp(baseName)}(?: \\((\\d+)\\))?$`);
-      const hasSameBase = existingNames.some((name) => namePattern.test(name));
+      await playlistsAPI.addTracks(playlistId, [track.id]);
 
-      let trackToAttach: Track = track;
-      if (hasSameBase) {
-        const desiredName = getNextSequentialName(baseName, existingNames);
-        const t = await tracksAPI.alias(track.id, desiredName);
-        const aliasTrack: Track = {
-          id: t.id,
-          name: t.name,
-          artist: t.artist,
-          duration: t.duration && t.duration > 0 ? t.duration : track.duration,
-          size: t.size,
-          filePath: resolveUploadsUrl((t as any).filePath || (t as any).file_path),
-          hash: t.hash,
-          dateAdded: (t as any).dateAdded ? new Date((t as any).dateAdded) : new Date(),
-        };
-        setTracks((prev) => [aliasTrack, ...prev]);
-        trackToAttach = aliasTrack;
-      }
-
-      await playlistsAPI.addTracks(playlistId, [trackToAttach.id]);
+      // Refresh playlist from server so we pick up the playlist-owned track copies
+      // (new IDs + file paths) created by the backend.
+      const refreshed = await playlistsAPI.getById(playlistId);
+      const refreshedTracks: Track[] = (refreshed?.tracks || []).map((t: any) => normalizeServerTrack(t));
 
       setPlaylists((prev) =>
         prev.map((p) => {
           if (p.id !== playlistId) return p;
-          const newTracks = [...(p.tracks || []), trackToAttach];
-          return {
-            ...p,
-            tracks: newTracks,
-            duration: newTracks.reduce((sum, t) => sum + (t.duration || 0), 0),
-          };
-        })
+          const duration = refreshedTracks.reduce((sum, t) => sum + (t.duration || 0), 0);
+          return { ...p, ...refreshed, tracks: refreshedTracks, duration } as any;
+        }),
       );
 
+      // Merge any newly created playlist-owned tracks into the global cache.
+      setTracks((prev) => {
+        const byId = new Map(prev.map((t) => [t.id, t] as const));
+        for (const t of refreshedTracks) byId.set(t.id, t);
+        return Array.from(byId.values());
+      });
+
       if (fromDragDrop) {
-        setRecentPlaylistAdd({ playlistId, trackId: trackToAttach.id, createdAt: Date.now() });
+        const lastAdded = refreshedTracks[refreshedTracks.length - 1];
+        if (lastAdded) {
+          setRecentPlaylistAdd({ playlistId, trackId: lastAdded.id, createdAt: Date.now() });
+        }
       }
 
       toast.success(`Added to "${playlist.name}"`);
@@ -1503,6 +1562,15 @@ export default function App() {
     isPlayingRef.current = isPlaying;
   }, [isPlaying]);
 
+  const pendingRestoreResyncRef = useRef(false);
+  useEffect(() => {
+    if (isPlaying) return;
+    if (!pendingRestoreResyncRef.current) return;
+    pendingRestoreResyncRef.current = false;
+    void resyncAll();
+    window.dispatchEvent(new Event('redio:library-resync'));
+  }, [isPlaying]);
+
   // Sync playback state TO backend when it changes locally
   const lastPushedPlaybackStateRef = useRef<{ id: string | null; playing: boolean }>({ id: null, playing: false });
   useEffect(() => {
@@ -1618,6 +1686,10 @@ export default function App() {
         try {
           const data = JSON.parse(event.data);
           if (data.type === 'database-restored') {
+            if (isPlayingRef.current) {
+              pendingRestoreResyncRef.current = true;
+              return;
+            }
             void resyncAll();
             window.dispatchEvent(new Event('redio:library-resync'));
             return;
@@ -1631,6 +1703,29 @@ export default function App() {
             setPlaylists((prev) =>
               prev.map((p) => (p.id === data.playlistId ? { ...p, locked } : p)),
             );
+            return;
+          }
+          if (data.type === 'tracksDeleted' && Array.isArray(data.trackIds)) {
+            const idsToRemove = new Set(data.trackIds);
+
+            // Remove from main library
+            setTracks((prev) => prev.filter((t) => !idsToRemove.has(t.id)));
+
+            // Remove from playlists (queue cascade happens server-side and broadcasts 'queue-updated')
+            setPlaylists((prev) =>
+              prev.map((p) => {
+                const newTracks = (p.tracks || []).filter((t) => !idsToRemove.has(t.id));
+                return {
+                  ...p,
+                  tracks: newTracks,
+                  duration: newTracks.reduce((sum, t) => sum + (t.duration || 0), 0),
+                };
+              })
+            );
+            return;
+          }
+          if (data.type === 'playlistsUpdated') {
+            void resyncAll();
             return;
           }
           if (data.type === 'playback-state-updated' && data.settings) {
@@ -2138,60 +2233,48 @@ export default function App() {
 
     try {
       const trackIds = importedTracks.map((t) => t.id);
+      if (trackIds.length === 0) return;
+
+      const beforeIds = new Set((playlist?.tracks || []).map((t) => t.id));
       await playlistsAPI.addTracks(playlistId, trackIds);
 
-      // If the playlist was not in local state yet (created moments ago),
-      // refresh it from the backend so the UI updates reliably.
-      if (playlistWasMissing) {
+      const refreshed = await playlistsAPI.getById(playlistId);
+      const refreshedTracks: Track[] = (refreshed?.tracks || []).map((t: any) => normalizeServerTrack(t));
+
+      // Playlist API creates playlist-owned copies (new IDs). Determine which ones
+      // were newly added by diffing against the previous playlist.
+      const newOnes = refreshedTracks.filter((t) => !beforeIds.has(t.id));
+      const existing = refreshedTracks.filter((t) => beforeIds.has(t.id));
+
+      if (insertIndex != null) {
+        const idx = Math.min(Math.max(insertIndex ?? existing.length, 0), existing.length);
+        const desiredOrder = [...existing.slice(0, idx), ...newOnes, ...existing.slice(idx)];
         try {
-          const fresh = await playlistsAPI.getById(playlistId);
-          setPlaylists((prev) => {
-            const idx = prev.findIndex((p) => p.id === playlistId);
-            if (idx === -1) return [...prev, fresh as any];
-            const next = [...prev];
-            next[idx] = { ...prev[idx], ...(fresh as any) };
-            return next;
-          });
-        } catch {
-          // ignore
-        }
-      }
-
-      let newTracksForReorder: Track[] = [];
-      setPlaylists((prev) =>
-        prev.map((p) => {
-          if (p.id !== playlistId) return p;
-
-          const current = p.tracks || [];
-          const baseLen = current.length;
-          const targetIndex = insertIndex != null ? Math.min(Math.max(insertIndex, 0), baseLen) : baseLen;
-          const before = current.slice(0, targetIndex);
-          const after = current.slice(targetIndex);
-          const combined = [...before, ...importedTracks, ...after].reduce<Track[]>((acc, t) => {
-            if (!t?.id) return acc;
-            if (acc.some((x) => x.id === t.id)) return acc;
-            acc.push(t);
-            return acc;
-          }, []);
-
-          newTracksForReorder = combined;
-
-          return {
-            ...p,
-            tracks: combined,
-            duration: combined.reduce((sum, t) => sum + t.duration, 0),
-          };
-        }),
-      );
-
-      if (insertIndex != null && newTracksForReorder.length > 0) {
-        const trackIdsForReorder = newTracksForReorder.map((t) => t.id);
-        try {
-          await playlistsAPI.reorder(playlistId, trackIdsForReorder);
+          if (desiredOrder.length > 0) {
+            await playlistsAPI.reorder(playlistId, desiredOrder.map((t) => t.id));
+          }
         } catch (err) {
           console.error('Failed to persist playlist reorder after import', err);
         }
       }
+
+      const finalPlaylist = await playlistsAPI.getById(playlistId);
+      const finalTracks: Track[] = (finalPlaylist?.tracks || []).map((t: any) => normalizeServerTrack(t));
+      const duration = finalTracks.reduce((sum, t) => sum + (t.duration || 0), 0);
+
+      setPlaylists((prev) => {
+        const idx = prev.findIndex((p) => p.id === playlistId);
+        if (idx === -1) return [...prev, { ...(finalPlaylist as any), tracks: finalTracks, duration } as any];
+        const next = [...prev];
+        next[idx] = { ...prev[idx], ...(finalPlaylist as any), tracks: finalTracks, duration } as any;
+        return next;
+      });
+
+      setTracks((prev) => {
+        const byId = new Map(prev.map((t) => [t.id, t] as const));
+        for (const t of finalTracks) byId.set(t.id, t);
+        return Array.from(byId.values());
+      });
 
       if (!suppressDuplicateDialog && importedTracks.length > 0) {
         void handleAddToQueue(importedTracks[0]);
@@ -2767,6 +2850,8 @@ export default function App() {
                 <LibraryPanel
                   tracks={tracks}
                   playlists={playlists}
+                  queue={queue}
+                  currentTrackId={currentTrackId}
                   onAddToQueue={handleAddToQueue}
                   onAddToPlaylist={handleAddToPlaylist}
                   onSelectPlaylist={() => { }}
@@ -2948,6 +3033,24 @@ export default function App() {
         cancelLabel="Cancel"
         onConfirm={confirmRemovePlayingTrack}
         onCancel={() => setRemovePlayingTrackConfirm(null)}
+      />
+
+      <ConfirmDialog
+        open={deletePlaylistConfirm !== null}
+        title={deletePlaylistConfirm ? `Delete playlist "${deletePlaylistConfirm.name}"?` : 'Delete playlist?'}
+        description={
+          deletePlaylistConfirm
+            ? `${deletePlaylistConfirm.trackCount} track records will be removed.\n\n${deletePlaylistConfirm.mediaCount} media files will be removed from storage.${
+                deletePlaylistConfirm.scheduledCount > 0
+                  ? `\n\nWARNING: This playlist is currently scheduled.`
+                  : ''
+              }`
+            : undefined
+        }
+        confirmLabel="Delete"
+        cancelLabel="Cancel"
+        onConfirm={confirmDeletePlaylist}
+        onCancel={() => setDeletePlaylistConfirm(null)}
       />
 
       <AnimatePresence>

@@ -1,8 +1,95 @@
 import express from 'express';
 import { v4 as uuidv4 } from 'uuid';
-import { query, run, get } from '../config/database.js';
+import path from 'path';
+import fs from 'fs';
+import { query as queryLibrary, get as getLibrary } from '../config/database.js';
+import { query, run, get } from '../config/queueDatabase.js';
+import { sha256File, getDuration } from '../services/audio.js';
 
 const router = express.Router();
+
+export async function enqueueTrackCopy({
+  trackId,
+  fromPlaylist,
+  orderPosition,
+}) {
+  // Check if track exists in library DB
+  const track = await getLibrary('SELECT * FROM tracks WHERE id = ?', [trackId]);
+  if (!track) {
+    const err = new Error('Track not found');
+    err.status = 404;
+    throw err;
+  }
+
+  const rawUploadPath = process.env.UPLOAD_PATH || 'uploads';
+  const uploadsDir = path.isAbsolute(rawUploadPath)
+    ? rawUploadPath
+    : path.join(process.cwd(), rawUploadPath);
+
+  const rawQueueUploadPath = process.env.QUEUE_UPLOAD_PATH || '';
+  const queueUploadsDir = rawQueueUploadPath
+    ? (path.isAbsolute(rawQueueUploadPath) ? rawQueueUploadPath : path.join(process.cwd(), rawQueueUploadPath))
+    : path.join(path.dirname(uploadsDir), 'queue_uploads');
+
+  if (!fs.existsSync(queueUploadsDir)) {
+    fs.mkdirSync(queueUploadsDir, { recursive: true });
+  }
+
+  const libraryFilePath = String(track.file_path || '');
+  if (!libraryFilePath.startsWith('/uploads/')) {
+    const err = new Error('Track file_path is invalid');
+    err.status = 400;
+    throw err;
+  }
+
+  const rel = libraryFilePath.slice('/uploads/'.length);
+  const srcAbs = path.resolve(uploadsDir, rel);
+  if (!srcAbs.startsWith(path.resolve(uploadsDir) + path.sep)) {
+    const err = new Error('Invalid track path');
+    err.status = 400;
+    throw err;
+  }
+  if (!fs.existsSync(srcAbs)) {
+    const err = new Error('Track file not found on disk');
+    err.status = 404;
+    throw err;
+  }
+
+  const queueId = uuidv4();
+  const originalFileName = path.basename(rel);
+  const itemDir = path.join(queueUploadsDir, queueId);
+  if (!fs.existsSync(itemDir)) fs.mkdirSync(itemDir, { recursive: true });
+  const destAbs = path.join(itemDir, originalFileName);
+  fs.copyFileSync(srcAbs, destAbs);
+
+  const size = fs.statSync(destAbs).size;
+  const duration = await getDuration(destAbs);
+  const hash = await sha256File(destAbs);
+  const queueFilePath = `/uploads_queue/${queueId}/${originalFileName}`;
+
+  const position = Number.isFinite(orderPosition)
+    ? Number(orderPosition)
+    : ((await get('SELECT MAX(order_position) as max FROM queue_items'))?.max ?? -1) + 1;
+
+  await run(
+    `INSERT INTO queue_items (id, source_track_id, name, artist, duration, size, file_path, hash, from_playlist, order_position)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    [
+      queueId,
+      trackId,
+      track.name,
+      track.artist,
+      Number(duration || 0),
+      Number(size || 0),
+      queueFilePath,
+      hash,
+      fromPlaylist || null,
+      position,
+    ],
+  );
+
+  return await get('SELECT * FROM queue_items WHERE id = ?', [queueId]);
+}
 
 export const emitQueueUpdated = async (app) => {
   const broadcastEvent = app.get('broadcastEvent');
@@ -10,16 +97,15 @@ export const emitQueueUpdated = async (app) => {
 
   try {
     const queueItems = await query(`
-      SELECT q.*, t.name, t.artist, t.duration, t.size, t.file_path
-      FROM queue q
-      JOIN tracks t ON q.track_id = t.id
-      ORDER BY q.order_position
+      SELECT *
+      FROM queue_items
+      ORDER BY order_position
     `);
 
     const formatted = queueItems.map(item => ({
       id: item.id,
       track: {
-        id: item.track_id,
+        id: item.source_track_id || item.id,
         name: item.name,
         artist: item.artist,
         duration: item.duration,
@@ -40,16 +126,15 @@ export const emitQueueUpdated = async (app) => {
 router.get('/', async (req, res) => {
   try {
     const queueItems = await query(`
-      SELECT q.*, t.name, t.artist, t.duration, t.size, t.file_path
-      FROM queue q
-      JOIN tracks t ON q.track_id = t.id
-      ORDER BY q.order_position
+      SELECT *
+      FROM queue_items
+      ORDER BY order_position
     `);
 
     const formatted = queueItems.map(item => ({
       id: item.id,
       track: {
-        id: item.track_id,
+        id: item.source_track_id || item.id,
         name: item.name,
         artist: item.artist,
         duration: item.duration,
@@ -74,35 +159,11 @@ router.post('/', async (req, res) => {
       return res.status(400).json({ error: 'Track ID is required' });
     }
 
-    // Check if track exists
-    const track = await get('SELECT * FROM tracks WHERE id = ?', [trackId]);
-    if (!track) {
-      return res.status(404).json({ error: 'Track not found' });
-    }
-
-    // Get current max position
-    const maxPos = await get('SELECT MAX(order_position) as max FROM queue');
-    const position = (maxPos?.max ?? -1) + 1;
-
-    const queueId = uuidv4();
-    await run(
-      `INSERT INTO queue (id, track_id, from_playlist, order_position)
-       VALUES (?, ?, ?, ?)`,
-      [queueId, trackId, fromPlaylist || null, position]
-    );
-
-    const queueItem = await query(`
-      SELECT q.*, t.name, t.artist, t.duration, t.size, t.file_path
-      FROM queue q
-      JOIN tracks t ON q.track_id = t.id
-      WHERE q.id = ?
-    `, [queueId]);
-
-    const item = queueItem[0];
+    const item = await enqueueTrackCopy({ trackId: String(trackId), fromPlaylist: fromPlaylist || null });
     const response = {
       id: item.id,
       track: {
-        id: item.track_id,
+        id: item.source_track_id || item.id,
         name: item.name,
         artist: item.artist,
         duration: item.duration,
@@ -132,7 +193,7 @@ router.put('/reorder', async (req, res) => {
 
     for (let i = 0; i < queueIds.length; i++) {
       await run(
-        'UPDATE queue SET order_position = ? WHERE id = ?',
+        'UPDATE queue_items SET order_position = ? WHERE id = ?',
         [i, queueIds[i]]
       );
     }
@@ -148,15 +209,31 @@ router.put('/reorder', async (req, res) => {
 // Remove from queue
 router.delete('/:id', async (req, res) => {
   try {
-    const result = await run('DELETE FROM queue WHERE id = ?', [req.params.id]);
+    const existing = await get('SELECT * FROM queue_items WHERE id = ?', [req.params.id]);
+    const result = await run('DELETE FROM queue_items WHERE id = ?', [req.params.id]);
     if (result.changes === 0) {
       return res.status(404).json({ error: 'Queue item not found' });
     }
 
+    try {
+      const rawQueueUploadPath = process.env.QUEUE_UPLOAD_PATH || '';
+      const queueUploadsDir = rawQueueUploadPath
+        ? (path.isAbsolute(rawQueueUploadPath) ? rawQueueUploadPath : path.join(process.cwd(), rawQueueUploadPath))
+        : '';
+      if (queueUploadsDir && existing?.id) {
+        const itemDir = path.join(queueUploadsDir, String(existing.id));
+        if (fs.existsSync(itemDir)) {
+          fs.rmSync(itemDir, { recursive: true, force: true });
+        }
+      }
+    } catch {
+      // ignore
+    }
+
     // Reorder remaining items
-    const remaining = await query('SELECT id FROM queue ORDER BY order_position');
+    const remaining = await query('SELECT id FROM queue_items ORDER BY order_position');
     for (let i = 0; i < remaining.length; i++) {
-      await run('UPDATE queue SET order_position = ? WHERE id = ?', [i, remaining[i].id]);
+      await run('UPDATE queue_items SET order_position = ? WHERE id = ?', [i, remaining[i].id]);
     }
 
     await emitQueueUpdated(req.app);
@@ -170,7 +247,25 @@ router.delete('/:id', async (req, res) => {
 // Clear queue
 router.delete('/', async (req, res) => {
   try {
-    await run('DELETE FROM queue');
+    const items = await query('SELECT id FROM queue_items');
+    await run('DELETE FROM queue_items');
+
+    try {
+      const rawQueueUploadPath = process.env.QUEUE_UPLOAD_PATH || '';
+      const queueUploadsDir = rawQueueUploadPath
+        ? (path.isAbsolute(rawQueueUploadPath) ? rawQueueUploadPath : path.join(process.cwd(), rawQueueUploadPath))
+        : '';
+      if (queueUploadsDir) {
+        for (const it of items) {
+          const itemDir = path.join(queueUploadsDir, String(it.id));
+          if (fs.existsSync(itemDir)) {
+            fs.rmSync(itemDir, { recursive: true, force: true });
+          }
+        }
+      }
+    } catch {
+      // ignore
+    }
 
     await emitQueueUpdated(req.app);
 

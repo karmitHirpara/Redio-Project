@@ -1,11 +1,12 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { toast } from 'sonner';
-import { Scissors } from 'lucide-react';
 import { Track } from '../types';
 import { resolveUploadsUrl } from '../services/api';
 import { Button } from './ui/button';
 import { StepperInput } from './ui/stepper-input';
 import { Slider } from './ui/slider';
+import { Switch } from './ui/switch';
+import { Label } from './ui/label';
 import {
   Dialog,
   DialogContent,
@@ -29,79 +30,12 @@ type SilenceDetectionResult = {
   trailingSilenceSeconds: number;
 };
 
-type Segment = { startSeconds: number; endSeconds: number };
-
-type EditSnapshot = {
-  segments: Segment[];
-  startSeconds: number;
-  endSeconds: number;
-  playheadSeconds: number;
-  zoomWindowSeconds: number;
-};
-
 function clamp(v: number, min: number, max: number) {
   return Math.min(max, Math.max(min, v));
 }
 
-function splitSegmentsAtTime(segments: Segment[], t: number): Segment[] {
-  const out: Segment[] = [];
-  let didSplit = false;
-
-  for (const s of segments) {
-    if (t <= s.startSeconds || t >= s.endSeconds) {
-      out.push(s);
-      continue;
-    }
-
-    // split
-    didSplit = true;
-    out.push({ startSeconds: s.startSeconds, endSeconds: roundMs(t) });
-    out.push({ startSeconds: roundMs(t), endSeconds: s.endSeconds });
-  }
-
-  if (!didSplit) return segments;
-  return out
-    .filter((s) => s.endSeconds - s.startSeconds > 0.001)
-    .sort((a, b) => a.startSeconds - b.startSeconds);
-}
-
-function segmentContainsTime(seg: Segment, t: number) {
-  return t >= seg.startSeconds && t < seg.endSeconds;
-}
-
 function roundMs(v: number) {
   return Math.round(v * 1000) / 1000;
-}
-
-function subtractRangeFromSegments(segments: Segment[], cut: Segment): Segment[] {
-  const cutStart = Math.min(cut.startSeconds, cut.endSeconds);
-  const cutEnd = Math.max(cut.startSeconds, cut.endSeconds);
-
-  const out: Segment[] = [];
-  for (const s of segments) {
-    const sStart = Math.min(s.startSeconds, s.endSeconds);
-    const sEnd = Math.max(s.startSeconds, s.endSeconds);
-
-    // no overlap
-    if (cutEnd <= sStart || cutStart >= sEnd) {
-      out.push({ startSeconds: sStart, endSeconds: sEnd });
-      continue;
-    }
-
-    // left remainder
-    if (cutStart > sStart) {
-      out.push({ startSeconds: sStart, endSeconds: cutStart });
-    }
-    // right remainder
-    if (cutEnd < sEnd) {
-      out.push({ startSeconds: cutEnd, endSeconds: sEnd });
-    }
-  }
-
-  return out
-    .map((s) => ({ startSeconds: roundMs(s.startSeconds), endSeconds: roundMs(s.endSeconds) }))
-    .filter((s) => s.endSeconds - s.startSeconds > 0.001)
-    .sort((a, b) => a.startSeconds - b.startSeconds);
 }
 
 async function decodeToAudioBuffer(url: string, signal?: AbortSignal): Promise<AudioBuffer> {
@@ -115,9 +49,7 @@ async function decodeToAudioBuffer(url: string, signal?: AbortSignal): Promise<A
     const buf = await ctx.decodeAudioData(arr.slice(0));
     return buf;
   } finally {
-    ctx.close().catch(() => {
-      // ignore
-    });
+    ctx.close().catch(() => { });
   }
 }
 
@@ -142,9 +74,7 @@ function detectSilence(buffer: AudioBuffer, opts: { threshold: number; minSilenc
     if (sampleIsSilent(i)) {
       silentRun += 1;
     } else {
-      if (silentRun >= minSilenceSamples) {
-        lead += silentRun;
-      }
+      if (silentRun >= minSilenceSamples) lead += silentRun;
       break;
     }
   }
@@ -155,9 +85,7 @@ function detectSilence(buffer: AudioBuffer, opts: { threshold: number; minSilenc
     if (sampleIsSilent(i)) {
       silentRun += 1;
     } else {
-      if (silentRun >= minSilenceSamples) {
-        trail += silentRun;
-      }
+      if (silentRun >= minSilenceSamples) trail += silentRun;
       break;
     }
   }
@@ -173,21 +101,19 @@ export function EditSongDialog(props: {
   onOpenChange: (open: boolean) => void;
   track: Track;
   onTrackUpdated?: (track: Track) => void;
+  playlistContext?: { playlistId: string; position: number };
 }) {
-  const { open, onOpenChange, track, onTrackUpdated } = props;
+  const { open, onOpenChange, track, onTrackUpdated, playlistContext } = props;
+  const isDark = typeof window !== 'undefined' && document.documentElement.classList.contains('dark');
+  const theme = isDark ? 'dark' : 'light';
+
+  const duration = useMemo(() => Math.max(0, Number(track.duration || 0)), [track.duration]);
 
   const [startSeconds, setStartSeconds] = useState(0);
   const [endSeconds, setEndSeconds] = useState<number>(() => Math.max(0, Number(track.duration || 0)));
 
-  const [segments, setSegments] = useState<Segment[]>([{ startSeconds: 0, endSeconds: Math.max(0, Number(track.duration || 0)) }]);
-
-  const [autoSkipEnabled, setAutoSkipEnabled] = useState(false);
-  const [autoSkipPadSeconds, setAutoSkipPadSeconds] = useState(0);
-
-  const [autoGapEnabled, setAutoGapEnabled] = useState(false);
-  const [autoGapPadSeconds, setAutoGapPadSeconds] = useState(0);
-
-  const [isAnalyzing, setIsAnalyzing] = useState(false);
+  // Adobe-express/RadioDJ style auto-skip
+  const [autoRemoveSilence, setAutoRemoveSilence] = useState(true);
   const [analysis, setAnalysis] = useState<SilenceDetectionResult | null>(null);
 
   const [devices, setDevices] = useState<Array<{ deviceId: string; label: string }>>([]);
@@ -203,108 +129,70 @@ export function EditSongDialog(props: {
   const waveformDrawRafRef = useRef<number | null>(null);
 
   const [playheadSeconds, setPlayheadSeconds] = useState(0);
-  const [zoomWindowSeconds, setZoomWindowSeconds] = useState<number>(() => Math.max(5, Math.min(30, Number(track.duration || 0) || 30)));
-  const [activeEditTarget, setActiveEditTarget] = useState<'start' | 'end'>('start');
-  const isScrubbingRef = useRef(false);
-  const keyScopeRef = useRef<HTMLDivElement | null>(null);
 
-  const historyRef = useRef<{ past: EditSnapshot[]; future: EditSnapshot[] }>({ past: [], future: [] });
+  const editedDuration = Math.max(0, endSeconds - startSeconds);
 
-  const duration = useMemo(() => Math.max(0, Number(track.duration || 0)), [track.duration]);
-
-  const editedDuration = useMemo(() => {
-    return segments.reduce((sum, s) => sum + Math.max(0, s.endSeconds - s.startSeconds), 0);
-  }, [segments]);
-
+  // Analyze audio automatically when opened
   useEffect(() => {
     if (!open) return;
     setStartSeconds(0);
     setEndSeconds(duration);
-    setSegments([{ startSeconds: 0, endSeconds: duration }]);
     setPlayheadSeconds(0);
-    setZoomWindowSeconds(Math.max(5, Math.min(30, duration || 30)));
-    setActiveEditTarget('start');
-    historyRef.current = { past: [], future: [] };
-    setAutoSkipEnabled(false);
-    setAutoGapEnabled(false);
-    setAutoSkipPadSeconds(0);
-    setAutoGapPadSeconds(0);
+    setAutoRemoveSilence(true);
     setAnalysis(null);
 
-    // Ensure the dialog captures keyboard shortcuts and blocks background hotkeys.
-    window.setTimeout(() => {
-      keyScopeRef.current?.focus();
-    }, 0);
-  }, [duration, open]);
-
-  const snapshotCurrent = useCallback((): EditSnapshot => {
-    return {
-      segments: segments.map((s) => ({ startSeconds: s.startSeconds, endSeconds: s.endSeconds })),
-      startSeconds,
-      endSeconds,
-      playheadSeconds,
-      zoomWindowSeconds,
-    };
-  }, [endSeconds, playheadSeconds, segments, startSeconds, zoomWindowSeconds]);
-
-  const restoreSnapshot = useCallback((snap: EditSnapshot) => {
-    setSegments(snap.segments);
-    setStartSeconds(snap.startSeconds);
-    setEndSeconds(snap.endSeconds);
-    setPlayheadSeconds(snap.playheadSeconds);
-    setZoomWindowSeconds(snap.zoomWindowSeconds);
-  }, []);
-
-  const commitEdit = useCallback(
-    (apply: () => void) => {
-      const hist = historyRef.current;
-      hist.past.push(snapshotCurrent());
-      hist.future = [];
-      apply();
-    },
-    [snapshotCurrent],
-  );
-
-  const canUndo = historyRef.current.past.length > 0;
-  const canRedo = historyRef.current.future.length > 0;
-
-  const handleUndo = useCallback(() => {
-    const hist = historyRef.current;
-    const prev = hist.past.pop();
-    if (!prev) return;
-    hist.future.push(snapshotCurrent());
-    restoreSnapshot(prev);
-  }, [restoreSnapshot, snapshotCurrent]);
-
-  const handleRedo = useCallback(() => {
-    const hist = historyRef.current;
-    const next = hist.future.pop();
-    if (!next) return;
-    hist.past.push(snapshotCurrent());
-    restoreSnapshot(next);
-  }, [restoreSnapshot, snapshotCurrent]);
-
-  const loadAudioForAnalysis = useCallback(async () => {
-    if (!open) return;
-    if (audioBuffer) return;
-    const url = resolveUploadsUrl(track.filePath);
+    let isSubscribed = true;
     const controller = new AbortController();
-    setIsWaveformLoading(true);
-    try {
-      const buf = await decodeToAudioBuffer(url, controller.signal);
-      setAudioBuffer(buf);
-      return buf;
-    } catch {
-      return null;
-    } finally {
-      setIsWaveformLoading(false);
-    }
-  }, [audioBuffer, open, track.filePath]);
 
+    setIsWaveformLoading(true);
+    const url = resolveUploadsUrl(track.filePath);
+
+    decodeToAudioBuffer(url, controller.signal)
+      .then((buf) => {
+        if (!isSubscribed) return;
+        setAudioBuffer(buf);
+
+        // As soon as we have the buffer, run silence detection
+        const result = detectSilence(buf, { threshold: 0.0025, minSilenceSeconds: 0.08 });
+        setAnalysis(result);
+
+        // Automatically snap
+        if (autoRemoveSilence) {
+          const skipStart = Math.min(duration, Math.max(0, result.leadingSilenceSeconds));
+          const skipEnd = Math.max(0, Math.min(duration, duration - result.trailingSilenceSeconds));
+          setStartSeconds(skipStart);
+          setEndSeconds(Math.max(skipEnd, skipStart));
+        }
+      })
+      .catch(() => {
+        if (!isSubscribed) return;
+        toast.error('Failed to load audio for analysis');
+      })
+      .finally(() => {
+        if (isSubscribed) setIsWaveformLoading(false);
+      });
+
+    return () => {
+      isSubscribed = false;
+      controller.abort();
+    };
+  }, [duration, open, track.filePath]); // autoRemoveSilence deliberately omitted to only snap on initial mount/load
+
+
+  // Handle Toggle Switch for Auto Silence
   useEffect(() => {
-    if (!open) return;
-    void loadAudioForAnalysis();
-  }, [loadAudioForAnalysis, open]);
+    if (!open || !analysis) return;
+    if (autoRemoveSilence) {
+      const skipStart = Math.min(duration, Math.max(0, analysis.leadingSilenceSeconds));
+      const skipEnd = Math.max(0, Math.min(duration, duration - analysis.trailingSilenceSeconds));
+      setStartSeconds(skipStart);
+      setEndSeconds(Math.max(skipEnd, skipStart));
+    } else {
+      setStartSeconds(0);
+      setEndSeconds(duration);
+    }
+  }, [autoRemoveSilence, analysis, duration, open]);
+
 
   useEffect(() => {
     const canvas = waveformCanvasRef.current;
@@ -343,17 +231,6 @@ export function EditSongDialog(props: {
     return () => ro.disconnect();
   }, [audioBuffer, open]);
 
-  const effectiveStart = Math.max(0, Math.min(startSeconds, duration));
-  const effectiveEnd = Math.max(effectiveStart, Math.min(endSeconds, duration));
-
-  const viewRange = useMemo(() => {
-    const center = clamp(playheadSeconds || (effectiveStart + effectiveEnd) / 2, 0, duration);
-    const windowSec = clamp(zoomWindowSeconds, 1, Math.max(1, duration));
-    const half = windowSec / 2;
-    const start = clamp(center - half, 0, Math.max(0, duration - windowSec));
-    const end = Math.min(duration, start + windowSec);
-    return { start, end };
-  }, [duration, effectiveEnd, effectiveStart, playheadSeconds, zoomWindowSeconds]);
 
   const drawWaveform = useCallback(() => {
     const canvas = waveformCanvasRef.current;
@@ -366,47 +243,38 @@ export function EditSongDialog(props: {
     const w = canvas.width;
     const h = canvas.height;
 
-    // background
+    const style = getComputedStyle(document.body);
+    const primaryColor = `hsl(${style.getPropertyValue('--primary').trim()})`;
+    const destructiveColor = `hsl(${style.getPropertyValue('--destructive').trim()})`;
+
     ctx.clearRect(0, 0, w, h);
-    ctx.fillStyle = 'rgba(0,0,0,0)';
-    ctx.fillRect(0, 0, w, h);
 
     const mid = Math.floor(h / 2);
     const ampScale = (h / 2) * 0.92;
 
-    // draw cut mask first (areas not in segments are slightly dimmed)
-    ctx.fillStyle = 'rgba(128,128,128,0.10)';
-    ctx.fillRect(0, 0, w, h);
-
     const toX = (sec: number) => {
-      const { start, end } = viewRange;
-      const span = Math.max(0.001, end - start);
-      const t = (sec - start) / span;
+      const t = sec / duration;
       return clamp(Math.round(t * w), 0, w);
     };
 
-    const toAbsSec = (x: number) => {
-      const { start, end } = viewRange;
-      const span = Math.max(0.001, end - start);
-      return start + (clamp(x, 0, w) / w) * span;
-    };
+    const selX1 = toX(startSeconds);
+    const selX2 = toX(endSeconds);
+    const leftPx = Math.min(selX1, selX2);
+    const rightPx = Math.max(selX1, selX2);
 
-    // clear mask for kept segments (within current view range)
+    // Dim areas outside trim
+    ctx.fillStyle = theme === 'dark' ? 'rgba(0,0,0,0.5)' : 'rgba(255,255,255,0.7)';
+    ctx.fillRect(0, 0, w, h);
     ctx.globalCompositeOperation = 'destination-out';
-    for (const s of segments) {
-      const x1 = toX(s.startSeconds);
-      const x2 = toX(s.endSeconds);
-      ctx.fillRect(x1, 0, Math.max(1, x2 - x1), h);
-    }
+    ctx.fillRect(leftPx, 0, Math.max(1, rightPx - leftPx), h);
     ctx.globalCompositeOperation = 'source-over';
 
-    // waveform
-    ctx.strokeStyle = 'rgba(30, 64, 175, 0.85)';
-    ctx.lineWidth = 1;
+    // Waveform
+    ctx.strokeStyle = primaryColor;
+    ctx.lineWidth = 1.5;
     ctx.beginPath();
     for (let x = 0; x < w; x += 1) {
-      const absSec = toAbsSec(x);
-      const srcX = duration > 0 ? Math.floor((absSec / duration) * peaks.length) : 0;
+      const srcX = duration > 0 ? Math.floor((x / w) * peaks.length) : 0;
       const peak = peaks[clamp(srcX, 0, peaks.length - 1)] || 0;
       const y = Math.max(1, Math.floor(peak * ampScale));
       ctx.moveTo(x + 0.5, mid - y);
@@ -414,22 +282,19 @@ export function EditSongDialog(props: {
     }
     ctx.stroke();
 
-    // selection overlay
-    const selX1 = toX(startSeconds);
-    const selX2 = toX(endSeconds);
-    const left = Math.min(selX1, selX2);
-    const right = Math.max(selX1, selX2);
-    ctx.fillStyle = 'rgba(34, 197, 94, 0.12)';
-    ctx.fillRect(left, 0, Math.max(1, right - left), h);
-    ctx.fillStyle = 'rgba(34, 197, 94, 0.55)';
-    ctx.fillRect(left, 0, 1, h);
-    ctx.fillRect(right, 0, 1, h);
+    // Trim bounding box for the active area to mimic video editors
+    ctx.strokeStyle = primaryColor;
+    ctx.lineWidth = 2;
+    ctx.strokeRect(leftPx, 0, Math.max(1, rightPx - leftPx), h);
 
-    // playhead
+    ctx.fillStyle = `hsl(${style.getPropertyValue('--primary').trim()} / 0.15)`;
+    ctx.fillRect(leftPx, 0, Math.max(1, rightPx - leftPx), h);
+
+    // Playhead
     const ph = toX(playheadSeconds);
-    ctx.fillStyle = 'rgba(249, 115, 22, 0.9)';
-    ctx.fillRect(ph, 0, 1, h);
-  }, [duration, endSeconds, open, segments, startSeconds, waveformPeaks, playheadSeconds, viewRange]);
+    ctx.fillStyle = destructiveColor;
+    ctx.fillRect(ph, 0, 2, h);
+  }, [duration, endSeconds, open, startSeconds, waveformPeaks, playheadSeconds, theme]);
 
   useEffect(() => {
     if (!open) return;
@@ -455,10 +320,15 @@ export function EditSongDialog(props: {
       return;
     }
     try {
+      // Get the actively selected broadcast device to filter it out from test options
+      const currentlyActiveId = window.localStorage.getItem('radio.selectedOutputDevice') || 'default';
+
       const list = await navigator.mediaDevices.enumerateDevices();
       const outputs = list
         .filter((d) => d.kind === 'audiooutput' && d.deviceId)
         .filter((d) => d.deviceId !== 'communications')
+        // Filter out the active broadcast device
+        .filter((d) => d.deviceId !== currentlyActiveId)
         .map((d) => ({ deviceId: d.deviceId, label: d.label || `Audio output (${d.deviceId.slice(0, 6)})` }));
       setDevices(outputs);
     } catch {
@@ -487,236 +357,42 @@ export function EditSongDialog(props: {
     void applyTestSink();
   }, [applyTestSink, open]);
 
-  const analyzeSilence = useCallback(async () => {
-    const url = resolveUploadsUrl(track.filePath);
-    const controller = new AbortController();
-    setIsAnalyzing(true);
-    try {
-      const buffer = audioBuffer ?? (await decodeToAudioBuffer(url, controller.signal));
-      if (!audioBuffer) setAudioBuffer(buffer);
-      const result = detectSilence(buffer, { threshold: 0.0025, minSilenceSeconds: 0.08 });
-      setAnalysis(result);
-      return result;
-    } catch (e: any) {
-      toast.error(e?.message || 'Failed to analyze audio');
-      return null;
-    } finally {
-      setIsAnalyzing(false);
-    }
-  }, [audioBuffer, track.filePath]);
-
-  const handleAutoSkip = useCallback(async () => {
-    setAutoSkipEnabled((prev) => !prev);
-    const nextEnabled = !autoSkipEnabled;
-    if (!nextEnabled) return;
-
-    const res = analysis ?? (await analyzeSilence());
-    if (!res) return;
-
-    const detected = Math.max(0, res.leadingSilenceSeconds);
-    const nextStart = Math.min(duration, Math.max(0, Math.floor(detected + autoSkipPadSeconds)));
-    setStartSeconds(nextStart);
-  }, [analysis, analyzeSilence, autoSkipEnabled, autoSkipPadSeconds, duration]);
-
-  const handleAutoGap = useCallback(async () => {
-    setAutoGapEnabled((prev) => !prev);
-    const nextEnabled = !autoGapEnabled;
-    if (!nextEnabled) return;
-
-    const res = analysis ?? (await analyzeSilence());
-    if (!res) return;
-
-    const detected = Math.max(0, res.trailingSilenceSeconds);
-    const nextEnd = Math.max(0, Math.min(duration, Math.floor(duration - detected - autoGapPadSeconds)));
-    setEndSeconds(Math.max(nextEnd, startSeconds));
-  }, [analysis, analyzeSilence, autoGapEnabled, autoGapPadSeconds, duration, startSeconds]);
-
-  const handleNextCut = useCallback(() => {
-    if (effectiveEnd - effectiveStart <= 0.001) {
-      toast.error('Select a non-zero range to cut');
-      return;
-    }
-    commitEdit(() => {
-      setSegments((prev) => {
-        const next = subtractRangeFromSegments(prev, { startSeconds: effectiveStart, endSeconds: effectiveEnd });
-        if (next.length === 0) {
-          toast.error('Cut would remove the entire track');
-          return prev;
-        }
-        return next;
-      });
-    });
-  }, [effectiveEnd, effectiveStart]);
-
-  const handleDeleteSelection = useCallback(() => {
-    handleNextCut();
-  }, [handleNextCut]);
-
-  const handleSplitAtPlayhead = useCallback(() => {
-    const t = roundMs(clamp(playheadSeconds, 0, duration));
-    commitEdit(() => {
-      setSegments((prev) => {
-        const next = splitSegmentsAtTime(prev, t);
-        if (next === prev) {
-          toast.error('Playhead is not inside a kept segment');
-          return prev;
-        }
-        return next;
-      });
-    });
-  }, [commitEdit, duration, playheadSeconds]);
-
-  const handleResetEdits = useCallback(() => {
-    commitEdit(() => {
-      setSegments([{ startSeconds: 0, endSeconds: duration }]);
-      setStartSeconds(0);
-      setEndSeconds(duration);
-      setPlayheadSeconds(0);
-      setZoomWindowSeconds(Math.max(5, Math.min(30, duration || 30)));
-      setActiveEditTarget('start');
-    });
-  }, [commitEdit, duration]);
-
-  const handleDialogKeyDownCapture = useCallback(
-    (e: React.KeyboardEvent<HTMLDivElement>) => {
-      // Block all key events from reaching window-level handlers (background hotkeys).
-      e.stopPropagation();
-
-      // Allow IME composition.
-      if ((e as any).isComposing) return;
-
-      // Undo/Redo
-      if ((e.ctrlKey || e.metaKey) && (e.key === 'z' || e.key === 'Z')) {
-        e.preventDefault();
-        if (e.shiftKey) {
-          handleRedo();
-        } else {
-          handleUndo();
-        }
-        return;
-      }
-
-      if ((e.ctrlKey || e.metaKey) && (e.key === 'y' || e.key === 'Y')) {
-        e.preventDefault();
-        handleRedo();
-        return;
-      }
-
-      // Delete selection
-      if (e.key === 'Delete') {
-        e.preventDefault();
-        handleDeleteSelection();
-        return;
-      }
-
-      // Nudge selection points
-      if (e.key === 'ArrowLeft' || e.key === 'ArrowRight') {
-        if (e.metaKey) return;
-        const dir = e.key === 'ArrowLeft' ? -1 : 1;
-        const step = e.shiftKey ? 0.01 : e.ctrlKey ? 0.1 : 0.001;
-        const delta = dir * step;
-        e.preventDefault();
-
-        if (activeEditTarget === 'start') {
-          setStartSeconds((prev) => roundMs(clamp(prev + delta, 0, duration)));
-        } else {
-          setEndSeconds((prev) => roundMs(clamp(prev + delta, 0, duration)));
-        }
-      }
-    },
-    [activeEditTarget, duration, handleDeleteSelection, handleRedo, handleUndo],
-  );
-
-  const nextKeptStartAtOrAfter = useCallback((t: number) => {
-    for (const s of segments) {
-      if (t < s.startSeconds) return s.startSeconds;
-      if (t >= s.startSeconds && t < s.endSeconds) return t;
-    }
-    return null;
-  }, [segments]);
-
-  const nextSegmentAfterTime = useCallback((t: number) => {
-    for (const s of segments) {
-      if (t < s.startSeconds) return s;
-      if (t >= s.startSeconds && t < s.endSeconds) return s;
-    }
-    return null;
-  }, [segments]);
-
   const handleTest = useCallback(async () => {
     const el = testAudioRef.current;
     if (!el) return;
 
-    const url = resolveUploadsUrl(track.filePath);
+    if (isTesting) {
+      el.pause();
+      setIsTesting(false);
+      return;
+    }
+
     setIsTesting(true);
     try {
       el.pause();
-      el.src = url;
+      el.src = resolveUploadsUrl(track.filePath);
       await applyTestSink();
-
-      const previewStart = nextKeptStartAtOrAfter(effectiveStart);
-      if (previewStart === null) {
-        toast.error('Nothing to preview after current edits');
-        return;
-      }
-
-      const previewEnd = effectiveEnd;
 
       let rafId = 0;
       const tick = () => {
         rafId = requestAnimationFrame(tick);
-
-        // Prefer rAF checks for segment skipping; timeupdate can be coarse.
         const t = el.currentTime;
-        if (!isScrubbingRef.current) setPlayheadSeconds(t);
+        setPlayheadSeconds(t);
 
-        if (Number.isFinite(previewEnd) && t >= previewEnd) {
+        if (Number.isFinite(endSeconds) && t >= endSeconds) {
           el.pause();
           cancelAnimationFrame(rafId);
-          return;
-        }
-
-        const seg = nextSegmentAfterTime(t);
-        if (!seg) {
-          el.pause();
-          cancelAnimationFrame(rafId);
-          return;
-        }
-
-        if (t < seg.startSeconds) {
-          try {
-            el.currentTime = seg.startSeconds;
-          } catch {
-            // ignore
-          }
-          return;
-        }
-
-        if (t >= seg.endSeconds) {
-          const next = nextSegmentAfterTime(seg.endSeconds + 0.0005);
-          if (!next) {
-            el.pause();
-            cancelAnimationFrame(rafId);
-            return;
-          }
-          try {
-            el.currentTime = next.startSeconds;
-          } catch {
-            // ignore
-          }
+          setIsTesting(false);
+          setPlayheadSeconds(startSeconds); // Reset playhead
         }
       };
 
       const onLoaded = async () => {
         try {
-          el.currentTime = previewStart;
-        } catch {
-          // ignore
-        }
-        try {
+          el.currentTime = startSeconds;
           await el.play();
         } catch {
-          // ignore
+          setIsTesting(false);
         }
       };
 
@@ -727,32 +403,34 @@ export function EditSongDialog(props: {
         if (rafId) cancelAnimationFrame(rafId);
       };
 
-      window.setTimeout(cleanup, Math.max(250, (previewEnd - previewStart) * 1000 + 750));
-    } finally {
+      window.setTimeout(cleanup, Math.max(250, (endSeconds - startSeconds) * 1000 + 750));
+    } catch {
       setIsTesting(false);
     }
-  }, [applyTestSink, effectiveEnd, effectiveStart, nextKeptStartAtOrAfter, nextSegmentAfterTime, track.filePath]);
+  }, [applyTestSink, endSeconds, startSeconds, track.filePath, isTesting]);
 
   const [isSaving, setIsSaving] = useState(false);
-  const [confirmOpen, setConfirmOpen] = useState(false);
+  const [saveConfirmOpen, setSaveConfirmOpen] = useState(false);
 
-  const triggerSave = useCallback(() => {
-    if (segments.length === 0) {
-      toast.error('No remaining audio after cuts');
+  useEffect(() => {
+    if (!open) {
+      setSaveConfirmOpen(false);
       return;
     }
-    setConfirmOpen(true);
-  }, [segments.length]);
+    setSaveConfirmOpen(false);
+  }, [open]);
 
-  const handleSave = useCallback(async () => {
+  const handleSave = useCallback(async (mode: 'overwrite' | 'duplicate') => {
     setIsSaving(true);
     try {
       const updated = await tracksAPI.edit(track.id, {
-        segments,
-        autoSkipEnabled,
-        autoGapEnabled,
-      });
-      toast.success('Song updated');
+        startSeconds,
+        endSeconds,
+        mode,
+        playlistContext,
+      } as any);
+
+      toast.success(mode === 'duplicate' ? 'Song duplicated and trimmed' : 'Song updated');
       if (onTrackUpdated) {
         const t: any = updated as any;
         onTrackUpdated({
@@ -772,312 +450,161 @@ export function EditSongDialog(props: {
     } finally {
       setIsSaving(false);
     }
-  }, [autoGapEnabled, autoSkipEnabled, onOpenChange, onTrackUpdated, segments, track.dateAdded, track.filePath, track.id]);
+  }, [endSeconds, onOpenChange, onTrackUpdated, startSeconds, track.dateAdded, track.filePath, track.id]);
 
   return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="sm:max-w-2xl">
-        <DialogHeader>
-          <DialogTitle>Edit Song</DialogTitle>
-          <DialogDescription>{track.name}</DialogDescription>
-        </DialogHeader>
-
-        <ConfirmDialog
-          open={confirmOpen}
-          title="Overwrite this audio file?"
-          description={`This will permanently overwrite the existing file on disk.\n\nEdited length: ${editedDuration.toFixed(3)}s`}
-          confirmLabel="Overwrite"
-          cancelLabel="Cancel"
-          onCancel={() => setConfirmOpen(false)}
-          onConfirm={() => {
-            setConfirmOpen(false);
-            void handleSave();
+    <>
+      <Dialog
+        open={open}
+        onOpenChange={onOpenChange}
+        modal={false}
+      >
+        <DialogContent
+          className="sm:max-w-3xl border shadow-lg"
+          onInteractOutside={(e) => {
+            // Do not close when interacting outside
+            e.preventDefault();
           }}
-        />
-
-        <audio ref={testAudioRef} className="hidden" />
-
-        <div
-          ref={keyScopeRef}
-          tabIndex={0}
-          className="space-y-4 outline-none"
-          onKeyDownCapture={handleDialogKeyDownCapture}
+          onEscapeKeyDown={(e) => {
+            // Optional: allow escape key to close. If they want only explicit UI, we stay preventDefault or let it close. Let's close on escape but not clicking outside. Or they said "click on close icons, cancle button so that close and not close of out of box area". So prevent interacting outside.
+          }}
         >
-          <div className="rounded-md border bg-popover p-3">
+          <DialogHeader>
+            <DialogTitle>Trim boundaries</DialogTitle>
+            <DialogDescription className="text-xs font-mono opacity-70 truncate max-w-xl">
+              {track.name}
+            </DialogDescription>
+          </DialogHeader>
+
+          <audio ref={testAudioRef} className="hidden" />
+
+          <div className="space-y-6 pt-2">
+            {/* Header Controls Block */}
             <div className="flex items-center justify-between">
-              <div className="text-xs font-medium">Waveform</div>
-              <div className="text-[11px] text-muted-foreground">
-                {isWaveformLoading ? 'Loading…' : `Kept: ${editedDuration.toFixed(3)}s / ${duration.toFixed(3)}s`}
+              <div className="flex items-center space-x-2">
+                <Switch
+                  id="auto-silence"
+                  checked={autoRemoveSilence}
+                  onCheckedChange={setAutoRemoveSilence}
+                  disabled={!analysis || isWaveformLoading}
+                />
+                <Label htmlFor="auto-silence" className="text-xs font-semibold cursor-pointer select-none">
+                  Auto-remove silence
+                </Label>
+                {isWaveformLoading && (
+                  <span className="text-[11px] text-muted-foreground animate-pulse ml-2">Analyzing...</span>
+                )}
+              </div>
+
+              <div className="text-[11px] text-muted-foreground font-mono bg-muted px-2 py-1 rounded">
+                Kept: {editedDuration.toFixed(3)}s / Base: {duration.toFixed(3)}s
               </div>
             </div>
-            <div className="my-2 h-px bg-border" />
-            <div className="flex items-center justify-between mb-2">
-              <div className="flex items-center gap-2">
-                <Button
-                  type="button"
-                  size="sm"
-                  variant="outline"
-                  className="h-7 px-2 text-[11px]"
-                  onClick={() => setZoomWindowSeconds((prev) => clamp(prev / 1.5, 1, Math.max(1, duration)))}
-                >
-                  Zoom In
-                </Button>
-                <Button
-                  type="button"
-                  size="sm"
-                  variant="outline"
-                  className="h-7 px-2 text-[11px]"
-                  onClick={() => setZoomWindowSeconds((prev) => clamp(prev * 1.5, 1, Math.max(1, duration)))}
-                >
-                  Zoom Out
-                </Button>
-                <Button
-                  type="button"
-                  size="sm"
-                  variant="ghost"
-                  className="h-7 px-2 text-[11px]"
-                  onClick={() => setPlayheadSeconds(clamp((effectiveStart + effectiveEnd) / 2, 0, duration))}
-                >
-                  Center
-                </Button>
-              </div>
-              <div className="text-[11px] text-muted-foreground">
-                View {viewRange.start.toFixed(3)}s–{viewRange.end.toFixed(3)}s
-              </div>
-            </div>
-            <div className="w-full">
+
+            {/* Master Timeline Editor */}
+            <div className="relative w-full h-[120px] rounded-lg border bg-black/5 dark:bg-black/40 overflow-hidden ring-1 ring-inset ring-black/10">
+              {/* Embedded visually-matched canvas */}
               <canvas
                 ref={waveformCanvasRef}
-                className="w-full h-[96px] cursor-crosshair"
-                onMouseDown={(e) => {
-                  const canvas = waveformCanvasRef.current;
-                  const el = testAudioRef.current;
-                  if (!canvas) return;
-                  const rect = canvas.getBoundingClientRect();
-                  const x = e.clientX - rect.left;
-                  const w = rect.width || 1;
-                  const t = viewRange.start + (clamp(x, 0, w) / w) * (viewRange.end - viewRange.start);
-                  const next = roundMs(clamp(t, 0, duration));
-                  isScrubbingRef.current = true;
-                  setPlayheadSeconds(next);
-                  if (el) {
-                    try {
-                      el.currentTime = next;
-                    } catch {
-                      // ignore
-                    }
-                  }
-                }}
-                onMouseMove={(e) => {
-                  if (!isScrubbingRef.current) return;
-                  const canvas = waveformCanvasRef.current;
-                  const el = testAudioRef.current;
-                  if (!canvas) return;
-                  const rect = canvas.getBoundingClientRect();
-                  const x = e.clientX - rect.left;
-                  const w = rect.width || 1;
-                  const t = viewRange.start + (clamp(x, 0, w) / w) * (viewRange.end - viewRange.start);
-                  const next = roundMs(clamp(t, 0, duration));
-                  setPlayheadSeconds(next);
-                  if (el) {
-                    try {
-                      el.currentTime = next;
-                    } catch {
-                      // ignore
-                    }
-                  }
-                }}
-                onMouseUp={() => {
-                  isScrubbingRef.current = false;
-                }}
-                onMouseLeave={() => {
-                  isScrubbingRef.current = false;
-                }}
-                onDoubleClick={() => {
-                  const el = testAudioRef.current;
-                  if (!el) return;
-                  if (!segmentContainsTime({ startSeconds: effectiveStart, endSeconds: effectiveEnd }, playheadSeconds)) {
-                    return;
-                  }
-                }}
+                className="absolute inset-0 w-full h-full"
               />
-            </div>
-            <div className="mt-3 space-y-2">
-              <div className="text-[11px] text-muted-foreground">Trim selection (ms precision)</div>
+              {/* Transparent overlay slider styled to act as the direct bounding box editor */}
               <Slider
-                value={[effectiveStart, effectiveEnd]}
+                className="absolute inset-0 w-full h-full opacity-0 hover:opacity-100 transition-opacity [&_[role=slider]]:h-full [&_[role=slider]]:w-4 [&_[role=slider]]:rounded-[1px] [&_[role=slider]]:bg-primary [&_[role=slider]]:border-0 cursor-ew-resize mix-blend-overlay"
+                value={[startSeconds, endSeconds]}
                 min={0}
                 max={duration}
                 step={0.001}
                 onValueChange={(v) => {
                   const s = roundMs(Number(v?.[0] ?? 0));
                   const e = roundMs(Number(v?.[1] ?? 0));
+                  if (autoRemoveSilence) setAutoRemoveSilence(false);
                   setStartSeconds(clamp(s, 0, duration));
-                  setEndSeconds(clamp(e, 0, duration));
+                  setEndSeconds(clamp(e, s, duration));
+                  setPlayheadSeconds(s);
                 }}
               />
-              <div className="flex items-center justify-between">
-                <div className="text-[11px] text-muted-foreground">{effectiveStart.toFixed(3)}s</div>
-                <div className="text-[11px] text-muted-foreground">{effectiveEnd.toFixed(3)}s</div>
+            </div>
+
+            <div className="grid grid-cols-2 gap-6">
+              <div className="space-y-1.5">
+                <div className="text-[10px] font-semibold text-muted-foreground uppercase tracking-wider">Start Point (sec)</div>
+                <StepperInput value={startSeconds} min={0} max={endSeconds} step={0.001} showButtons={false} onChange={(v) => {
+                  setStartSeconds(roundMs(v));
+                  if (autoRemoveSilence) setAutoRemoveSilence(false);
+                }} />
+              </div>
+              <div className="space-y-1.5">
+                <div className="text-[10px] font-semibold text-muted-foreground uppercase tracking-wider">End Point (sec)</div>
+                <StepperInput value={endSeconds} min={startSeconds} max={duration} step={0.001} showButtons={false} onChange={(v) => {
+                  setEndSeconds(roundMs(v));
+                  if (autoRemoveSilence) setAutoRemoveSilence(false);
+                }} />
               </div>
             </div>
-          </div>
 
-          <div className="grid grid-cols-2 gap-4">
-            <div className="space-y-2">
-              <div className="text-xs font-medium">Start point (sec)</div>
-              <div onFocusCapture={() => setActiveEditTarget('start')}>
-                <StepperInput value={startSeconds} min={0} max={duration} step={0.001} showButtons={false} onChange={(v) => setStartSeconds(roundMs(v))} />
+            <div className="bg-secondary/40 rounded-lg p-3 grid grid-cols-[2fr_1fr] gap-4 items-end mt-2 border border-border/50">
+              <div className="space-y-2">
+                <div className="text-[11px] font-semibold mb-1">Preview Audio Out</div>
+                <Select value={testDeviceId} onValueChange={(v) => setTestDeviceId(v)}>
+                  <SelectTrigger size="sm" className="h-8 text-xs bg-background">
+                    <SelectValue placeholder="System default" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="default">System default (OS)</SelectItem>
+                    {devices.map((d) => (
+                      <SelectItem key={d.deviceId} value={d.deviceId}>
+                        {d.label}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
               </div>
-            </div>
-            <div className="space-y-2">
-              <div className="text-xs font-medium">End point (sec)</div>
-              <div onFocusCapture={() => setActiveEditTarget('end')}>
-                <StepperInput value={endSeconds} min={0} max={duration} step={0.001} showButtons={false} onChange={(v) => setEndSeconds(roundMs(v))} />
-              </div>
-            </div>
-          </div>
-
-          <div className="flex items-center justify-between rounded-md border bg-popover p-3">
-            <div className="space-y-0.5">
-              <div className="text-xs font-medium">Cut tools</div>
-              <div className="text-[11px] text-muted-foreground">Cuts are non-destructive until you Save.</div>
-            </div>
-            <div className="flex items-center gap-2">
-              <Button
-                type="button"
-                size="sm"
-                variant="outline"
-                className="h-8 px-2 text-xs"
-                disabled={!canUndo}
-                onClick={handleUndo}
-              >
-                Undo
-              </Button>
-              <Button
-                type="button"
-                size="sm"
-                variant="outline"
-                className="h-8 px-2 text-xs"
-                disabled={!canRedo}
-                onClick={handleRedo}
-              >
-                Redo
-              </Button>
-              <Button
-                type="button"
-                size="sm"
-                variant="outline"
-                className="h-8 px-2 text-xs"
-                onClick={handleSplitAtPlayhead}
-              >
-                Split
-              </Button>
-              <Button
-                type="button"
-                size="sm"
-                variant="outline"
-                className="h-8 px-2 text-xs"
-                onClick={handleDeleteSelection}
-              >
-                <Scissors className="h-3.5 w-3.5 mr-1" />
-                Delete
-              </Button>
-              <Button
-                type="button"
-                size="sm"
-                variant="ghost"
-                className="h-8 px-2 text-xs"
-                onClick={handleResetEdits}
-              >
-                Reset
-              </Button>
-            </div>
-          </div>
-
-          <div className="rounded-md border bg-popover p-3">
-            <div className="text-xs font-medium">Auto controls</div>
-            <div className="my-2 h-px bg-border" />
-            <div className="grid grid-cols-[1fr,auto] items-center gap-x-3 gap-y-3">
-              <div className="flex items-center gap-2">
-                <Button
-                  type="button"
-                  size="sm"
-                  variant={autoSkipEnabled ? 'default' : 'outline'}
-                  className="h-8 px-2 text-xs"
-                  disabled={isAnalyzing}
-                  onClick={() => void handleAutoSkip()}
-                >
-                  Auto Skip
+              <div className="flex justify-end">
+                <Button type="button" variant="outline" size="sm" className="h-8 w-full shadow-sm font-medium" onClick={() => void handleTest()}>
+                  {isTesting ? '⏹ Stop' : '▶ Preview'}
                 </Button>
-                <div className="text-[11px] text-muted-foreground">+ sec</div>
-                <StepperInput value={autoSkipPadSeconds} min={0} max={8} step={1} showButtons={false} onChange={setAutoSkipPadSeconds} />
-              </div>
-              <Button
-                type="button"
-                size="sm"
-                variant="ghost"
-                className="h-8 px-2 text-xs justify-start"
-                disabled={isAnalyzing}
-                onClick={() => void analyzeSilence()}
-              >
-                {isAnalyzing ? 'Analyzing…' : 'Analyze'}
-              </Button>
-
-              <div className="flex items-center gap-2">
-                <Button
-                  type="button"
-                  size="sm"
-                  variant={autoGapEnabled ? 'default' : 'outline'}
-                  className="h-8 px-2 text-xs"
-                  disabled={isAnalyzing}
-                  onClick={() => void handleAutoGap()}
-                >
-                  Auto Gap
-                </Button>
-                <div className="text-[11px] text-muted-foreground">+ sec</div>
-                <StepperInput value={autoGapPadSeconds} min={0} max={8} step={1} showButtons={false} onChange={setAutoGapPadSeconds} />
-              </div>
-              <div className="text-[11px] text-muted-foreground text-right">
-                {analysis ? `Lead ${analysis.leadingSilenceSeconds.toFixed(2)}s • Tail ${analysis.trailingSilenceSeconds.toFixed(2)}s` : ''}
               </div>
             </div>
           </div>
 
-          <div className="grid grid-cols-2 gap-4 items-end">
-            <div className="space-y-2">
-              <div className="text-xs font-medium">Test output device</div>
-              <Select value={testDeviceId} onValueChange={(v) => setTestDeviceId(v)}>
-                <SelectTrigger size="sm" className="h-9 text-xs">
-                  <SelectValue placeholder="System default" />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="default">System default (OS)</SelectItem>
-                  {devices.map((d) => (
-                    <SelectItem key={d.deviceId} value={d.deviceId}>
-                      {d.label}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-            </div>
-            <div className="flex justify-end gap-2">
-              <Button type="button" variant="outline" size="sm" className="h-9" disabled={isTesting} onClick={() => void handleTest()}>
-                Test
-              </Button>
-            </div>
-          </div>
-        </div>
+          <DialogFooter className="mt-4 flex-col sm:flex-row gap-2 border-t pt-4">
+            <Button type="button" variant="ghost" onClick={() => onOpenChange(false)} disabled={isSaving} className="sm:mr-auto h-9">
+              Close
+            </Button>
+            <Button
+              type="button"
+              variant="secondary"
+              className="h-9 shadow-sm"
+              disabled={isSaving || editedDuration === 0}
+              onClick={() => handleSave('duplicate')}
+            >
+              Duplicate & Save
+            </Button>
+            <Button
+              type="button"
+              className="h-9 shadow-sm px-6"
+              disabled={isSaving || editedDuration === 0}
+              onClick={() => setSaveConfirmOpen((prev) => prev || true)}
+            >
+              Save file
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
 
-        <DialogFooter>
-          <Button type="button" variant="outline" onClick={() => onOpenChange(false)} disabled={isSaving}>
-            Cancel
-          </Button>
-          <Button type="button" onClick={triggerSave} disabled={isSaving}>
-            Save
-          </Button>
-        </DialogFooter>
-      </DialogContent>
-    </Dialog>
+      <ConfirmDialog
+        open={saveConfirmOpen}
+        title="Overwrite this audio file?"
+        description={`Edited length: ${editedDuration.toFixed(3)}s\n\nNote: If you want to keep the original file untouched, choose 'Duplicate & Save'.`}
+        confirmLabel="Overwrite"
+        cancelLabel="Cancel"
+        onCancel={() => setSaveConfirmOpen(false)}
+        onConfirm={() => {
+          setSaveConfirmOpen(false);
+          void handleSave('overwrite');
+        }}
+      />
+    </>
   );
 }

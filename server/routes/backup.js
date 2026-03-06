@@ -4,6 +4,7 @@ import path from 'path';
 import crypto from 'crypto';
 import sqlite3 from 'sqlite3';
 import { db, run, reconnectDatabase, resolvedDbPath } from '../config/database.js';
+import { reconnectQueueDatabase, resolvedQueueDbPath } from '../config/queueDatabase.js';
 import { exec, execSync } from 'child_process';
 import { promisify } from 'util';
 
@@ -25,6 +26,50 @@ function getResolvedUploadDir() {
   return path.isAbsolute(rawUploadPath)
     ? rawUploadPath
     : path.join(process.cwd(), rawUploadPath);
+}
+
+function getResolvedQueueUploadsDir() {
+  const rawUploadPath = process.env.UPLOAD_PATH || 'uploads';
+  const uploadsDir = path.isAbsolute(rawUploadPath)
+    ? rawUploadPath
+    : path.join(process.cwd(), rawUploadPath);
+
+  const rawQueueUploadPath = process.env.QUEUE_UPLOAD_PATH || '';
+  if (rawQueueUploadPath) {
+    return path.isAbsolute(rawQueueUploadPath)
+      ? rawQueueUploadPath
+      : path.join(process.cwd(), rawQueueUploadPath);
+  }
+  return path.join(path.dirname(uploadsDir), 'queue_uploads');
+}
+
+function getResolvedCoreDbPath() {
+  const raw = process.env.CORE_DATABASE_PATH || 'core.sqlite';
+  return path.isAbsolute(raw)
+    ? raw
+    : path.join(process.cwd(), raw);
+}
+
+function getResolvedLibraryDbPath() {
+  const raw = process.env.LIBRARY_DATABASE_PATH || 'library.sqlite';
+  return path.isAbsolute(raw)
+    ? raw
+    : path.join(process.cwd(), raw);
+}
+
+function getResolvedPlaylistsDbPath() {
+  const raw = process.env.PLAYLISTS_DATABASE_PATH || 'playlists.sqlite';
+  return path.isAbsolute(raw)
+    ? raw
+    : path.join(process.cwd(), raw);
+}
+
+function getResolvedQueueDbPath() {
+  if (resolvedQueueDbPath) return resolvedQueueDbPath;
+  const raw = process.env.QUEUE_DATABASE_PATH || 'queue.sqlite';
+  return path.isAbsolute(raw)
+    ? raw
+    : path.join(process.cwd(), raw);
 }
 
 function safeBasename(input) {
@@ -404,6 +449,7 @@ async function createBackup(options = {}) {
       job.progress = 85;
 
       const resolvedUploadDir = getResolvedUploadDir();
+      const resolvedQueueUploadsDir = getResolvedQueueUploadsDir();
       const tmpRoot = path.join(backupsDir, `.__tmp_${safeBasename(backupId)}`);
       await rmrf(tmpRoot);
       fs.mkdirSync(tmpRoot, { recursive: true });
@@ -425,22 +471,145 @@ async function createBackup(options = {}) {
         bytes: sqliteStat.size,
         checksum: sqliteChecksum,
       };
+
+      // Include queue.sqlite if present.
+      const queueDbPath = getResolvedQueueDbPath();
+      try {
+        if (queueDbPath && fs.existsSync(queueDbPath)) {
+          const qStat = fs.statSync(queueDbPath);
+          const qChecksum = await calculateFileHashStream(queueDbPath);
+          metadata.queueDatabase = {
+            filename: 'queue.sqlite',
+            bytes: qStat.size,
+            checksum: qChecksum,
+          };
+          fs.copyFileSync(queueDbPath, path.join(tmpRoot, 'queue.sqlite'));
+        }
+      } catch {
+        // ignore queue db snapshot failures; backup still valid for core DB
+      }
       createdMetadata = metadata;
 
       // Place the sqlite file under a stable name inside the archive.
       fs.copyFileSync(sqlitePath, path.join(tmpRoot, 'database.sqlite'));
+
+      // Phase 1 module DB export: split database snapshot into core/library/playlists DBs.
+      // This does not change runtime yet, but ensures backups contain isolated DB files.
+      const coreOut = path.join(tmpRoot, 'core.sqlite');
+      const libraryOut = path.join(tmpRoot, 'library.sqlite');
+      const playlistsOut = path.join(tmpRoot, 'playlists.sqlite');
+
+      const runDb = (database, sql, params = []) =>
+        new Promise((resolve, reject) => {
+          database.run(sql, params, (err) => (err ? reject(err) : resolve()));
+        });
+      const allDb = (database, sql, params = []) =>
+        new Promise((resolve, reject) => {
+          database.all(sql, params, (err, rows) => (err ? reject(err) : resolve(rows)));
+        });
+
+      async function exportModuleDb({ outPath, tableSpecs }) {
+        await rmrf(outPath);
+        const outDb = new sqlite3.Database(outPath);
+        try {
+          await runDb(outDb, 'PRAGMA journal_mode = WAL');
+          await runDb(outDb, 'ATTACH DATABASE ? AS src', [path.join(tmpRoot, 'database.sqlite')]);
+
+          for (const spec of tableSpecs) {
+            const name = spec.name;
+            const tableRow = (await allDb(outDb, `SELECT name, sql FROM src.sqlite_master WHERE type = 'table' AND name = ?`, [name]))?.[0];
+            const createSql = tableRow?.sql;
+            if (typeof createSql !== 'string' || !createSql.trim()) {
+              continue;
+            }
+            await runDb(outDb, createSql);
+
+            const where = spec.where ? ` WHERE ${spec.where}` : '';
+            await runDb(outDb, `INSERT INTO ${name} SELECT * FROM src.${name}${where}`);
+
+            // Copy indexes for this table when available.
+            const indexRows = await allDb(
+              outDb,
+              `SELECT name, sql FROM src.sqlite_master WHERE type = 'index' AND tbl_name = ? AND sql IS NOT NULL`,
+              [name],
+            );
+            for (const idx of indexRows || []) {
+              if (idx?.sql) {
+                try {
+                  await runDb(outDb, idx.sql);
+                } catch {
+                  // ignore index errors
+                }
+              }
+            }
+          }
+
+          await runDb(outDb, 'DETACH DATABASE src');
+        } finally {
+          await new Promise((resolve) => outDb.close(() => resolve()));
+        }
+      }
+
+      try {
+        await exportModuleDb({
+          outPath: coreOut,
+          tableSpecs: [
+            { name: 'settings' },
+            { name: 'schedules' },
+            { name: 'playback_history' },
+          ],
+        });
+      } catch {
+        // ignore
+      }
+
+      try {
+        await exportModuleDb({
+          outPath: libraryOut,
+          tableSpecs: [
+            { name: 'tracks', where: `file_path IS NULL OR file_path NOT LIKE '/uploads/playlists/%'` },
+            { name: 'folders' },
+            { name: 'folder_tracks' },
+            { name: 'tracks_fts' },
+          ],
+        });
+      } catch {
+        // ignore
+      }
+
+      try {
+        await exportModuleDb({
+          outPath: playlistsOut,
+          tableSpecs: [
+            { name: 'playlists' },
+            { name: 'playlist_tracks' },
+            // Phase 1 heuristic: playlist-owned track rows are those stored under uploads/playlists
+            { name: 'tracks', where: `file_path LIKE '/uploads/playlists/%'` },
+          ],
+        });
+      } catch {
+        // ignore
+      }
 
       fs.writeFileSync(path.join(tmpRoot, 'metadata.json'), JSON.stringify(metadata, null, 2), 'utf8');
       fs.writeFileSync(
         path.join(tmpRoot, 'manifest.json'),
         JSON.stringify(
           {
-            version: 2,
+            version: 3,
             createdAt: new Date().toISOString(),
             sqlite: 'database.sqlite',
             uploadsDir: path.basename(resolvedUploadDir),
             resolvedUploadDir,
+            queueUploadsDir: path.basename(resolvedQueueUploadsDir),
+            resolvedQueueUploadsDir,
             includesAudioFiles: Boolean(includeAudioFiles),
+            moduleDatabases: {
+              core: fs.existsSync(coreOut) ? 'core.sqlite' : null,
+              library: fs.existsSync(libraryOut) ? 'library.sqlite' : null,
+              playlists: fs.existsSync(playlistsOut) ? 'playlists.sqlite' : null,
+              queue: fs.existsSync(path.join(tmpRoot, 'queue.sqlite')) ? 'queue.sqlite' : null,
+            },
           },
           null,
           2,
@@ -455,6 +624,10 @@ async function createBackup(options = {}) {
         '-C',
         JSON.stringify(tmpRoot),
         JSON.stringify('database.sqlite'),
+        ...(fs.existsSync(path.join(tmpRoot, 'core.sqlite')) ? [JSON.stringify('core.sqlite')] : []),
+        ...(fs.existsSync(path.join(tmpRoot, 'library.sqlite')) ? [JSON.stringify('library.sqlite')] : []),
+        ...(fs.existsSync(path.join(tmpRoot, 'playlists.sqlite')) ? [JSON.stringify('playlists.sqlite')] : []),
+        ...(fs.existsSync(path.join(tmpRoot, 'queue.sqlite')) ? [JSON.stringify('queue.sqlite')] : []),
         JSON.stringify('metadata.json'),
         JSON.stringify('manifest.json'),
       ];
@@ -467,10 +640,23 @@ async function createBackup(options = {}) {
         );
       }
 
+      // Include queue uploads directory (queue media) separately.
+      if (includeAudioFiles && fs.existsSync(resolvedQueueUploadsDir)) {
+        tarArgs.push(
+          '-C',
+          JSON.stringify(path.dirname(resolvedQueueUploadsDir)),
+          JSON.stringify(path.basename(resolvedQueueUploadsDir)),
+        );
+      }
+
       // MISSION-CRITICAL: Run heavy compression with low CPU priority to protect the audio thread.
       // On Windows, 'start /low /b' achieves this.
-      const lowPriorityCmd = `cmd /c start /low /b ${tarArgs.join(' ')}`;
-      await execAsync(lowPriorityCmd);
+      if (process.platform === 'win32') {
+        const lowPriorityCmd = `cmd /c start /low /b ${tarArgs.join(' ')}`;
+        await execAsync(lowPriorityCmd);
+      } else {
+        await execAsync(tarArgs.join(' '));
+      }
       await rmrf(tmpRoot);
 
       const archStat = fs.statSync(archivePath);
@@ -707,6 +893,8 @@ async function restoreFromBackup(filename, options = {}) {
       throw new Error('Backup archive is missing database file');
     }
 
+    const extractedQueueSqlitePath = path.join(tmpRoot, 'queue.sqlite');
+
     const resolvedUploadDir = getResolvedUploadDir();
     const extractedUploads = path.join(tmpRoot, path.basename(resolvedUploadDir));
     const oldUploadsBackup = path.join(backupsDir, `uploads_before_restore_${formatTimestamp(new Date())}`);
@@ -722,6 +910,29 @@ async function restoreFromBackup(filename, options = {}) {
         fs.renameSync(extractedUploads, resolvedUploadDir);
       } else {
         fs.mkdirSync(resolvedUploadDir, { recursive: true });
+      }
+    } catch {
+    }
+
+    // Restore queue uploads directory if present in archive.
+    try {
+      const resolvedQueueUploadsDir = getResolvedQueueUploadsDir();
+      const extractedQueueUploads = path.join(tmpRoot, path.basename(resolvedQueueUploadsDir));
+      const oldQueueUploadsBackup = path.join(backupsDir, `queue_uploads_before_restore_${formatTimestamp(new Date())}`);
+      if (fs.existsSync(resolvedQueueUploadsDir)) {
+        try {
+          fs.renameSync(resolvedQueueUploadsDir, oldQueueUploadsBackup);
+        } catch {
+        }
+      }
+      if (fs.existsSync(extractedQueueUploads)) {
+        fs.mkdirSync(path.dirname(resolvedQueueUploadsDir), { recursive: true });
+        try {
+          fs.renameSync(extractedQueueUploads, resolvedQueueUploadsDir);
+        } catch {
+        }
+      } else {
+        fs.mkdirSync(resolvedQueueUploadsDir, { recursive: true });
       }
     } catch {
     }
@@ -745,6 +956,51 @@ async function restoreFromBackup(filename, options = {}) {
     }
 
     const result = await performSafeFullRestore(extractedSqlitePath, restoredMetadata);
+
+    // Restore queue DB if present
+    try {
+      if (fs.existsSync(extractedQueueSqlitePath)) {
+        const queueDbPath = getResolvedQueueDbPath();
+        const queueBackupBefore = queueDbPath.replace(/\.sqlite$/i, `_backup_before_restore_${formatTimestamp(new Date())}.sqlite`);
+        const tempQueueRestore = queueDbPath.replace(/\.sqlite$/i, `_temp_restore_${Date.now()}.sqlite`);
+
+        if (fs.existsSync(queueDbPath)) {
+          fs.copyFileSync(queueDbPath, queueBackupBefore);
+        }
+
+        fs.copyFileSync(extractedQueueSqlitePath, tempQueueRestore);
+
+        await reconnectQueueDatabase();
+        fs.copyFileSync(tempQueueRestore, queueDbPath);
+        fs.unlinkSync(tempQueueRestore);
+        await reconnectQueueDatabase();
+      }
+    } catch (e) {
+      console.warn('Queue DB restore failed; continuing with core DB restore', e?.message || e);
+    }
+
+    // Restore module DB files (Phase 1).
+    try {
+      const extractedCoreSqlitePath = path.join(tmpRoot, 'core.sqlite');
+      const extractedLibrarySqlitePath = path.join(tmpRoot, 'library.sqlite');
+      const extractedPlaylistsSqlitePath = path.join(tmpRoot, 'playlists.sqlite');
+
+      if (fs.existsSync(extractedCoreSqlitePath)) {
+        const coreDbPath = getResolvedCoreDbPath();
+        fs.copyFileSync(extractedCoreSqlitePath, coreDbPath);
+      }
+      if (fs.existsSync(extractedLibrarySqlitePath)) {
+        const libraryDbPath = getResolvedLibraryDbPath();
+        fs.copyFileSync(extractedLibrarySqlitePath, libraryDbPath);
+      }
+      if (fs.existsSync(extractedPlaylistsSqlitePath)) {
+        const playlistsDbPath = getResolvedPlaylistsDbPath();
+        fs.copyFileSync(extractedPlaylistsSqlitePath, playlistsDbPath);
+      }
+    } catch {
+      // ignore module db restore errors
+    }
+
     await rmrf(tmpRoot);
     return { ...result, metadata: restoredMetadata, includesAudio: true };
   }

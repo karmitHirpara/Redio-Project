@@ -11,6 +11,7 @@ import { dirname } from 'path';
 import { query, run, get } from '../config/database.js';
 import { emitQueueUpdated } from './queue.js';
 import { isS3UploadStorage, s3PutFile, s3ObjectExists, s3DeleteObject, s3CopyObject, s3KeyFromUploadsPath } from '../services/objectStorage.js';
+import { sha256File, getDuration } from '../services/audio.js';
 
 const router = express.Router();
 
@@ -24,11 +25,14 @@ const uploadsDir = path.isAbsolute(rawUploadPath)
   ? rawUploadPath
   : path.join(__dirname, '..', rawUploadPath);
 
+const libraryDir = path.join(uploadsDir, 'library');
+const playlistsDir = path.join(uploadsDir, 'playlists');
+
 const useS3 = isS3UploadStorage();
 
-if (!fs.existsSync(uploadsDir)) {
-  fs.mkdirSync(uploadsDir, { recursive: true });
-}
+if (!fs.existsSync(uploadsDir)) fs.mkdirSync(uploadsDir, { recursive: true });
+if (!fs.existsSync(libraryDir)) fs.mkdirSync(libraryDir, { recursive: true });
+if (!fs.existsSync(playlistsDir)) fs.mkdirSync(playlistsDir, { recursive: true });
 
 const MAX_UPLOAD_BYTES = Number(process.env.MAX_UPLOAD_BYTES || 0);
 
@@ -85,11 +89,15 @@ const normalizeExt = (originalName, mimeType) => {
 };
 
 const resolveUploadPath = (filePathOrName) => {
-  const base = path.basename(String(filePathOrName || ''));
-  const resolved = path.resolve(uploadsDir, base);
+  // filePathOrName is typically like "/uploads/library/foo.mp3" or just "foo.mp3"
+  // For safety, resolve against `uploadsDir` strictly.
+  const normalized = filePathOrName.startsWith('/uploads/')
+    ? filePathOrName.slice(9)
+    : filePathOrName;
+  const resolved = path.resolve(uploadsDir, normalized);
   const root = path.resolve(uploadsDir) + path.sep;
   if (!resolved.startsWith(root)) {
-    throw new Error('Invalid upload path');
+    throw new Error('Invalid upload path: outside of uploads dir');
   }
   return resolved;
 };
@@ -97,9 +105,21 @@ const resolveUploadPath = (filePathOrName) => {
 const hashingDiskStorage = {
   _handleFile: (req, file, cb) => {
     try {
+      // NOTE: Multer storage is primarily for manual HTTP uploads.
+      // E.g. drops in Library. Files go directly to `library/` folder.
+      let baseName = path.basename(file.originalname, path.extname(file.originalname));
       const safeExt = normalizeExt(file.originalname, file.mimetype);
-      const uniqueName = `${uuidv4()}${safeExt}`;
-      const finalPath = resolveUploadPath(uniqueName);
+
+      let finalName = `${baseName}${safeExt}`;
+      let finalPath = path.join(libraryDir, finalName);
+
+      // Handle OS collisions natively - append (1), (2) etc.
+      let copyCount = 0;
+      while (fs.existsSync(finalPath)) {
+        copyCount++;
+        finalName = `${baseName} (${copyCount})${safeExt}`;
+        finalPath = path.join(libraryDir, finalName);
+      }
 
       const hash = crypto.createHash('sha256');
       let size = 0;
@@ -115,9 +135,10 @@ const hashingDiskStorage = {
 
       outStream.on('finish', () => {
         const sha256 = hash.digest('hex');
+        const relativePath = `library/${finalName}`;
         cb(null, {
           destination: uploadsDir,
-          filename: uniqueName,
+          filename: relativePath,
           path: finalPath,
           size,
           sha256,
@@ -141,35 +162,7 @@ const hashingDiskStorage = {
   },
 };
 
-const sha256File = (absolutePath) =>
-  new Promise((resolve, reject) => {
-    const hash = crypto.createHash('sha256');
-    const stream = fs.createReadStream(absolutePath);
-    stream.on('error', reject);
-    stream.on('data', (chunk) => hash.update(chunk));
-    stream.on('end', () => resolve(hash.digest('hex')));
-  });
 
-/**
- * Extracts duration from an audio file using ffmpeg.
- */
-const getDuration = (filePath) =>
-  new Promise((resolve) => {
-    const ff = spawn(ffmpegPath, ['-i', filePath]);
-    let output = '';
-    ff.stderr.on('data', (data) => { output += data.toString(); });
-    ff.on('close', () => {
-      const match = output.match(/Duration: (\d+):(\d+):(\d+\.\d+)/);
-      if (match) {
-        const h = parseInt(match[1]);
-        const m = parseInt(match[2]);
-        const s = parseFloat(match[3]);
-        resolve(Math.round(h * 3600 + m * 60 + s));
-      } else {
-        resolve(0);
-      }
-    });
-  });
 
 const uploadConfig = {
   storage: hashingDiskStorage,
@@ -195,7 +188,8 @@ router.get('/', async (req, res) => {
     const limit = parseInt(req.query.limit, 10) || 0;
     const offset = parseInt(req.query.offset, 10) || 0;
 
-    let sql = 'SELECT * FROM tracks ORDER BY date_added DESC';
+    // DO NOT allow arbitrary search in playlists dir from general Library queries
+    let sql = `SELECT * FROM tracks WHERE file_path NOT LIKE '/uploads/playlists/%' ORDER BY date_added DESC`;
     const params = [];
 
     if (limit > 0) {
@@ -397,13 +391,14 @@ router.post('/:id/edit', async (req, res) => {
     const id = String(req.params.id || '');
     const startSecondsRaw = req.body?.startSeconds;
     const endSecondsRaw = req.body?.endSeconds;
-    const segmentsRaw = req.body?.segments;
+    const mode = req.body?.mode || 'overwrite';
+    // The client sends the "context" so backend knows if it should fork to playlist isolates
+    const playlistContext = req.body?.playlistContext || null;
 
     if (!id) return res.status(400).json({ error: 'Missing track id' });
-    const hasSegments = Array.isArray(segmentsRaw) && segmentsRaw.length > 0;
     const hasTrim = startSecondsRaw !== undefined || endSecondsRaw !== undefined;
-    if (!hasSegments && !hasTrim) {
-      return res.status(400).json({ error: 'Provide segments or startSeconds/endSeconds' });
+    if (!hasTrim) {
+      return res.status(400).json({ error: 'Provide startSeconds and endSeconds' });
     }
 
     const track = await get('SELECT * FROM tracks WHERE id = ?', [id]);
@@ -442,81 +437,33 @@ router.post('/:id/edit', async (req, res) => {
     let args;
     let durationSeconds;
 
-    if (hasSegments) {
-      const segments = (segmentsRaw || [])
-        .map((s) => ({
-          startSeconds: Number(s?.startSeconds),
-          endSeconds: Number(s?.endSeconds),
-        }))
-        .filter((s) => Number.isFinite(s.startSeconds) && Number.isFinite(s.endSeconds))
-        .map((s) => ({
-          startSeconds: Math.max(0, s.startSeconds),
-          endSeconds: Math.max(0, s.endSeconds),
-        }))
-        .map((s) => ({
-          startSeconds: Math.min(s.startSeconds, s.endSeconds),
-          endSeconds: Math.max(s.startSeconds, s.endSeconds),
-        }))
-        .filter((s) => s.endSeconds > s.startSeconds)
-        .sort((a, b) => a.startSeconds - b.startSeconds);
 
-      if (segments.length === 0) {
-        return res.status(400).json({ error: 'segments is empty or invalid' });
-      }
-
-      durationSeconds = segments.reduce((sum, s) => sum + (s.endSeconds - s.startSeconds), 0);
-
-      // Build filter_complex to trim each segment, reset timestamps, then concat.
-      // Note: audio only
-      const parts = segments
-        .map((s, idx) => {
-          const a = `[0:a]atrim=start=${s.startSeconds}:end=${s.endSeconds},asetpts=PTS-STARTPTS[a${idx}]`;
-          return a;
-        })
-        .join(';');
-
-      const concatInputs = segments.map((_, idx) => `[a${idx}]`).join('');
-      const filter = `${parts};${concatInputs}concat=n=${segments.length}:v=0:a=1[aout]`;
-
-      args = [
-        '-y',
-        '-i',
-        absInput,
-        '-filter_complex',
-        filter,
-        '-map',
-        '[aout]',
-        ...encodeArgs,
-        tmpOut,
-      ];
-    } else {
-      const start = Number(startSecondsRaw);
-      const end = Number(endSecondsRaw);
-      if (!Number.isFinite(start) || start < 0) {
-        return res.status(400).json({ error: 'startSeconds must be a number >= 0' });
-      }
-      if (!Number.isFinite(end) || end <= 0) {
-        return res.status(400).json({ error: 'endSeconds must be a number > 0' });
-      }
-      if (end <= start) {
-        return res.status(400).json({ error: 'endSeconds must be greater than startSeconds' });
-      }
-
-      durationSeconds = Math.max(0, end - start);
-
-      // Use -ss after -i for accuracy.
-      args = [
-        '-y',
-        '-i',
-        absInput,
-        '-ss',
-        String(start),
-        '-t',
-        String(durationSeconds),
-        ...encodeArgs,
-        tmpOut,
-      ];
+    const start = Number(startSecondsRaw);
+    const end = Number(endSecondsRaw);
+    if (!Number.isFinite(start) || start < 0) {
+      return res.status(400).json({ error: 'startSeconds must be a number >= 0' });
     }
+    if (!Number.isFinite(end) || end <= 0) {
+      return res.status(400).json({ error: 'endSeconds must be a number > 0' });
+    }
+    if (end <= start) {
+      return res.status(400).json({ error: 'endSeconds must be greater than startSeconds' });
+    }
+
+    durationSeconds = Math.max(0, end - start);
+
+    // Use -ss after -i for accuracy.
+    args = [
+      '-y',
+      '-i',
+      absInput,
+      '-ss',
+      String(start),
+      '-t',
+      String(durationSeconds),
+      ...encodeArgs,
+      tmpOut,
+    ];
 
     await new Promise((resolve, reject) => {
       const child = spawn(ffmpegPath, args, { windowsHide: true });
@@ -539,34 +486,160 @@ router.post('/:id/edit', async (req, res) => {
     const newHash = await sha256File(tmpOut);
     const newDuration = Math.max(0, Math.round(Number(durationSeconds || 0)));
 
-    // Atomic replace
-    const backup = `${absInput}.bak-${uuidv4()}`;
-    fs.renameSync(absInput, backup);
-    try {
-      fs.renameSync(tmpOut, absInput);
-    } catch (e) {
+    // PLAYLIST-SCOPED OVERWRITE:
+    // When editing from within a playlist, overwrite must only affect the
+    // exact track instance being edited (track id + file_path). Do not perform
+    // any global name/filename collision detection across the DB.
+    if (mode === 'overwrite' && playlistContext && playlistContext.playlistId) {
       try {
-        fs.renameSync(backup, absInput);
-      } catch {
-        // ignore
+        // Replace the existing file contents in-place.
+        // On most platforms rename is atomic if same volume.
+        if (fs.existsSync(absInput)) {
+          try {
+            fs.unlinkSync(absInput);
+          } catch {
+            // ignore
+          }
+        }
+        fs.renameSync(tmpOut, absInput);
+      } catch (e) {
+        try {
+          if (fs.existsSync(tmpOut)) fs.unlinkSync(tmpOut);
+        } catch {
+          // ignore
+        }
+        throw e;
       }
-      throw e;
-    }
-    try {
-      if (fs.existsSync(backup)) fs.unlinkSync(backup);
-    } catch {
-      // ignore
+
+      await run('UPDATE tracks SET duration = ?, size = ?, hash = ? WHERE id = ?', [
+        newDuration,
+        stat.size,
+        newHash,
+        id,
+      ]);
+
+      const updated = await get('SELECT * FROM tracks WHERE id = ?', [id]);
+      return res.json(updated);
     }
 
-    await run('UPDATE tracks SET duration = ?, size = ?, hash = ? WHERE id = ?', [
-      newDuration,
-      stat.size,
-      newHash,
-      id,
-    ]);
+    if (mode === 'duplicate' || mode === 'overwrite') {
+      const originalName = track.name || 'Track';
+      const baseNameRaw = originalName.replace(/\s*\(\d+\)\s*$/, '').trim();
+      const baseName = baseNameRaw.endsWith(' edit') ? baseNameRaw.slice(0, -5).trim() : baseNameRaw;
 
-    const updated = await get('SELECT * FROM tracks WHERE id = ?', [id]);
-    return res.json(updated);
+      const prefix = `${baseName} edit`;
+      const escapedBase = prefix.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      const pattern = new RegExp(`^${escapedBase}(?: \\((\\d+)\\))?$`);
+
+      const rows = await query('SELECT name FROM tracks WHERE name LIKE ?', [`${prefix}%`]);
+      let maxIndex = 0;
+      let hasEdit = false;
+      for (const row of rows) {
+        const name = row.name || '';
+        if (name === prefix) hasEdit = true;
+        const match = name.match(pattern);
+        if (!match) continue;
+        const idx = match[1] ? parseInt(match[1], 10) : 0;
+        if (!Number.isNaN(idx)) {
+          maxIndex = Math.max(maxIndex, idx);
+        }
+      }
+
+      const newName = maxIndex > 0 ? `${prefix} (${maxIndex + 1})` : hasEdit ? `${prefix} (1)` : prefix;
+      const fileExt = path.extname(absInput) || '.mp3';
+      const cleanFileName = newName.replace(/[^a-zA-Z0-9 _-]/g, '') + fileExt;
+
+      let finalDir = libraryDir;
+      let virtualPathType = 'library';
+
+      if (playlistContext && playlistContext.playlistId) {
+        // Find playlist name for physical folder
+        const pObj = await get('SELECT name FROM playlists WHERE id = ?', [playlistContext.playlistId]);
+        const pName = pObj?.name ? pObj.name.replace(/[^a-zA-Z0-9 _-]/g, '') : playlistContext.playlistId;
+        finalDir = path.join(playlistsDir, pName);
+        virtualPathType = `playlists/${pName}`;
+        if (!fs.existsSync(finalDir)) fs.mkdirSync(finalDir, { recursive: true });
+      }
+
+      let destPath = path.join(finalDir, cleanFileName);
+      let duplicateIndex = 1;
+      while (fs.existsSync(destPath)) {
+        const fallbackName = `${cleanFileName.replace(fileExt, '')} (${duplicateIndex})${fileExt}`;
+        destPath = path.join(finalDir, fallbackName);
+        duplicateIndex++;
+      }
+
+      fs.renameSync(tmpOut, destPath);
+      const newRelativePath = `/uploads/${virtualPathType}/${path.basename(destPath)}`;
+
+      if (mode === 'duplicate') {
+        const trackId = uuidv4();
+        await run(
+          `INSERT INTO tracks (id, name, artist, duration, size, file_path, hash)
+           VALUES (?, ?, ?, ?, ?, ?, ?)`,
+          [
+            trackId,
+            newName,
+            track.artist,
+            newDuration,
+            stat.size,
+            newRelativePath,
+            newHash,
+          ]
+        );
+
+        // Auto-relink if this was triggered inside a playlist
+        if (playlistContext && playlistContext.playlistId && playlistContext.position !== undefined) {
+          const pt = await get('SELECT track_id FROM playlist_tracks WHERE playlist_id = ? AND position = ?', [playlistContext.playlistId, playlistContext.position]);
+          if (pt && pt.track_id === track.id) {
+            await run('UPDATE playlist_tracks SET track_id = ? WHERE playlist_id = ? AND position = ?', [trackId, playlistContext.playlistId, playlistContext.position]);
+          }
+        }
+
+        const duplicated = await get('SELECT * FROM tracks WHERE id = ?', [trackId]);
+        return res.status(201).json(duplicated);
+      }
+
+      // mode === 'overwrite'
+      if (!(playlistContext && playlistContext.playlistId)) {
+        // Library Separation: If this track is in use by playlists, we must clone the original
+        // DB record to preserve the unedited physical file for the playlists, and let the library
+        // track point to the new overwritten file.
+        const inUseByPlaylists = await query('SELECT DISTINCT playlist_id FROM playlist_tracks WHERE track_id = ?', [id]);
+
+        if (inUseByPlaylists && inUseByPlaylists.length > 0) {
+          // Clone original track for playlists to use
+          const clonedId = uuidv4();
+          await run(
+            `INSERT INTO tracks (id, name, artist, duration, size, file_path, hash, original_filename)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+            [clonedId, track.name, track.artist, track.duration, track.size, track.file_path, track.hash, track.original_filename]
+          );
+          // Remap playlists to use the cloned track (which points to the untouched physical file)
+          await run(`UPDATE playlist_tracks SET track_id = ? WHERE track_id = ?`, [clonedId, id]);
+        } else {
+          // Safe to delete old physical file, no playlists rely on it!
+          try {
+            if (fs.existsSync(absInput)) fs.unlinkSync(absInput);
+          } catch {
+            // ignore
+          }
+        }
+      }
+
+      // Update library track to point to the newly cut file!
+      await run('UPDATE tracks SET name = ?, duration = ?, size = ?, hash = ?, file_path = ? WHERE id = ?', [
+        newName,
+        newDuration,
+        stat.size,
+        newHash,
+        newRelativePath,
+        id,
+      ]);
+
+      const updated = await get('SELECT * FROM tracks WHERE id = ?', [id]);
+      return res.json(updated);
+    }
   } catch (error) {
     return res.status(500).json({ error: error.message });
   }

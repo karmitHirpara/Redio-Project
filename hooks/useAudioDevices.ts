@@ -129,7 +129,13 @@ export function useAudioDevices(): UseAudioDevicesResult {
         }
 
         const stillExists = normalized.some((d) => d.deviceId === prev);
-        setFallbackToDefault(!stillExists);
+        if (!stillExists) {
+          // Hardware disconnected! Trigger instant failover to the OS default route.
+          setFallbackToDefault(true);
+          return 'default';
+        }
+
+        setFallbackToDefault(false);
         return prev;
       });
     } catch (err: any) {

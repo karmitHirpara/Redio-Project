@@ -1,7 +1,7 @@
 import express from 'express';
 import { v4 as uuidv4 } from 'uuid';
 import { query, run, get } from '../config/database.js';
-import { emitQueueUpdated } from './queue.js';
+import { emitQueueUpdated, enqueueTrackCopy } from './queue.js';
 
 const router = express.Router();
 
@@ -140,26 +140,9 @@ router.post('/:id/actions', async (req, res) => {
 
     switch (action) {
       case 'addToQueue': {
-        // Append track to the end of the queue
-        const track = await get('SELECT * FROM tracks WHERE id = ?', [entry.track_id]);
-        if (!track) {
-          return res.status(404).json({ error: 'Track not found for this history entry' });
-        }
-        const { v4: uuid } = await import('uuid');
-        const queueId = uuid();
+        await enqueueTrackCopy({ trackId: String(entry.track_id), fromPlaylist: null });
 
-        const maxPos = await get('SELECT MAX(order_position) as max FROM queue');
-        const position = (maxPos?.max ?? -1) + 1;
-
-        await run(
-          `INSERT INTO queue (id, track_id, from_playlist, order_position)
-           VALUES (?, ?, ?, ?)`,
-          [queueId, entry.track_id, null, position]
-        );
-
-        // Broadcast updated queue state
         await emitQueueUpdated(req.app);
-
         return res.json({ message: 'Added to queue' });
       }
       case 'deleteFromAll': {

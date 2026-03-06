@@ -31,6 +31,9 @@ interface TrackRowProps {
   getDragPayload?: () => { trackIds: string[]; sourceFolderId?: string };
   startTimeLabel?: string; // optional: scheduled start time for this track
   onTrackUpdated?: (track: Track) => void;
+  playlistContext?: { playlistId: string; position: number };
+  currentTrackId?: string | null;
+  queuedTrackIds?: Set<string> | null;
 }
 
 export const TrackRow = memo(function TrackRow({
@@ -50,8 +53,14 @@ export const TrackRow = memo(function TrackRow({
   getDragPayload,
   startTimeLabel,
   onTrackUpdated,
+  playlistContext,
+  currentTrackId,
+  queuedTrackIds,
 }: TrackRowProps) {
   const [editOpen, setEditOpen] = useState(false);
+  const isQueued = queuedTrackIds ? queuedTrackIds.has(track.id) : false;
+  const isPlaying = Boolean(currentTrackId && track.id === currentTrackId);
+  const editDisabled = isQueued || isPlaying;
   const rowClasses = cn(
     'group flex items-center gap-2 w-full transition-all duration-150 ease-out outline-none border border-transparent select-none',
     'px-2 py-0.5 rounded-sm h-8',
@@ -178,7 +187,9 @@ export const TrackRow = memo(function TrackRow({
         <ContextMenuItem onClick={() => onAddToQueue(track)}>Add to Queue</ContextMenuItem>
 
         <ContextMenuItem
+          disabled={editDisabled}
           onClick={() => {
+            if (editDisabled) return;
             setEditOpen(true);
           }}
         >
@@ -213,6 +224,7 @@ export const TrackRow = memo(function TrackRow({
         onOpenChange={setEditOpen}
         track={track}
         onTrackUpdated={onTrackUpdated}
+        playlistContext={playlistContext}
       />
     </ContextMenu>
   );

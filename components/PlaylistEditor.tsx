@@ -683,91 +683,92 @@ export function PlaylistEditor({
                     );
                   })() : null}
 
-                <motion.div
-                  key={track.id}
-                  layout
-                  initial={reduceMotion ? false : { opacity: 0, y: -6 }}
-                  animate={
-                    reduceMotion
-                      ? undefined
-                      : flashTrackId === track.id
-                        ? {
-                          opacity: 1,
-                          y: 0,
-                          scale: [1, 1.01, 1],
-                          backgroundColor: [
-                            'rgba(56,189,248,0.08)',
-                            'rgba(56,189,248,0.18)',
-                            'rgba(56,189,248,0.08)',
-                          ],
-                        }
-                        : { opacity: 1, y: 0, backgroundColor: 'rgba(0,0,0,0)' }
-                  }
-                  exit={reduceMotion ? undefined : { opacity: 0, y: -6 }}
-                  whileTap={reduceMotion ? undefined : { scale: 0.99 }}
-                  transition={
-                    reduceMotion
-                      ? undefined
-                      : flashTrackId === track.id
-                        ? { duration: 0.9, ease: 'easeOut' }
-                        : { duration: 0.18, ease: 'easeOut' }
-                  }
-                  className={`flex items-center gap-2 cursor-default select-none relative hover:bg-accent/10 ${dropIndex === index || dropIndex === index + 1
-                    ? 'bg-accent/15 ring-1 ring-accent/60'
-                    : ''
-                    }`}
-                  draggable={canReorder}
-                  onDragStart={() => handleDragStart(index)}
-                  onDragOver={(e) => handleDragOverRow(e, index)}
-                  onDragEnd={handleDragEnd}
-                >
-                  <AnimatePresence>
-                    {dropIndex === index && (
-                      <motion.div
-                        key="insert-top"
-                        className="pointer-events-none absolute left-0 right-0 top-0 h-px bg-accent"
-                        initial={reduceMotion ? false : { opacity: 0, scaleX: 0.92 }}
-                        animate={reduceMotion ? undefined : { opacity: 1, scaleX: 1 }}
-                        exit={reduceMotion ? undefined : { opacity: 0, scaleX: 0.92 }}
-                        transition={reduceMotion ? undefined : { duration: 0.12, ease: 'easeOut' }}
-                        style={{ transformOrigin: 'center' }}
-                      />
-                    )}
-                  </AnimatePresence>
+                  <motion.div
+                    key={track.id}
+                    layout
+                    initial={reduceMotion ? false : { opacity: 0, y: -6 }}
+                    animate={
+                      reduceMotion
+                        ? undefined
+                        : flashTrackId === track.id
+                          ? {
+                            opacity: 1,
+                            y: 0,
+                            scale: [1, 1.01, 1],
+                            backgroundColor: [
+                              'rgba(56,189,248,0.08)',
+                              'rgba(56,189,248,0.18)',
+                              'rgba(56,189,248,0.08)',
+                            ],
+                          }
+                          : { opacity: 1, y: 0, backgroundColor: 'rgba(0,0,0,0)' }
+                    }
+                    exit={reduceMotion ? undefined : { opacity: 0, y: -6 }}
+                    whileTap={reduceMotion ? undefined : { scale: 0.99 }}
+                    transition={
+                      reduceMotion
+                        ? undefined
+                        : flashTrackId === track.id
+                          ? { duration: 0.9, ease: 'easeOut' }
+                          : { duration: 0.18, ease: 'easeOut' }
+                    }
+                    className={`flex items-center gap-2 cursor-default select-none relative hover:bg-accent/10 ${dropIndex === index || dropIndex === index + 1
+                      ? 'bg-accent/15 ring-1 ring-accent/60'
+                      : ''
+                      }`}
+                    draggable={canReorder}
+                    onDragStart={() => handleDragStart(index)}
+                    onDragOver={(e) => handleDragOverRow(e, index)}
+                    onDragEnd={handleDragEnd}
+                  >
+                    <AnimatePresence>
+                      {dropIndex === index && (
+                        <motion.div
+                          key="insert-top"
+                          className="pointer-events-none absolute left-0 right-0 top-0 h-px bg-accent"
+                          initial={reduceMotion ? false : { opacity: 0, scaleX: 0.92 }}
+                          animate={reduceMotion ? undefined : { opacity: 1, scaleX: 1 }}
+                          exit={reduceMotion ? undefined : { opacity: 0, scaleX: 0.92 }}
+                          transition={reduceMotion ? undefined : { duration: 0.12, ease: 'easeOut' }}
+                          style={{ transformOrigin: 'center' }}
+                        />
+                      )}
+                    </AnimatePresence>
 
-                  <AnimatePresence>
-                    {dropIndex === index + 1 && (
-                      <motion.div
-                        key="insert-bottom"
-                        className="pointer-events-none absolute left-0 right-0 bottom-0 h-px bg-accent"
-                        initial={reduceMotion ? false : { opacity: 0, scaleX: 0.92 }}
-                        animate={reduceMotion ? undefined : { opacity: 1, scaleX: 1 }}
-                        exit={reduceMotion ? undefined : { opacity: 0, scaleX: 0.92 }}
-                        transition={reduceMotion ? undefined : { duration: 0.12, ease: 'easeOut' }}
-                        style={{ transformOrigin: 'center' }}
-                      />
-                    )}
-                  </AnimatePresence>
+                    <AnimatePresence>
+                      {dropIndex === index + 1 && (
+                        <motion.div
+                          key="insert-bottom"
+                          className="pointer-events-none absolute left-0 right-0 bottom-0 h-px bg-accent"
+                          initial={reduceMotion ? false : { opacity: 0, scaleX: 0.92 }}
+                          animate={reduceMotion ? undefined : { opacity: 1, scaleX: 1 }}
+                          exit={reduceMotion ? undefined : { opacity: 0, scaleX: 0.92 }}
+                          transition={reduceMotion ? undefined : { duration: 0.12, ease: 'easeOut' }}
+                          style={{ transformOrigin: 'center' }}
+                        />
+                      )}
+                    </AnimatePresence>
 
-                  <span className="w-6 text-[11px] text-muted-foreground text-right">
-                    {index + 1}
-                  </span>
-                  <GripVertical className="w-4 h-4 text-muted-foreground cursor-grab" />
-                  <div className="flex-1">
-                    <div title={effectiveBaseDateTime ? (previewTooltipByTrackId[track.id] || '') : ''}>
-                      <TrackRow
-                        track={track}
-                        onAddToQueue={onQueueTrack}
-                        onAddToPlaylist={() => { }}
-                        playlists={[]}
-                        onRemove={onRemoveTrack}
-                        showRemove={!playlist.locked}
-                        startTimeLabel={effectiveBaseDateTime ? previewLabelByTrackId[track.id] : startTimeByTrackId[track.id]}
-                        onTrackUpdated={onTrackUpdated}
-                      />
+                    <span className="w-6 text-[11px] text-muted-foreground text-right">
+                      {index + 1}
+                    </span>
+                    <GripVertical className="w-4 h-4 text-muted-foreground cursor-grab" />
+                    <div className="flex-1">
+                      <div title={effectiveBaseDateTime ? (previewTooltipByTrackId[track.id] || '') : ''}>
+                        <TrackRow
+                          track={track}
+                          onAddToQueue={onQueueTrack}
+                          onAddToPlaylist={() => { }}
+                          playlists={[]}
+                          onRemove={onRemoveTrack}
+                          showRemove={!playlist.locked}
+                          startTimeLabel={effectiveBaseDateTime ? previewLabelByTrackId[track.id] : startTimeByTrackId[track.id]}
+                          onTrackUpdated={onTrackUpdated}
+                          playlistContext={{ playlistId: playlist.id, position: index }}
+                        />
+                      </div>
                     </div>
-                  </div>
-                </motion.div>
+                  </motion.div>
                 </div>
               ))}
             </AnimatePresence>

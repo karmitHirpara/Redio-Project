@@ -45,6 +45,9 @@ export const resolveUploadsUrl = (maybePath: string): string => {
   if (maybePath.startsWith('/uploads/')) {
     return `${getBackendOrigin()}${maybePath}`;
   }
+  if (maybePath.startsWith('/uploads_queue/')) {
+    return `${getBackendOrigin()}${maybePath}`;
+  }
   return maybePath;
 };
 
@@ -222,9 +225,8 @@ export const tracksAPI = {
     data: {
       startSeconds?: number;
       endSeconds?: number;
-      autoSkipEnabled?: boolean;
-      autoGapEnabled?: boolean;
-      segments?: Array<{ startSeconds: number; endSeconds: number }>;
+      mode?: 'overwrite' | 'duplicate';
+      playlistContext?: { playlistId: string; position: number };
     }
   ) => apiClient.json<Track>(`/tracks/${id}/edit`, { method: 'POST', json: data }),
 
@@ -268,6 +270,10 @@ export const playlistsAPI = {
     apiClient.json<Playlist>(`/playlists/${id}`, { method: 'PUT', json: data }),
 
   delete: (id: string) => apiClient.request<{ message: string }>(`/playlists/${id}`, { method: 'DELETE' }),
+
+  deletePreview: (id: string) => apiClient.get<any>(`/playlists/${id}/delete-preview`),
+  deleteRecursive: (id: string, force: boolean) =>
+    apiClient.request<any>(`/playlists/${id}/recursive${force ? '?force=1' : ''}`, { method: 'DELETE' }),
 
   addTracks: (id: string, trackIds: string[]) =>
     apiClient.json<{ tracks: Track[] }>(`/playlists/${id}/tracks`, { method: 'POST', json: { trackIds } }),
@@ -319,6 +325,9 @@ export const foldersAPI = {
     apiClient.json<any>('/folders', { method: 'POST', json: { name, parentId } }),
   rename: (id: string, name: string) => apiClient.json<any>(`/folders/${id}`, { method: 'PUT', json: { name } }),
   delete: (id: string) => apiClient.request<{ message: string }>(`/folders/${id}`, { method: 'DELETE' }),
+  deletePreview: (id: string) => apiClient.get<any>(`/folders/${id}/delete-preview`),
+  deleteRecursive: (id: string, force: boolean) =>
+    apiClient.request<any>(`/folders/${id}/recursive${force ? '?force=1' : ''}`, { method: 'DELETE' }),
   getTracks: (folderId: string) => apiClient.get<any[]>(`/folders/${folderId}/tracks`),
   attachTracks: (folderId: string, trackIds: string[]) =>
     apiClient.json<{ message: string }>(`/folders/${folderId}/tracks`, { method: 'POST', json: { trackIds } }),

@@ -1,41 +1,10 @@
 import { query, run, get } from '../config/database.js';
-import crypto from 'crypto';
 import { validateTrack } from './preFlightScan.js';
 
-// Helper to emit the latest queue over WebSocket, mirroring queue.js behaviour
+import { enqueueTrackCopy, emitQueueUpdated as emitQueueUpdatedRoute } from '../routes/queue.js';
+
 async function emitQueueUpdated(app) {
-  const broadcastEvent = app.get('broadcastEvent');
-  if (typeof broadcastEvent !== 'function') return;
-
-  try {
-    const queueItems = await query(`
-      SELECT q.*, t.name, t.artist, t.duration, t.size, t.file_path
-      FROM queue q
-      JOIN tracks t ON q.track_id = t.id
-      ORDER BY q.order_position
-    `);
-
-    const formatted = queueItems.map((item) => ({
-      id: item.id,
-      track: {
-        id: item.track_id,
-        name: item.name,
-        artist: item.artist,
-        duration: item.duration,
-        size: item.size,
-        filePath: item.file_path,
-      },
-      fromPlaylist: item.from_playlist,
-      order: item.order_position,
-    }));
-
-    // Tag scheduler-driven updates so the frontend can treat them as
-    // explicit preemptions even when the same track ID appears at the
-    // front of the queue.
-    broadcastEvent({ type: 'queue-updated', queue: formatted, reason: 'schedule-preempt' });
-  } catch (error) {
-    console.error('Failed to emit queue-updated event from scheduler', error);
-  }
+  await emitQueueUpdatedRoute(app);
 }
 
 function emitPlaylistLocked(app, playlistId, locked) {
@@ -125,18 +94,19 @@ export async function fireScheduleAtomically(scheduleId, app) {
 
     // Prepend scheduled tracks to the top of the queue while preserving
     // everything that was already queued.
-    // Shift the existing queue block down by N positions.
-    await run('UPDATE queue SET order_position = order_position + ?', [validTracks.length]);
+    // With isolated queue storage, we rebuild the queue order by inserting
+    // new items at the top, then shifting existing items down.
 
-    // Insert scheduled tracks at positions 0..N-1
+    // Load current queue ids (from queue DB via route helper)
+    const queueDb = await import('../config/queueDatabase.js');
+    const existingQueue = await queueDb.query('SELECT id FROM queue_items ORDER BY order_position');
+    for (let i = 0; i < existingQueue.length; i += 1) {
+      await queueDb.run('UPDATE queue_items SET order_position = ? WHERE id = ?', [i + validTracks.length, existingQueue[i].id]);
+    }
+
     let cursor = 0;
     for (const track of validTracks) {
-      const queueId = crypto.randomUUID();
-      await run(
-        `INSERT INTO queue (id, track_id, from_playlist, order_position)
-         VALUES (?, ?, ?, ?)`,
-        [queueId, track.id, null, cursor],
-      );
+      await enqueueTrackCopy({ trackId: String(track.id), fromPlaylist: null, orderPosition: cursor });
       cursor += 1;
     }
 

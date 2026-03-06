@@ -1,0 +1,8 @@
+{
+  "version": 2,
+  "createdAt": "2026-03-06T16:35:24.696Z",
+  "sqlite": "database.sqlite",
+  "uploadsDir": "uploads",
+  "resolvedUploadDir": "/Users/karmithirpara/Desktop/Redio Project/server/uploads",
+  "includesAudioFiles": false
+}

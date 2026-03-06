@@ -53,6 +53,8 @@ async function startBackend() {
   const userDataDir = app.getPath('userData');
   const dataDir = path.join(userDataDir, 'data');
   const uploadsDir = path.join(userDataDir, 'uploads');
+  const queueDir = path.join(userDataDir, 'queue');
+  const queueUploadsDir = path.join(userDataDir, 'queue_uploads');
   const backupsDir = path.join(userDataDir, 'backups');
 
   if (!fs.existsSync(dataDir)) {
@@ -61,6 +63,12 @@ async function startBackend() {
   if (!fs.existsSync(uploadsDir)) {
     fs.mkdirSync(uploadsDir, { recursive: true });
   }
+  if (!fs.existsSync(queueDir)) {
+    fs.mkdirSync(queueDir, { recursive: true });
+  }
+  if (!fs.existsSync(queueUploadsDir)) {
+    fs.mkdirSync(queueUploadsDir, { recursive: true });
+  }
   if (!fs.existsSync(backupsDir)) {
     fs.mkdirSync(backupsDir, { recursive: true });
   }
@@ -68,6 +76,8 @@ async function startBackend() {
   // Point backend to writable locations for SQLite and uploads.
   process.env.DATABASE_PATH = path.join(dataDir, 'database.sqlite');
   process.env.UPLOAD_PATH = uploadsDir;
+  process.env.QUEUE_DATABASE_PATH = path.join(queueDir, 'queue.sqlite');
+  process.env.QUEUE_UPLOAD_PATH = queueUploadsDir;
   process.env.BACKUP_PATH = backupsDir;
 
   const serverPath = path.join(__dirname, '..', 'server', 'server.js');

@@ -1,7 +1,33 @@
 import express from 'express';
 import { query, run } from '../config/database.js';
+import { run as runQueue, reconnectQueueDatabase } from '../config/queueDatabase.js';
+import { fileURLToPath } from 'url';
+import path, { dirname, join } from 'path';
+import fs from 'fs';
 
 const router = express.Router();
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = dirname(__filename);
+
+function resolveUploadsDir() {
+  const rawUploadPath = process.env.UPLOAD_PATH || 'uploads';
+  const serverRoot = join(__dirname, '..');
+  return path.isAbsolute(rawUploadPath)
+    ? rawUploadPath
+    : join(serverRoot, rawUploadPath);
+}
+
+function resolveQueueUploadsDir(uploadsDir) {
+  const rawQueueUploadPath = process.env.QUEUE_UPLOAD_PATH || '';
+  const serverRoot = join(__dirname, '..');
+  if (rawQueueUploadPath) {
+    return path.isAbsolute(rawQueueUploadPath)
+      ? rawQueueUploadPath
+      : join(serverRoot, rawQueueUploadPath);
+  }
+  return join(dirname(uploadsDir), 'queue_uploads');
+}
 
 router.get('/settings', async (_req, res) => {
   try {
@@ -96,6 +122,32 @@ router.delete('/settings/factory-reset', async (req, res) => {
     // Commit transaction
     await run('COMMIT');
 
+    // Clear queue database (separate sqlite file)
+    try {
+      await runQueue('DELETE FROM queue_items');
+      await reconnectQueueDatabase();
+    } catch {
+      // ignore queue db reset failures
+    }
+
+    // Delete media files on disk (but keep backups folder intact)
+    try {
+      const uploadsDir = resolveUploadsDir();
+      const libraryDir = join(uploadsDir, 'library');
+      const playlistsDir = join(uploadsDir, 'playlists');
+      const queueUploadsDir = resolveQueueUploadsDir(uploadsDir);
+
+      if (fs.existsSync(libraryDir)) fs.rmSync(libraryDir, { recursive: true, force: true });
+      if (fs.existsSync(playlistsDir)) fs.rmSync(playlistsDir, { recursive: true, force: true });
+      if (fs.existsSync(queueUploadsDir)) fs.rmSync(queueUploadsDir, { recursive: true, force: true });
+
+      fs.mkdirSync(libraryDir, { recursive: true });
+      fs.mkdirSync(playlistsDir, { recursive: true });
+      fs.mkdirSync(queueUploadsDir, { recursive: true });
+    } catch {
+      // ignore media wipe failures
+    }
+
     // Trigger vacuum to optimize database after clearing
     // Run this asynchronously after response to avoid blocking
     setImmediate(() => {
@@ -103,6 +155,15 @@ router.delete('/settings/factory-reset', async (req, res) => {
         // Ignore vacuum errors
       });
     });
+
+    const broadcastEvent = req.app?.get?.('broadcastEvent');
+    if (typeof broadcastEvent === 'function') {
+      try {
+        broadcastEvent({ type: 'database-restored', mode: 'factory-reset' });
+      } catch {
+        // ignore
+      }
+    }
 
     res.json({ ok: true, message: 'Factory reset completed successfully' });
   } catch (error) {

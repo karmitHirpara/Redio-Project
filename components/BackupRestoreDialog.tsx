@@ -67,7 +67,7 @@ export function BackupRestoreDialog({ open, onOpenChange }: BackupRestoreDialogP
   const doCreateBackup = async () => {
     setCreatingBackup(true);
     try {
-      const res = await backupAPI.create();
+      const res = await backupAPI.create({ description: 'Manual backup', includeAudioFiles: true });
       toast.success('Backup created', { description: res?.backup?.filename || 'Backup saved' });
       await loadBackups();
     } catch (err: any) {

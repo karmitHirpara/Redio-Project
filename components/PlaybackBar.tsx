@@ -214,8 +214,17 @@ export function PlaybackBar({
     const a = primaryAudioRef.current;
     const b = secondaryAudioRef.current;
     if (!a && !b) return;
-    applyToAudioElements([a, b]);
-  }, [applyToAudioElements, primaryAudioRef, secondaryAudioRef, selectedDeviceId]);
+
+    // Apply the selected audio sink (which may have just fallen back to 'default').
+    // Browsers will often force-pause the <audio> elements if their underlying hardware
+    // sink disappears. If the app state thinks we are playing, forcefully resume!
+    applyToAudioElements([a, b]).then(() => {
+      if (isPlaying) {
+        if (a && a.src && a.paused) a.play().catch(() => { });
+        if (b && b.src && b.paused) b.play().catch(() => { });
+      }
+    });
+  }, [applyToAudioElements, primaryAudioRef, secondaryAudioRef, selectedDeviceId, isPlaying]);
 
   const handlePlayPause = () => {
     if (isLive && isPlaying) {

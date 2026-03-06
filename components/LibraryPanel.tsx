@@ -19,6 +19,7 @@ import { TrackRow } from './TrackRow';
 import { toast } from 'sonner';
 import { foldersAPI, libraryAPI, resolveUploadsUrl } from '../services/api';
 import { PlaylistFolder } from './PlaylistFolder';
+import { ConfirmDialog } from './ConfirmDialog';
 import { cn } from '../lib/utils';
 import { AnimatePresence, motion, useReducedMotion } from 'framer-motion';
 import {
@@ -47,6 +48,8 @@ interface VirtualizedFolderTrackListProps {
   folderId: string;
   selectedTrackIds: Set<string>;
   recentlyMovedTrackIds?: Set<string>;
+  currentTrackId?: string | null;
+  queuedTrackIds?: Set<string> | null;
   onSelect: (trackId: string, folderId: string, e: React.MouseEvent) => void;
   getDragPayload: (trackId: string, folderId: string) => { trackIds: string[]; sourceFolderId?: string };
   onAddToQueue: (track: Track) => void;
@@ -61,6 +64,8 @@ const VirtualizedFolderTrackList = memo(function VirtualizedFolderTrackList({
   folderId,
   selectedTrackIds,
   recentlyMovedTrackIds,
+  currentTrackId,
+  queuedTrackIds,
   onSelect,
   getDragPayload,
   onAddToQueue,
@@ -126,6 +131,8 @@ const VirtualizedFolderTrackList = memo(function VirtualizedFolderTrackList({
                 onRemove={onRemove}
                 showRemove
                 onTrackUpdated={onTrackUpdated}
+                currentTrackId={currentTrackId}
+                queuedTrackIds={queuedTrackIds}
               />
             ))}
           </div>
@@ -138,6 +145,8 @@ const VirtualizedFolderTrackList = memo(function VirtualizedFolderTrackList({
 interface LibraryPanelProps {
   tracks: Track[];
   playlists: Playlist[];
+  queue?: Array<{ track?: { id: string } }>;
+  currentTrackId?: string | null;
   onAddToQueue: (track: Track) => void;
   onAddToPlaylist: (track: Track, playlistId: string) => void;
   onSelectPlaylist: (playlist: Playlist) => void;
@@ -156,6 +165,8 @@ interface LibraryPanelProps {
 export const LibraryPanel = memo(function LibraryPanel({
   tracks,
   playlists,
+  queue,
+  currentTrackId,
   onAddToQueue,
   onAddToPlaylist,
   onSelectPlaylist,
@@ -187,6 +198,17 @@ export const LibraryPanel = memo(function LibraryPanel({
   const [folderTracks, setFolderTracks] = useState<Record<string, Track[]>>({});
   const [activeTrackFolderId, setActiveTrackFolderId] = useState<string | null>(null);
   const [selectedTrackIds, setSelectedTrackIds] = useState<Set<string>>(new Set());
+
+  const queuedTrackIds = useMemo(() => {
+    const s = new Set<string>();
+    if (Array.isArray(queue)) {
+      for (const item of queue) {
+        const id = (item as any)?.track?.id;
+        if (id) s.add(String(id));
+      }
+    }
+    return s;
+  }, [queue]);
   const [trackSelectionAnchorId, setTrackSelectionAnchorId] = useState<string | null>(null);
   const [dragOverFolderId, setDragOverFolderId] = useState<string | null>(null);
   // Global drag end handler to clear all drag states
@@ -206,6 +228,12 @@ export const LibraryPanel = memo(function LibraryPanel({
   const [creatingParentFolderId, setCreatingParentFolderId] = useState<string | null>(null);
   const [pendingFolderForUpload, setPendingFolderForUpload] = useState<string | null>(null);
   const [folderLoadingIds, setFolderLoadingIds] = useState<Set<string>>(new Set());
+  const [deleteFolderConfirm, setDeleteFolderConfirm] = useState<null | {
+    folderId: string;
+    folderCount: number;
+    trackCount: number;
+    mediaCount: number;
+  }>(null);
 
   const [librarySearchText, setLibrarySearchText] = useState('');
   const [librarySearchQuery, setLibrarySearchQuery] = useState('');
@@ -788,11 +816,10 @@ export const LibraryPanel = memo(function LibraryPanel({
               };
             })
           );
-          setFolderTracks(prev => {
-            const next = { ...prev };
-            results.forEach(r => { next[r.folderId] = r.tracks; });
-            return next;
-          });
+          setFolderTracks((prev) => ({
+            ...prev,
+            ...results.reduce((acc, r) => ({ ...acc, [r.folderId]: r.tracks }), {}),
+          }));
         }
       } catch (err) {
         console.error('Failed to load folders on resync', err);
@@ -1030,11 +1057,61 @@ export const LibraryPanel = memo(function LibraryPanel({
   };
 
   const handleDeleteFolder = async (folderId: string) => {
-    if (!confirm('Delete this folder?')) return;
     try {
-      await foldersAPI.delete(folderId);
-      const descendants = folderDescendantsMap.get(String(folderId)) || new Set<string>();
-      const idsToRemove = new Set<string>([String(folderId), ...Array.from(descendants)]);
+      const preview = await foldersAPI.deletePreview(folderId);
+      const requires = Boolean(preview?.requiresConfirmation);
+      const folderCount = Number(preview?.folderCount || 0);
+      const trackCount = Number(preview?.trackCount || 0);
+      const mediaCount = Number(preview?.mediaCount || 0);
+
+      if (requires) {
+        setDeleteFolderConfirm({
+          folderId,
+          folderCount,
+          trackCount,
+          mediaCount,
+        });
+        return;
+      }
+
+      const result = await foldersAPI.deleteRecursive(folderId, false);
+      const idsToRemove = new Set<string>((result?.folderIds || [String(folderId)]).map(String));
+
+      setFolders((prev) => prev.filter((f) => !idsToRemove.has(String(f.id))));
+      setFolderTracks((prev) => {
+        const next = { ...prev };
+        idsToRemove.forEach((id) => {
+          delete next[id];
+        });
+        return next;
+      });
+      setExpandedFolderIds((prev) => prev.filter((id) => !idsToRemove.has(String(id))));
+
+      setSelectedFolderIds((prev) => {
+        const next = new Set(prev);
+        idsToRemove.forEach((id) => next.delete(id));
+        return next;
+      });
+
+      if (selectedFolderId && idsToRemove.has(String(selectedFolderId))) {
+        setSelectedFolderId(null);
+      }
+      if (activeTrackFolderId && idsToRemove.has(String(activeTrackFolderId))) {
+        setActiveTrackFolderId(null);
+      }
+    } catch (err: any) {
+      console.error('Failed to delete folder', err);
+      alert(err?.message || 'Failed to delete folder');
+    }
+  };
+
+  const confirmDeleteFolder = async () => {
+    const pending = deleteFolderConfirm;
+    if (!pending) return;
+    setDeleteFolderConfirm(null);
+    try {
+      const result = await foldersAPI.deleteRecursive(pending.folderId, true);
+      const idsToRemove = new Set<string>((result?.folderIds || [pending.folderId]).map(String));
 
       setFolders((prev) => prev.filter((f) => !idsToRemove.has(String(f.id))));
       setFolderTracks((prev) => {
@@ -1248,6 +1325,8 @@ export const LibraryPanel = memo(function LibraryPanel({
                         playlists={playlists}
                         onRemove={handleRemoveFolderTrack}
                         onTrackUpdated={onTrackUpdated}
+                        currentTrackId={currentTrackId}
+                        queuedTrackIds={queuedTrackIds}
                       />
                     )}
                   </div>
@@ -1283,6 +1362,8 @@ export const LibraryPanel = memo(function LibraryPanel({
       selectedFolderId,
       selectedTrackIds,
       toggleFolderExpanded,
+      currentTrackId,
+      queuedTrackIds,
     ]
   );
 
@@ -1737,12 +1818,15 @@ export const LibraryPanel = memo(function LibraryPanel({
                   track={r.track}
                   isLibrary
                   isSelected={false}
+                  isFocused={false}
                   onAddToQueue={onAddToQueue}
                   onAddToPlaylist={onAddToPlaylist}
                   playlists={playlists}
                   onRemove={onRemoveTrack}
                   showRemove
                   onTrackUpdated={onTrackUpdated}
+                  currentTrackId={currentTrackId}
+                  queuedTrackIds={queuedTrackIds}
                 />
                 {r.folderPath ? (
                   <div className="px-9 text-[10px] text-muted-foreground/70 truncate">{r.folderPath}</div>
@@ -1875,6 +1959,20 @@ export const LibraryPanel = memo(function LibraryPanel({
           </motion.div>
         )}
       </AnimatePresence>
+
+      <ConfirmDialog
+        open={deleteFolderConfirm !== null}
+        title="Delete folder?"
+        description={
+          deleteFolderConfirm
+            ? `This will delete ${deleteFolderConfirm.folderCount} folders and ${deleteFolderConfirm.trackCount} track records.\n\n${deleteFolderConfirm.mediaCount} media files will be removed from storage.`
+            : undefined
+        }
+        confirmLabel="Delete"
+        cancelLabel="Cancel"
+        onConfirm={confirmDeleteFolder}
+        onCancel={() => setDeleteFolderConfirm(null)}
+      />
     </div>
   );
 });
