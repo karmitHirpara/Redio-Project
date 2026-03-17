@@ -641,13 +641,91 @@ export function PlaylistEditor({
           }
 
           if (hasFiles && onImportFiles) {
-            const files = e.dataTransfer.files ? Array.from(e.dataTransfer.files) : [];
-            if (files.length === 0) return;
             const insertAt = dropIndex !== null ? dropIndex : filteredTracks.length;
-            // OS drag-and-drop into playlist: suppress duplicate dialog for a
-            // smoother flow, always treating duplicates as "Add Copy".
-            void onImportFiles(files, insertAt, true);
-            setDropIndex(null);
+
+            const items = Array.from(e.dataTransfer.items || []);
+            const hasDirectoryEntry = items.some((it) => {
+              try {
+                const entry = (it as any).webkitGetAsEntry?.();
+                return Boolean(entry && entry.isDirectory);
+              } catch {
+                return false;
+              }
+            });
+
+            const makeFileWithRelativePath = (file: File, rel: string): File => {
+              const f = new File([file], file.name, {
+                type: file.type,
+                lastModified: file.lastModified,
+              });
+              try {
+                Object.defineProperty(f, 'webkitRelativePath', {
+                  value: rel,
+                  configurable: true,
+                });
+              } catch {
+                // ignore
+              }
+              return f;
+            };
+
+            const readEntry = async (entry: any, prefix: string, includeSelfName: boolean): Promise<File[]> => {
+              const out: File[] = [];
+              if (!entry) return out;
+
+              if (entry.isFile) {
+                await new Promise<void>((resolve) => {
+                  entry.file(
+                    (file: File) => {
+                      out.push(makeFileWithRelativePath(file, `${prefix}${file.name}`));
+                      resolve();
+                    },
+                    () => resolve(),
+                  );
+                });
+                return out;
+              }
+
+              if (entry.isDirectory) {
+                const reader = entry.createReader();
+                const all: any[] = [];
+                for (;;) {
+                  const batch: any[] = await new Promise((resolve) => {
+                    reader.readEntries((entries: any[]) => resolve(entries || []));
+                  });
+                  if (!batch || batch.length === 0) break;
+                  all.push(...batch);
+                }
+
+                const nextPrefix = includeSelfName ? `${prefix}${entry.name}/` : prefix;
+                for (const child of all) {
+                  const childFiles = await readEntry(child, nextPrefix, true);
+                  out.push(...childFiles);
+                }
+              }
+
+              return out;
+            };
+
+            const finish = async () => {
+              let files: File[] = [];
+              if (hasDirectoryEntry) {
+                for (const it of items) {
+                  const entry = (it as any).webkitGetAsEntry?.();
+                  if (!entry) continue;
+                  const collected = await readEntry(entry, '', true);
+                  files.push(...collected);
+                }
+              } else {
+                files = e.dataTransfer.files ? Array.from(e.dataTransfer.files) : [];
+              }
+
+              if (files.length === 0) return;
+              void onImportFiles(files, insertAt, true);
+              setDropIndex(null);
+            };
+
+            void finish();
           }
         }}
       >

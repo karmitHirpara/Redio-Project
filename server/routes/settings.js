@@ -98,7 +98,7 @@ router.delete('/settings/factory-reset', async (req, res) => {
     const tables = [
       'tracks', 'playlists', 'playlist_tracks', 'queue', 
       'schedules', 'playback_history', 'settings', 'folders', 
-      'folder_tracks', 'tracks_fts'
+      'folder_tracks', 'tracks_fts', 'library_folders'
     ];
 
     for (const table of tables) {
@@ -125,9 +125,16 @@ router.delete('/settings/factory-reset', async (req, res) => {
     // Clear queue database (separate sqlite file)
     try {
       await runQueue('DELETE FROM queue_items');
-      await reconnectQueueDatabase();
+      await runQueue('DELETE FROM sqlite_sequence WHERE name = "queue_items"');
     } catch {
       // ignore queue db reset failures
+    }
+
+    // Reconnect to clear cache/wal
+    try {
+      await reconnectQueueDatabase();
+    } catch {
+      // ignore
     }
 
     // Delete media files on disk (but keep backups folder intact)
@@ -137,13 +144,31 @@ router.delete('/settings/factory-reset', async (req, res) => {
       const playlistsDir = join(uploadsDir, 'playlists');
       const queueUploadsDir = resolveQueueUploadsDir(uploadsDir);
 
-      if (fs.existsSync(libraryDir)) fs.rmSync(libraryDir, { recursive: true, force: true });
-      if (fs.existsSync(playlistsDir)) fs.rmSync(playlistsDir, { recursive: true, force: true });
-      if (fs.existsSync(queueUploadsDir)) fs.rmSync(queueUploadsDir, { recursive: true, force: true });
+      if (fs.existsSync(libraryDir)) {
+        fs.rmSync(libraryDir, { recursive: true, force: true });
+        fs.mkdirSync(libraryDir, { recursive: true });
+      }
+      if (fs.existsSync(playlistsDir)) {
+        fs.rmSync(playlistsDir, { recursive: true, force: true });
+        fs.mkdirSync(playlistsDir, { recursive: true });
+      }
+      if (fs.existsSync(queueUploadsDir)) {
+        fs.rmSync(queueUploadsDir, { recursive: true, force: true });
+        fs.mkdirSync(queueUploadsDir, { recursive: true });
+      }
 
-      fs.mkdirSync(libraryDir, { recursive: true });
-      fs.mkdirSync(playlistsDir, { recursive: true });
-      fs.mkdirSync(queueUploadsDir, { recursive: true });
+      // Also clear any top-level files in uploads that aren't in subdirs (if any)
+      const topFiles = fs.readdirSync(uploadsDir);
+      for (const file of topFiles) {
+        const fullPath = join(uploadsDir, file);
+        if (file !== 'library' && file !== 'playlists' && file !== 'backups' && file !== 'queue_uploads') {
+          if (fs.statSync(fullPath).isDirectory()) {
+            fs.rmSync(fullPath, { recursive: true, force: true });
+          } else {
+            fs.unlinkSync(fullPath);
+          }
+        }
+      }
     } catch {
       // ignore media wipe failures
     }

@@ -8,10 +8,11 @@ import http from 'http';
 import { WebSocketServer } from 'ws';
 import chokidar from 'chokidar';
 import { runSchedulerTick } from './services/scheduler.js';
-import { isS3UploadStorage, getS3PublicBaseUrl, s3KeyFromUploadsPath } from './services/objectStorage.js';
+import { isS3UploadStorage, getS3PublicBaseUrl } from './services/objectStorage.js';
 import { get, query, run } from './config/database.js';
 import { emitQueueUpdated } from './routes/queue.js';
-import { runStartupSync } from './services/preFlightScan.js';
+import { runStartupScan } from './services/preFlightScan.js';
+import logger from './services/logger.js';
 import { sha256File, getDuration } from './services/audio.js';
 import { v4 as uuidv4 } from 'uuid';
 
@@ -176,8 +177,8 @@ app.get('/', (req, res) => {
 });
 
 // Error handling middleware
-app.use((err, req, res, next) => {
-  console.error(err.stack);
+app.use((err, req, res, _next) => {
+  logger.error('Unhandled environment error: %o', err);
   res.status(500).json({
     error: 'Internal Server Error',
     message: err.message
@@ -239,38 +240,38 @@ wss.on('connection', (socket, req) => {
     return;
   }
 
-  console.log('WebSocket client connected');
+  logger.info('WebSocket client connected');
 
   socket.on('close', () => {
-    console.log('WebSocket client disconnected');
+    logger.info('WebSocket client disconnected');
   });
 });
 
 // Start server
 let schedulerInterval = null;
 server.listen(PORT, HOST, () => {
-  console.log(`🚀 Radio Automation Server running on port ${PORT}`);
-  console.log(`📡 API available at http://${HOST}:${PORT}`);
-  console.log(`🎵 Upload directory: ${uploadsDir}`);
-  console.log(`🌐 CORS enabled for: ${process.env.CORS_ORIGIN}`);
-  console.log(`🔌 WebSocket endpoint: ws://${HOST}:${PORT}/ws`);
+  logger.info(`🚀 Radio Automation Server running on port ${PORT}`);
+  logger.info(`📡 API available at http://${HOST}:${PORT}`);
+  logger.info(`🎵 Upload directory: ${uploadsDir}`);
+  logger.info(`🌐 CORS enabled for: ${process.env.CORS_ORIGIN}`);
+  logger.info(`🔌 WebSocket endpoint: ws://${HOST}:${PORT}/ws`);
 
   // Lightweight backend scheduler for datetime playlists. Default to a
   // 1s interval so fired schedules line up closely with the visible clock.
   const intervalMs = Number(process.env.SCHEDULER_INTERVAL_MS || 1000);
-  console.log(`⏱️  Scheduler running every ${intervalMs}ms`);
+  logger.info(`⏱️  Scheduler running every ${intervalMs}ms`);
   schedulerInterval = setInterval(() => {
     runSchedulerTick(app).catch((err) => {
-      console.error('Scheduler tick error', err);
+      logger.error('Scheduler tick error', err);
     });
   }, intervalMs);
 
   // Initialize file system watcher for local uploads
   if (!isS3UploadStorage()) {
     // Run initial pre-flight sync on both or just library?
-    runStartupSync(uploadsDir).catch((err) => console.error(err));
+    runStartupScan(uploadsDir).catch((err) => logger.error(err));
 
-    console.log(`👀 Starting file watcher natively on ${libraryDir}`);
+    logger.info(`👀 Starting file watcher natively on ${libraryDir}`);
     fileWatcher = chokidar.watch(libraryDir, {
       ignoreInitial: true,
       persistent: true,

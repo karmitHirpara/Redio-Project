@@ -403,12 +403,13 @@ router.delete('/:id/recursive', async (req, res) => {
 // Add tracks to playlist
 router.post('/:id/tracks', async (req, res) => {
   try {
-    const { trackIds } = req.body;
-    if (!Array.isArray(trackIds) || trackIds.length === 0) {
-      return res.status(400).json({ error: 'Track IDs array is required' });
+    const { trackIds, items } = req.body;
+    if ((!Array.isArray(trackIds) || trackIds.length === 0) && (!Array.isArray(items) || items.length === 0)) {
+      return res.status(400).json({ error: 'Track IDs or items array is required' });
     }
 
-    const playlist = await get('SELECT * FROM playlists WHERE id = ?', [req.params.id]);
+    const playlistId = String(req.params.id || '').trim();
+    const playlist = await get('SELECT * FROM playlists WHERE id = ?', [playlistId]);
     if (!playlist) {
       return res.status(404).json({ error: 'Playlist not found' });
     }
@@ -417,10 +418,22 @@ router.post('/:id/tracks', async (req, res) => {
       return res.status(403).json({ error: 'Playlist is locked' });
     }
 
+    // Normalized work list: { trackId, fileName }
+    const work = [];
+    if (Array.isArray(items)) {
+      for (const it of items) {
+        if (it?.trackId) work.push({ trackId: String(it.trackId), fileName: it.fileName });
+      }
+    } else if (Array.isArray(trackIds)) {
+      for (const id of trackIds) {
+        if (id) work.push({ trackId: String(id), fileName: null });
+      }
+    }
+
     // Get current max position
     const maxPos = await get(
       'SELECT MAX(position) as max FROM playlist_tracks WHERE playlist_id = ?',
-      [req.params.id]
+      [playlistId]
     );
     let position = (maxPos?.max ?? -1) + 1;
 
@@ -428,8 +441,11 @@ router.post('/:id/tracks', async (req, res) => {
     const playlistAbsDir = path.join(playlistsDir, playlistFolder);
     if (!fs.existsSync(playlistAbsDir)) fs.mkdirSync(playlistAbsDir, { recursive: true });
 
+    const addedTracks = [];
+
     // Add tracks
-    for (const sourceTrackId of trackIds) {
+    for (const item of work) {
+      const sourceTrackId = item.trackId;
       const source = await get('SELECT * FROM tracks WHERE id = ?', [sourceTrackId]);
       if (!source) continue;
 
@@ -439,13 +455,16 @@ router.post('/:id/tracks', async (req, res) => {
       const srcAbs = resolveUploadPath(rel);
       if (!fs.existsSync(srcAbs)) continue;
 
-      const baseFileName = path.basename(rel);
+      // MISSION: Independent physical copy for the playlist
+      const baseFileName = item.fileName ? path.basename(String(item.fileName)) : path.basename(rel);
       const ext = path.extname(baseFileName);
       const baseStem = path.basename(baseFileName, ext);
 
       let destFileName = baseFileName;
       let destAbs = path.join(playlistAbsDir, destFileName);
       let copyIndex = 0;
+      
+      // Handle collision within this specific playlist folder
       while (fs.existsSync(destAbs)) {
         copyIndex += 1;
         destFileName = `${baseStem} (${copyIndex})${ext}`;
@@ -475,18 +494,20 @@ router.post('/:id/tracks', async (req, res) => {
 
       await run(
         'INSERT INTO playlist_tracks (playlist_id, track_id, position) VALUES (?, ?, ?)',
-        [req.params.id, newTrackId, position++]
+        [playlistId, newTrackId, position++]
       );
+
+      addedTracks.push(newTrackId);
     }
 
-    // Return updated playlist
+    // Return updated playlist tracks
     const tracks = await query(`
       SELECT t.*, pt.position
       FROM tracks t
       JOIN playlist_tracks pt ON t.id = pt.track_id
       WHERE pt.playlist_id = ?
       ORDER BY pt.position
-    `, [req.params.id]);
+    `, [playlistId]);
 
     res.json({ tracks });
   } catch (error) {

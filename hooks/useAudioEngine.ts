@@ -139,7 +139,9 @@ export function useAudioEngine({
       other.removeAttribute('src');
       try {
         other.volume = 1;
-      } catch { }
+      } catch (error) {
+        // ignore volume set errors
+      }
     }
 
     if (host) {
@@ -181,7 +183,7 @@ export function useAudioEngine({
             // Ignore play failures here; user interaction may be required
           });
         }
-      } catch {
+      } catch (_err) {
         // ignore volume set errors
       }
     } else {
@@ -240,7 +242,7 @@ export function useAudioEngine({
         } else {
           setCurrentTime(0);
         }
-      } catch {
+      } catch (_err) {
         setCurrentTime(0);
       }
 
@@ -387,7 +389,7 @@ export function useAudioEngine({
       if (!audio.paused && audio.volume === 0) {
         try {
           audio.volume = 1;
-        } catch { }
+        } catch (_err) { }
       }
     };
 

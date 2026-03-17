@@ -19,9 +19,9 @@ export class ApiError extends Error {
   status: number | null;
   url: string;
   method: string;
-  details: any;
+  details: unknown;
 
-  constructor(message: string, init: { status: number | null; url: string; method: string; details?: any }) {
+  constructor(message: string, init: { status: number | null; url: string; method: string; details?: unknown }) {
     super(message);
     this.name = 'ApiError';
     this.status = init.status;
@@ -40,7 +40,7 @@ export const getBackendOrigin = (): string => {
 };
 
 export const resolveUploadsUrl = (maybePath: string): string => {
-  if (!maybePath || typeof maybePath !== 'string') return maybePath as any;
+  if (!maybePath || typeof maybePath !== 'string') return maybePath;
   if (/^(https?:|blob:|data:)/i.test(maybePath)) return maybePath;
   if (maybePath.startsWith('/uploads/')) {
     return `${getBackendOrigin()}${maybePath}`;
@@ -55,7 +55,7 @@ type ApiResponseType = 'json' | 'text' | 'none';
 
 export interface ApiRequestOptions extends Omit<RequestInit, 'body'> {
   body?: BodyInit | null;
-  json?: any;
+  json?: unknown;
   timeoutMs?: number;
   retries?: number;
   retryDelayMs?: number;
@@ -72,12 +72,6 @@ const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 const isIdempotentMethod = (method: string) => {
   const m = method.toUpperCase();
   return m === 'GET' || m === 'HEAD';
-};
-
-const shouldRetryResponse = (res: Response) => {
-  if (res.status === 408 || res.status === 429) return true;
-  if (res.status >= 500 && res.status <= 599) return true;
-  return false;
 };
 
 const readErrorPayload = async (res: Response) => {
@@ -261,37 +255,36 @@ export const tracksAPI = {
 // Playlists API
 export const playlistsAPI = {
   getAll: () => apiClient.get<Playlist[]>('/playlists'),
-
   getById: (id: string) => apiClient.get<Playlist>(`/playlists/${id}`),
-
   create: (name: string) => apiClient.json<Playlist>('/playlists', { method: 'POST', json: { name } }),
-
-  update: (id: string, data: { name?: string; locked?: boolean }) =>
+  update: (id: string, data: Partial<Playlist>) =>
     apiClient.json<Playlist>(`/playlists/${id}`, { method: 'PUT', json: data }),
-
   delete: (id: string) => apiClient.request<{ message: string }>(`/playlists/${id}`, { method: 'DELETE' }),
-
   deletePreview: (id: string) => apiClient.get<any>(`/playlists/${id}/delete-preview`),
   deleteRecursive: (id: string, force: boolean) =>
     apiClient.request<any>(`/playlists/${id}/recursive${force ? '?force=1' : ''}`, { method: 'DELETE' }),
-
-  addTracks: (id: string, trackIds: string[]) =>
-    apiClient.json<{ tracks: Track[] }>(`/playlists/${id}/tracks`, { method: 'POST', json: { trackIds } }),
-
-  removeTrack: (id: string, trackId: string) =>
-    apiClient.request<{ message: string }>(`/playlists/${id}/tracks/${trackId}`, { method: 'DELETE' }),
-
-  reorder: (id: string, trackIds: string[]) =>
-    apiClient.json<{ message: string }>(`/playlists/${id}/reorder`, { method: 'PUT', json: { trackIds } }),
+  addTracks: (playlistId: string, payload: string[] | { trackId: string; fileName: string | null }[]) => {
+    const isItems = Array.isArray(payload) && payload.length > 0 && typeof payload[0] === 'object';
+    return apiClient.json<{ tracks: any[] }>(`/playlists/${playlistId}/tracks`, {
+      method: 'POST',
+      json: isItems ? { items: payload } : { trackIds: payload },
+    });
+  },
+  removeTrack: (playlistId: string, trackId: string) =>
+    apiClient.request<{ message: string }>(`/playlists/${playlistId}/tracks/${trackId}`, { method: 'DELETE' }),
+  reorder: (playlistId: string, trackIds: string[]) =>
+    apiClient.json<{ message: string }>(`/playlists/${playlistId}/reorder`, {
+      method: 'PUT',
+      json: { trackIds },
+    }),
+  validateMedia: (playlistId: string) => apiClient.get<any>(`/playlists/${playlistId}/validate-media`),
 };
 
 // Queue API
 export const queueAPI = {
   get: () => apiClient.get<QueueItem[]>('/queue'),
-
   add: (trackId: string, fromPlaylist?: string) =>
     apiClient.json<QueueItem>('/queue', { method: 'POST', json: { trackId, fromPlaylist } }),
-
   reorder: (queueIds: string[]) =>
     apiClient.json<{ message: string }>('/queue/reorder', { method: 'PUT', json: { queueIds } }),
 
@@ -329,8 +322,16 @@ export const foldersAPI = {
   deleteRecursive: (id: string, force: boolean) =>
     apiClient.request<any>(`/folders/${id}/recursive${force ? '?force=1' : ''}`, { method: 'DELETE' }),
   getTracks: (folderId: string) => apiClient.get<any[]>(`/folders/${folderId}/tracks`),
-  attachTracks: (folderId: string, trackIds: string[]) =>
-    apiClient.json<{ message: string }>(`/folders/${folderId}/tracks`, { method: 'POST', json: { trackIds } }),
+  attachTracks: (
+    folderId: string,
+    payload: string[] | { trackId: string; fileName?: string }[],
+  ) => {
+    const isItems = Array.isArray(payload) && payload.length > 0 && typeof payload[0] === 'object';
+    return apiClient.json<{ message: string; tracks?: any[] }>(`/folders/${folderId}/tracks`, {
+      method: 'POST',
+      json: isItems ? { items: payload } : { trackIds: payload },
+    });
+  },
   moveTracks: (payload: { sourceFolderId: string; targetFolderId: string; trackIds: string[] }) =>
     apiClient.json<{ message: string }>(`/folders/move-tracks`, { method: 'POST', json: payload }),
   setParent: (folderId: string, parentId: string) =>

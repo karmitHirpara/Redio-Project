@@ -3,6 +3,7 @@ import fs from 'fs';
 import path from 'path';
 import { exec } from 'child_process';
 import util from 'util';
+import logger from './logger.js';
 
 const execPromise = util.promisify(exec);
 
@@ -26,8 +27,14 @@ function resolveTrackAbsolutePath(rawFilePath, uploadsRootDir) {
     if (path.isAbsolute(p)) return path.normalize(p);
 
     if (p.startsWith('/uploads/')) {
-        const rel = p.replace(/^\/uploads\//, '');
-        return path.join(uploadsRootDir, rel);
+        const rel = p.slice(9); // remove '/uploads/'
+        // The slash in '/uploads/playlists' might be duplicated if uploadsRootDir already ends with slash
+        const resolved = path.join(uploadsRootDir, rel);
+        // console.log(`[resolveTrackAbsolutePath DEBUG] input: "${p}"`);
+        // console.log(`[resolveTrackAbsolutePath DEBUG] rel: "${rel}"`);
+        // console.log(`[resolveTrackAbsolutePath DEBUG] uploadsRootDir: "${uploadsRootDir}"`);
+        // console.log(`[resolveTrackAbsolutePath DEBUG] resolved: "${resolved}"`);
+        return resolved;
     }
 
     // /uploads_queue is not under uploadsRootDir; we cannot resolve reliably here.
@@ -60,12 +67,15 @@ export async function validateTrack(trackId) {
         const filePath = track.filePath || track.file_path;
 
         const rawUploadPath = process.env.UPLOAD_PATH || 'uploads';
+        // When running via 'npm run dev' from workspace root, process.cwd() is the root.
+        // The server files and 'uploads' folder are inside the 'server/' directory.
         const uploadsDir = path.isAbsolute(rawUploadPath)
             ? rawUploadPath
-            : path.join(process.cwd(), rawUploadPath);
+            : path.join(process.cwd(), 'server', rawUploadPath);
         const normalizedUploadsDir = path.normalize(uploadsDir);
 
         const absolutePath = resolveTrackAbsolutePath(filePath, normalizedUploadsDir);
+
         if (!absolutePath) {
             return { ok: false, error: `Invalid file path: ${filePath}` };
         }
@@ -100,7 +110,7 @@ export async function validateTrack(trackId) {
  */
 export async function runStartupSync(uploadsDir) {
     try {
-        console.log('[Sync] Starting startup pre-flight scan...');
+        logger.info('[Sync] Starting startup pre-flight scan...');
         const tracks = await query('SELECT id, file_path FROM tracks');
         let removedCount = 0;
 
@@ -126,7 +136,7 @@ export async function runStartupSync(uploadsDir) {
             }
         }
 
-        console.log(`[Sync] Pre-flight scan complete. Removed ${removedCount} orphaned track records.`);
+        logger.info(`[Sync] Pre-flight scan complete. Removed ${removedCount} orphaned track records.`);
         return { removedCount };
     } catch (err) {
         console.error('[Sync] Error during startup scan:', err);

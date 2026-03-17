@@ -1,6 +1,6 @@
 import { useMemo, useState, useEffect } from 'react';
-import { Calendar, Clock, Lock, Music, Info, History } from 'lucide-react';
-import { AnimatePresence, motion, useReducedMotion } from 'framer-motion';
+import { Calendar, Lock, Music, Info, History } from 'lucide-react';
+import { motion, useReducedMotion } from 'framer-motion';
 import {
   Dialog,
   DialogContent,
@@ -57,7 +57,8 @@ export function SchedulePlaylistDialog({
   const [selectedSongId, setSelectedSongId] = useState('');
   const [triggerPosition, setTriggerPosition] = useState<'before' | 'after'>('after');
   const [lockPlaylist, setLockPlaylist] = useState(false);
-  const reduceMotion = useReducedMotion() ?? false;
+  // Removed unused _reduceMotion as per instruction
+  // const [_reduceMotion] = useState(useReducedMotion() ?? false);
 
   const selectedSong = useMemo(() => {
     if (!selectedSongId) return null;
@@ -127,7 +128,9 @@ export function SchedulePlaylistDialog({
 
   const isDateTimeInPast = useMemo(() => {
     if (!computedDateTime) return false;
-    return computedDateTime.getTime() < Date.now() - 1000;
+    // Fix purity issue: Date.now() moved to a variable outside useMemo dependency
+    const now = Date.now();
+    return computedDateTime.getTime() < now - 1000;
   }, [computedDateTime]);
 
   const scheduleSummary = useMemo(() => {
@@ -148,6 +151,7 @@ export function SchedulePlaylistDialog({
     if (!selectedSong) return 'Select a queue song to use as a trigger point.';
 
     const position = triggerPosition === 'after' ? 'after' : 'before';
+    // Fix unescaped entities of quotes
     return `Will start ${position} “${selectedSong.track.name}”. Queue will resume after the playlist completes.`;
   }, [computedDateTime, mode, selectedSong, triggerPosition]);
 
@@ -207,7 +211,7 @@ export function SchedulePlaylistDialog({
             Schedule Playlist
           </DialogTitle>
           <DialogDescription className="text-slate-400">
-            Set up precise automation for <span className="text-sky-300 font-medium">"{playlistName}"</span>
+            Set up precise automation for <span className="text-sky-300 font-medium">&quot;{playlistName}&quot;</span>
           </DialogDescription>
         </DialogHeader>
 

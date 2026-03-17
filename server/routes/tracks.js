@@ -8,10 +8,13 @@ import { spawn } from 'child_process';
 import ffmpegPath from 'ffmpeg-static';
 import { fileURLToPath } from 'url';
 import { dirname } from 'path';
-import { query, run, get } from '../config/database.js';
-import { emitQueueUpdated } from './queue.js';
-import { isS3UploadStorage, s3PutFile, s3ObjectExists, s3DeleteObject, s3CopyObject, s3KeyFromUploadsPath } from '../services/objectStorage.js';
-import { sha256File, getDuration } from '../services/audio.js';
+import { TrackService } from '../services/track.service.js';
+import { resolveUploadPath, uploadsDir } from '../utils/paths.js';
+
+const sanitizePlaylistFolderName = (name, fallback) => {
+  const cleaned = String(name || '').replace(/[^a-zA-Z0-9 _-]/g, '').trim();
+  return cleaned || String(fallback || 'playlist');
+};
 
 const router = express.Router();
 
@@ -88,19 +91,7 @@ const normalizeExt = (originalName, mimeType) => {
   }
 };
 
-const resolveUploadPath = (filePathOrName) => {
-  // filePathOrName is typically like "/uploads/library/foo.mp3" or just "foo.mp3"
-  // For safety, resolve against `uploadsDir` strictly.
-  const normalized = filePathOrName.startsWith('/uploads/')
-    ? filePathOrName.slice(9)
-    : filePathOrName;
-  const resolved = path.resolve(uploadsDir, normalized);
-  const root = path.resolve(uploadsDir) + path.sep;
-  if (!resolved.startsWith(root)) {
-    throw new Error('Invalid upload path: outside of uploads dir');
-  }
-  return resolved;
-};
+// resolveUploadPath and uploadsDir are now imported from ../utils/paths.js
 
 const hashingDiskStorage = {
   _handleFile: (req, file, cb) => {
@@ -187,17 +178,7 @@ router.get('/', async (req, res) => {
   try {
     const limit = parseInt(req.query.limit, 10) || 0;
     const offset = parseInt(req.query.offset, 10) || 0;
-
-    // DO NOT allow arbitrary search in playlists dir from general Library queries
-    let sql = `SELECT * FROM tracks WHERE file_path NOT LIKE '/uploads/playlists/%' ORDER BY date_added DESC`;
-    const params = [];
-
-    if (limit > 0) {
-      sql += ' LIMIT ? OFFSET ?';
-      params.push(limit, offset);
-    }
-
-    const tracks = await query(sql, params);
+    const tracks = await TrackService.getAllTracks(limit, offset);
     res.json(tracks);
   } catch (error) {
     res.status(500).json({ error: error.message });
@@ -207,85 +188,13 @@ router.get('/', async (req, res) => {
 // Create a real file copy of an existing track with special naming rules.
 // If the existing track name already ends with "(number)", append " copy".
 // Otherwise, generate an OS-style numbered name: "Name (1)", "Name (2)", ...
+// Create a real file copy of an existing track with special naming rules.
 router.post('/copy', async (req, res) => {
   try {
     const { sourceTrackId } = req.body;
+    if (!sourceTrackId) return res.status(400).json({ error: 'sourceTrackId is required' });
 
-    if (!sourceTrackId) {
-      return res.status(400).json({ error: 'sourceTrackId is required' });
-    }
-
-    const existing = await get('SELECT * FROM tracks WHERE id = ?', [sourceTrackId]);
-    if (!existing) {
-      return res.status(404).json({ error: 'Source track not found' });
-    }
-
-    const originalName = existing.name || 'Track';
-
-    // If name already ends with "(number)", just append " copy".
-    let newName;
-    if (/\(\d+\)\s*$/.test(originalName)) {
-      newName = `${originalName} copy`;
-    } else {
-      const baseName = originalName;
-      const escapedBase = baseName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-      const pattern = new RegExp(`^${escapedBase}(?: \\((\\d+)\\))?$`);
-
-      const rows = await query('SELECT name FROM tracks WHERE name LIKE ?', [`${baseName}%`]);
-      let maxIndex = 0;
-      for (const row of rows) {
-        const name = row.name || '';
-        const match = name.match(pattern);
-        if (!match) continue;
-        const idx = match[1] ? parseInt(match[1], 10) : 0;
-        if (!Number.isNaN(idx)) {
-          maxIndex = Math.max(maxIndex, idx);
-        }
-      }
-
-      const nextIndex = maxIndex + 1;
-      newName = `${baseName} (${nextIndex})`;
-    }
-
-    const ext = path.extname(String(existing.file_path || '')) || '.mp3';
-    const newFileName = `${uuidv4()}${ext}`;
-
-    if (useS3) {
-      const srcKey = s3KeyFromUploadsPath(existing.file_path || '');
-      const destKey = s3KeyFromUploadsPath(newFileName);
-      const ok = await s3ObjectExists(srcKey);
-      if (!ok) {
-        return res.status(404).json({ error: 'Source audio file not found in object storage' });
-      }
-      await s3CopyObject({ sourceKey: srcKey, destKey });
-    } else {
-      const srcPath = resolveUploadPath(existing.file_path || '');
-      if (!fs.existsSync(srcPath)) {
-        return res.status(404).json({ error: 'Source audio file not found on disk' });
-      }
-
-      const destPath = resolveUploadPath(newFileName);
-      fs.copyFileSync(srcPath, destPath);
-    }
-
-    const trackId = uuidv4();
-    const newRelativePath = `/uploads/${newFileName}`;
-
-    await run(
-      `INSERT INTO tracks (id, name, artist, duration, size, file_path, hash)
-       VALUES (?, ?, ?, ?, ?, ?, ?)`,
-      [
-        trackId,
-        newName,
-        existing.artist,
-        existing.duration,
-        existing.size,
-        newRelativePath,
-        existing.hash,
-      ],
-    );
-
-    const track = await get('SELECT * FROM tracks WHERE id = ?', [trackId]);
+    const track = await TrackService.copyTrack(sourceTrackId, 'suffix');
     res.status(201).json(track);
   } catch (error) {
     res.status(500).json({ error: error.message });
@@ -296,72 +205,10 @@ router.post('/copy', async (req, res) => {
 router.post('/alias', async (req, res) => {
   try {
     const { baseTrackId, aliasName } = req.body;
+    if (!baseTrackId) return res.status(400).json({ error: 'baseTrackId is required' });
+    if (!aliasName) return res.status(400).json({ error: 'aliasName is required' });
 
-    if (!baseTrackId) {
-      return res.status(400).json({ error: 'baseTrackId is required' });
-    }
-
-    const existing = await get('SELECT * FROM tracks WHERE id = ?', [baseTrackId]);
-    if (!existing) {
-      return res.status(404).json({ error: 'Base track not found' });
-    }
-
-    // If the caller provided an explicit aliasName (used for folder-level
-    // duplicate handling), trust it and skip OS-style numbering logic here.
-    let newName;
-    if (aliasName && typeof aliasName === 'string' && aliasName.trim()) {
-      newName = aliasName.trim();
-    } else {
-      const originalName = existing.name || 'Track';
-
-      // If the current name already ends with "(number)", follow your rule and
-      // append " copy" instead of bumping the number. This matches /tracks/copy
-      // so duplicates look like the OS (e.g. "Tum Prem Ho (4) copy").
-      if (/\(\d+\)\s*$/.test(originalName)) {
-        newName = `${originalName} copy`;
-      } else {
-        const baseName = originalName;
-
-        // Find all tracks that share the same audio (same hash) so aliases for
-        // this file use OS-style sequential names: "Name", "Name (1)", ...
-        const sameHashTracks = await query('SELECT name FROM tracks WHERE hash = ?', [existing.hash]);
-
-        // Escape special characters in baseName for use in the regex.
-        const escapedBase = baseName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-        const pattern = new RegExp(`^${escapedBase}(?: \\((\\d+)\\))?$`);
-        let maxIndex = 0;
-        for (const row of sameHashTracks) {
-          const name = row.name || '';
-          const match = name.match(pattern);
-          if (!match) continue;
-          const idx = match[1] ? parseInt(match[1], 10) : 0;
-          if (!Number.isNaN(idx)) {
-            maxIndex = Math.max(maxIndex, idx);
-          }
-        }
-
-        const nextIndex = maxIndex + 1;
-        newName = maxIndex === 0 ? baseName : `${baseName} (${nextIndex})`;
-      }
-    }
-
-    const trackId = uuidv4();
-
-    await run(
-      `INSERT INTO tracks (id, name, artist, duration, size, file_path, hash)
-       VALUES (?, ?, ?, ?, ?, ?, ?)`,
-      [
-        trackId,
-        newName,
-        existing.artist,
-        existing.duration,
-        existing.size,
-        existing.file_path,
-        existing.hash,
-      ],
-    );
-
-    const track = await get('SELECT * FROM tracks WHERE id = ?', [trackId]);
+    const track = await TrackService.createAlias(baseTrackId, aliasName);
     res.status(201).json(track);
   } catch (error) {
     res.status(500).json({ error: error.message });
@@ -371,7 +218,7 @@ router.post('/alias', async (req, res) => {
 // Get single track
 router.get('/:id', async (req, res) => {
   try {
-    const track = await get('SELECT * FROM tracks WHERE id = ?', [req.params.id]);
+    const track = await TrackService.getTrackById(req.params.id);
     if (!track) {
       return res.status(404).json({ error: 'Track not found' });
     }
@@ -389,17 +236,19 @@ router.post('/:id/edit', async (req, res) => {
     }
 
     const id = String(req.params.id || '');
-    const startSecondsRaw = req.body?.startSeconds;
-    const endSecondsRaw = req.body?.endSeconds;
-    const mode = req.body?.mode || 'overwrite';
-    // The client sends the "context" so backend knows if it should fork to playlist isolates
-    const playlistContext = req.body?.playlistContext || null;
+
+    // Validate request body
+    const validation = trackEditSchema.safeParse(req.body);
+    if (!validation.success) {
+      return res.status(400).json({
+        error: 'Invalid request data',
+        details: validation.error.format()
+      });
+    }
+
+    const { startSeconds: startSecondsRaw, endSeconds: endSecondsRaw, mode, playlistContext } = validation.data;
 
     if (!id) return res.status(400).json({ error: 'Missing track id' });
-    const hasTrim = startSecondsRaw !== undefined || endSecondsRaw !== undefined;
-    if (!hasTrim) {
-      return res.status(400).json({ error: 'Provide startSeconds and endSeconds' });
-    }
 
     const track = await get('SELECT * FROM tracks WHERE id = ?', [id]);
     if (!track) {
@@ -488,12 +337,11 @@ router.post('/:id/edit', async (req, res) => {
 
     // PLAYLIST-SCOPED OVERWRITE:
     // When editing from within a playlist, overwrite must only affect the
-    // exact track instance being edited (track id + file_path). Do not perform
-    // any global name/filename collision detection across the DB.
+    // exact track instance being edited (track id + file_path).
     if (mode === 'overwrite' && playlistContext && playlistContext.playlistId) {
+      // In our independent media model, playlist tracks ALWAYS have their own file.
+      // We can safely overwrite it in-place.
       try {
-        // Replace the existing file contents in-place.
-        // On most platforms rename is atomic if same volume.
         if (fs.existsSync(absInput)) {
           try {
             fs.unlinkSync(absInput);
@@ -553,11 +401,11 @@ router.post('/:id/edit', async (req, res) => {
       let virtualPathType = 'library';
 
       if (playlistContext && playlistContext.playlistId) {
-        // Find playlist name for physical folder
+        // Independent Playlist Storage: Use the playlist's dedicated folder.
         const pObj = await get('SELECT name FROM playlists WHERE id = ?', [playlistContext.playlistId]);
-        const pName = pObj?.name ? pObj.name.replace(/[^a-zA-Z0-9 _-]/g, '') : playlistContext.playlistId;
-        finalDir = path.join(playlistsDir, pName);
-        virtualPathType = `playlists/${pName}`;
+        const pFolder = sanitizePlaylistFolderName(pObj?.name || 'playlist', playlistContext.playlistId);
+        finalDir = path.join(playlistsDir, pFolder);
+        virtualPathType = `playlists/${pFolder}`;
         if (!fs.existsSync(finalDir)) fs.mkdirSync(finalDir, { recursive: true });
       }
 
@@ -711,8 +559,23 @@ router.post('/upload', (req, res, next) => {
       });
     }
 
-    const trackId = uuidv4();
-    let { name, artist, duration } = req.body;
+    const validation = trackSchema.safeParse(req.body);
+    if (!validation.success) {
+      // Clean up file if validation fails
+      if (req.file) {
+        try {
+          const uploadedPath = resolveUploadPath(req.file.filename);
+          if (fs.existsSync(uploadedPath)) fs.unlinkSync(uploadedPath);
+        } catch { /* ignore */ }
+      }
+      return res.status(400).json({
+        error: 'Invalid metadata',
+        details: validation.error.format()
+      });
+    }
+
+    const { name, artist, duration: durationRaw } = validation.data;
+    let duration = durationRaw;
 
     // MISSION-CRITICAL: If duration is missing, detect it on the backend.
     // This offloads work from the frontend and ensures persistence.

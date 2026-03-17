@@ -14,6 +14,7 @@ This system delivers complete radio-style automation: audio library management, 
 - **Scheduling**: datetime schedules + song-trigger schedules
 - **Playback**: crossfade/fade controls, play/pause/skip
 - **History**: detailed playback logs + export
+- **Logging Management**: Centralized Winston-based logging with file rotation
 - **Desktop app**: packaged Electron app with embedded backend
 
 ## 🚀 Core Features
@@ -107,6 +108,9 @@ Optional backend env vars for large uploads:
 - SQLite (sqlite3)
 - Multer (uploads)
 - WebSockets (ws)
+- Winston (logging)
+- Zod (validation)
+- Vitest (testing)
 - uuid
 - dotenv
 
@@ -262,6 +266,8 @@ Full step-by-step commands are in `SETUP.md`.
 
 - Express API + WebSocket realtime sync
 - Persistent storage in SQLite
+- **Service Layer Architecture**: Core business logic extracted into services like `TrackService` and `PlaylistOperations` for better testability and maintenance.
+- **Structured Logging**: All backend operations are logged via Winston to `server/logs/`.
 - Handles uploads, duplicate detection, queue operations, schedule execution, and history logging
 
 ## 🎛️ UI Schema Design

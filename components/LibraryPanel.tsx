@@ -10,7 +10,7 @@ import {
   type DragEvent,
   type KeyboardEvent as ReactKeyboardEvent,
 } from 'react';
-import { Folder, FolderPlus, FolderUp, FolderInput, ChevronRight, ChevronDown, Search } from 'lucide-react';
+import { Folder, FolderPlus, ChevronRight, ChevronDown, Search } from 'lucide-react';
 import { Input } from './ui/input';
 import { Button } from './ui/button';
 import { Progress } from './ui/progress';
@@ -18,24 +18,9 @@ import { Track, Playlist, LibraryFolder } from '../types';
 import { TrackRow } from './TrackRow';
 import { toast } from 'sonner';
 import { foldersAPI, libraryAPI, resolveUploadsUrl } from '../services/api';
-import { PlaylistFolder } from './PlaylistFolder';
 import { ConfirmDialog } from './ConfirmDialog';
 import { cn } from '../lib/utils';
 import { AnimatePresence, motion, useReducedMotion } from 'framer-motion';
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from './ui/select';
-import {
-  Dialog,
-  DialogContent,
-  DialogHeader,
-  DialogTitle,
-  DialogFooter,
-} from './ui/dialog';
 import {
   ContextMenu,
   ContextMenuContent,
@@ -169,11 +154,11 @@ export const LibraryPanel = memo(function LibraryPanel({
   currentTrackId,
   onAddToQueue,
   onAddToPlaylist,
-  onSelectPlaylist,
-  onCreatePlaylist,
-  onRenamePlaylist,
-  onDeletePlaylist,
-  onToggleLockPlaylist,
+  onSelectPlaylist: _onSelectPlaylist,
+  onCreatePlaylist: _onCreatePlaylist,
+  onRenamePlaylist: _onRenamePlaylist,
+  onDeletePlaylist: _onDeletePlaylist,
+  onToggleLockPlaylist: _onToggleLockPlaylist,
   onRemoveTrack,
   onRemoveTracks,
   onImportTracks,
@@ -186,8 +171,8 @@ export const LibraryPanel = memo(function LibraryPanel({
 
   // Custom Drag Ghost Element
   const dragGhostRef = useRef<HTMLDivElement>(null);
-  const [dragGhostCount, setDragGhostCount] = useState(0);
   const [playlistSearch, setPlaylistSearch] = useState('');
+  const [dragGhostCount, setDragGhostCount] = useState(0);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const folderInputRef = useRef<HTMLInputElement | null>(null);
   const [folders, setFolders] = useState<LibraryFolder[]>([]);
@@ -620,9 +605,7 @@ export const LibraryPanel = memo(function LibraryPanel({
               next[sourceFolderId] = src.filter((t: Track) => !moveSet.has(t.id));
             }
 
-            const dst = prev[targetFolderId] || [];
-            // Ideally we'd fetch the full track objects from somewhere or have them in payload
-            // For now, assume optimistic update is handled by the useEffect(tracks) or refresh logic
+            // const dst = prev[targetFolderId] || []; // dst is unused
             return next;
           });
 

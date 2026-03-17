@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { LibraryPanel } from './components/LibraryPanel';
 import { PlaylistManager } from './components/PlaylistManager';
 import { QueuePanel } from './components/QueuePanel';
@@ -11,7 +11,7 @@ import { HistoryDialog } from './components/HistoryDialog';
 import { SimpleBackupDialog } from './components/SimpleBackupDialog';
 import { ConfirmDialog } from './components/ConfirmDialog';
 import { ErrorBoundary } from './components/ErrorBoundary';
-import { Clock, HardDriveDownload, ListMusic, ListOrdered, Music2, Speaker, Database, Settings, Shield, Sun, Moon, Folder } from 'lucide-react';
+import { Clock, ListMusic, ListOrdered, Music2, Speaker, Database, Settings, Shield, Sun, Moon, Folder } from 'lucide-react';
 import { Button } from './components/ui/button';
 import { useTheme } from './hooks/useTheme';
 import { useResizable } from './hooks/useResizable';
@@ -24,6 +24,8 @@ import {
   SelectTrigger,
   SelectValue,
 } from './components/ui/select';
+import { useTrackOperations } from './hooks/useTrackOperations';
+import { usePlaylistOperations } from './hooks/usePlaylistOperations';
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -33,10 +35,9 @@ import {
   DropdownMenuLabel,
 } from './components/ui/dropdown-menu';
 import { Track, Playlist, QueueItem, ScheduledPlaylist } from './types';
-import { formatDuration, generateId } from './lib/utils';
+import { generateId } from './lib/utils';
 import { toast, Toaster } from 'sonner';
 import {
-  ApiError,
   apiClient,
   foldersAPI,
   historyAPI,
@@ -45,8 +46,6 @@ import {
   resolveUploadsUrl,
   schedulesAPI,
   tracksAPI,
-  backupAPI,
-  BackupConfig,
   settingsAPI,
 } from './services/api';
 import { Input } from './components/ui/input';
@@ -60,7 +59,7 @@ export default function App() {
   const [queue, setQueue] = useState<QueueItem[]>([]);
   const [currentQueueItemId, setCurrentQueueItemId] = useState<string | null>(null);
   const [isPlaying, setIsPlaying] = useState(false);
-  const [isLive, setIsLive] = useState(true);
+  const [isLive] = useState(true); // setIsLive removed, so it's effectively a constant
   const [scheduledPlaylists, setScheduledPlaylists] = useState<ScheduledPlaylist[]>([]);
   const [transitionMode, setTransitionMode] = useState<'gap' | 'crossfade'>('gap');
   const [gapSeconds, setGapSeconds] = useState(2);
@@ -77,8 +76,6 @@ export default function App() {
     { nextTrack: Track; remainingSeconds: number } | null
   >(null);
   const playbackPositionSecondsRef = useRef(0);
-  const pauseStartedAtRef = useRef<Date | null>(null);
-  const playbackStartedQueueItemIdRef = useRef<string | null>(null);
   const historyEntryIdRef = useRef<string | null>(null);
   const historyEntryTrackIdRef = useRef<string | null>(null);
   const historyEntryPlayedAtIsoRef = useRef<string | null>(null);
@@ -98,8 +95,8 @@ export default function App() {
   const [selectedPlaylistForSchedule, setSelectedPlaylistForSchedule] = useState<Playlist | null>(null);
   const [tracksToRemove, setTracksToRemove] = useState<Set<string> | null>(null);
   const [duplicatePrompt, setDuplicatePrompt] = useState<{
-    existingName: string;
     fileName: string;
+    existingId: string;
   } | null>(null);
   const [folderDuplicatePrompt, setFolderDuplicatePrompt] = useState<{
     baseName: string;
@@ -209,39 +206,7 @@ export default function App() {
     [normalizeServerTrack],
   );
 
-  const yieldToBrowser = async () => {
-    await new Promise<void>((resolve) => window.setTimeout(resolve, 0));
-  };
-
-  const ALLOWED_UPLOAD_EXTENSIONS = new Set(['.mp3', '.wav', '.ogg', '.m4a', '.flac']);
-  const ALLOWED_UPLOAD_MIME_TYPES = new Set([
-    'audio/mpeg',
-    'audio/mp3',
-    'audio/wav',
-    'audio/x-wav',
-    'audio/ogg',
-    'audio/flac',
-    'audio/x-flac',
-    'audio/mp4',
-    'audio/aac',
-    'video/mp4',
-    'application/ogg',
-  ]);
-
-  const isValidUploadFile = (file: File) => {
-    if (!file) return { ok: false as const, reason: 'Invalid file' };
-    const lower = String(file.name || '').toLowerCase();
-    const dot = lower.lastIndexOf('.');
-    const ext = dot >= 0 ? lower.slice(dot) : '';
-    if (!ext || !ALLOWED_UPLOAD_EXTENSIONS.has(ext)) {
-      return { ok: false as const, reason: 'Invalid file type' };
-    }
-    const mime = String((file as any).type || '').toLowerCase();
-    if (mime && !mime.startsWith('audio/') && !ALLOWED_UPLOAD_MIME_TYPES.has(mime)) {
-      return { ok: false as const, reason: 'Invalid file type' };
-    }
-    return { ok: true as const, reason: '' };
-  };
+  // useTrackOperations handles isValidUploadFile
 
   const getAudioDuration = (file: File): Promise<number> => {
     return new Promise((resolve) => {
@@ -279,6 +244,29 @@ export default function App() {
     }
   };
 
+  const {
+    isValidUploadFile,
+    handleImportTracks,
+    handleImportFolder,
+  } = useTrackOperations(setTracks, setLibraryImportProgress, resolveUploadsUrl, hydrateTrackDurationInLibrary);
+
+  const {
+    handleCreatePlaylist,
+    handleRenamePlaylist,
+    handleDeletePlaylist,
+    confirmDeletePlaylist,
+    handleToggleLockPlaylist,
+    setPlaylistLocked,
+    handleDuplicatePlaylist,
+  } = usePlaylistOperations(
+    playlists,
+    setPlaylists,
+    setTracks,
+    normalizeServerTrack,
+    setPlaylistNameDialog,
+    setDeletePlaylistConfirm
+  );
+
   const handleDropTrackOnPlaylistPanel = async (playlistId: string, trackIds: string[], insertIndex: number) => {
     const playlist = playlists.find((p) => p.id === playlistId);
     if (!playlist) return;
@@ -287,15 +275,72 @@ export default function App() {
       return;
     }
 
-    const tracksToAttach = trackIds
-      .map((id) => tracks.find((t) => t.id === id))
-      .filter(Boolean) as Track[];
+    // On initial load, the in-memory `tracks` list may not be hydrated yet
+    // (especially for folder-scoped items). If so, fetch missing tracks so
+    // drag/drop works without requiring a page refresh.
+    const tracksToAttach: Track[] = [];
+    const missingIds: string[] = [];
+    for (const id of trackIds) {
+      const t = tracks.find((x) => x.id === id);
+      if (t) {
+        tracksToAttach.push(t);
+      } else {
+        missingIds.push(id);
+      }
+    }
+
+    if (missingIds.length > 0) {
+      try {
+        const fetched: Track[] = [];
+        for (const id of missingIds) {
+          try {
+            const serverTrack = await tracksAPI.getById(id);
+            const normalized = normalizeServerTrack(serverTrack as any);
+            fetched.push(normalized);
+            tracksToAttach.push(normalized);
+          } catch (err) {
+            console.error('Failed to fetch track for drag/drop', id, err);
+          }
+        }
+
+        if (fetched.length > 0) {
+          setTracks((prev) => {
+            const byId = new Map(prev.map((t) => [t.id, t] as const));
+            for (const t of fetched) byId.set(t.id, t);
+            return Array.from(byId.values());
+          });
+        }
+      } catch (err) {
+        console.error('Failed to hydrate tracks for drag/drop', err);
+      }
+    }
+
     if (tracksToAttach.length === 0) return;
 
     try {
       const beforeIds = new Set((playlist.tracks || []).map((t) => t.id));
 
-      await playlistsAPI.addTracks(playlistId, tracksToAttach.map((t) => t.id));
+      // Treat library drag/drop like OS file import into a playlist:
+      // create playlist-local alias tracks with OS-style sequential naming so
+      // same-name drops become: Name, Name (1), Name (2), ...
+      const existingNames = (playlist.tracks || []).map((t) => String(t.name || '')).filter(Boolean);
+      const aliasIds: string[] = [];
+      for (const t of tracksToAttach) {
+        const baseName = String(t.name || 'Track');
+        const desiredName = getNextSequentialName(baseName, existingNames);
+        try {
+          const aliased = await tracksAPI.alias(t.id, desiredName);
+          if (aliased?.id) {
+            aliasIds.push(String(aliased.id));
+            existingNames.push(String(aliased.name || desiredName));
+          }
+        } catch (err) {
+          console.error('Failed to create alias for playlist drop', err);
+        }
+      }
+
+      const idsToAdd = aliasIds.length > 0 ? aliasIds : tracksToAttach.map((t) => t.id);
+      await playlistsAPI.addTracks(playlistId, idsToAdd);
 
       const refreshed = await playlistsAPI.getById(playlistId);
       const refreshedTracks: Track[] = (refreshed?.tracks || []).map((t: any) => normalizeServerTrack(t));
@@ -371,359 +416,9 @@ export default function App() {
     }
   };
 
-  const getFolderPathParts = (file: File): string[] => {
-    const rel = String((file as any).webkitRelativePath || '');
-    if (!rel) return [];
-    const parts = rel.split('/').filter(Boolean);
-    if (parts.length <= 1) return [];
-    return parts.slice(0, -1);
-  };
+  // useTrackOperations handles handleImportTracks and handleImportFolder
 
-  const handleImportTracks = async (files: File[], folderId?: string) => {
-    let imported = 0;
-    let failed = 0;
-    const importedIds: string[] = [];
-
-    // BATCH PROCESSING: Process N files at a time to maximize throughput 
-    // without starving the JS main thread or hitting browser socket limits.
-    const BATCH_SIZE = 4;
-    const fileQueue = [...files];
-
-    const processBatch = async () => {
-      while (fileQueue.length > 0) {
-        const file = fileQueue.shift();
-        if (!file) break;
-
-        const validation = isValidUploadFile(file);
-        if (!validation.ok) {
-          failed += 1;
-          continue;
-        }
-
-        // We no longer call getAudioDuration on the frontend.
-        // The backend tracks.js will detect it using ffmpeg if duration is missing.
-        const formData = new FormData();
-        formData.append('file', file);
-
-        try {
-          const uploadData = await apiClient.request<any>('/tracks/upload', {
-            method: 'POST',
-            body: formData,
-            allowedStatuses: [409],
-          });
-
-          if (uploadData?.existingTrack) {
-            const existingTrack = uploadData.existingTrack;
-            const aliasName = getNextSequentialName(
-              String(existingTrack?.name || file.name || 'Track').replace(/ \((\d+)\)$/, ''),
-              tracks.map((t) => String(t.name || '')).filter(Boolean),
-            );
-            const t = await tracksAPI.alias(existingTrack.id, aliasName);
-            const mapped: Track = {
-              id: t.id,
-              name: t.name,
-              artist: t.artist,
-              duration: t.duration || 0,
-              size: t.size,
-              filePath: resolveUploadsUrl((t as any).filePath || (t as any).file_path),
-              hash: t.hash,
-              dateAdded: (t as any).date_added ? new Date((t as any).date_added) : new Date(),
-            };
-            setTracks((prev) => [mapped, ...prev]);
-            importedIds.push(mapped.id);
-            imported += 1;
-            continue;
-          }
-
-          if (!uploadData?.id) {
-            failed += 1;
-            continue;
-          }
-
-          const mapped: Track = {
-            id: uploadData.id,
-            name: uploadData.name,
-            artist: uploadData.artist,
-            duration: uploadData.duration || 0,
-            size: uploadData.size,
-            filePath: resolveUploadsUrl(uploadData.filePath || uploadData.file_path),
-            hash: uploadData.hash,
-            dateAdded: uploadData.date_added ? new Date(uploadData.date_added) : new Date(),
-          };
-          setTracks((prev) => [mapped, ...prev]);
-          importedIds.push(mapped.id);
-          imported += 1;
-        } catch (err) {
-          console.error('Failed to import track', err);
-          failed += 1;
-        }
-      }
-    };
-
-    // Fire off batch workers
-    const workers = [];
-    for (let i = 0; i < Math.min(BATCH_SIZE, files.length); i++) {
-      workers.push(processBatch());
-    }
-    await Promise.all(workers);
-
-    if (folderId && importedIds.length > 0) {
-      try {
-        await foldersAPI.attachTracks(folderId, importedIds);
-      } catch (err) {
-        console.error('Failed to attach tracks to folder', err);
-      }
-
-      try {
-        window.dispatchEvent(new Event('redio:library-resync'));
-      } catch {
-        // ignore
-      }
-    }
-
-    if (imported > 0 || failed > 0) {
-      toast.success('Import complete', {
-        description: `${imported} imported, ${failed} failed`,
-      });
-    }
-  };
-
-  const handleImportFolder = async (files: File[], parentFolderId?: string) => {
-    if (!parentFolderId) {
-      toast.error('Select a folder first, then import a folder into that folder.');
-      return;
-    }
-
-    const supported = (files || []).filter((f) => isValidUploadFile(f).ok);
-    if (supported.length === 0) {
-      toast.error('No supported audio files found in that folder');
-      return;
-    }
-
-    setLibraryImportProgress({ percent: 0, label: 'Preparing folder import…' });
-
-    const pathToFolderId = new Map<string, string>();
-    const getOrCreateFolderIdForPath = async (parts: string[]): Promise<string> => {
-      const key = parts.join('/');
-      if (!key) return parentFolderId;
-      const cached = pathToFolderId.get(key);
-      if (cached) return cached;
-      const parentParts = parts.slice(0, -1);
-      const leaf = parts[parts.length - 1];
-      const parentId = parentParts.length ? await getOrCreateFolderIdForPath(parentParts) : parentFolderId;
-      const created = await foldersAPI.create(leaf, parentId);
-      pathToFolderId.set(key, created.id);
-      return created.id;
-    };
-
-    const groups = new Map<string, File[]>();
-    for (const f of supported) {
-      const parts = getFolderPathParts(f);
-      const key = parts.join('/');
-      const arr = groups.get(key) || [];
-      arr.push(f);
-      groups.set(key, arr);
-    }
-
-    const total = supported.length;
-    let processed = 0;
-    let failed = 0;
-
-    for (const [pathKey, groupFiles] of groups.entries()) {
-      const parts = pathKey ? pathKey.split('/').filter(Boolean) : [];
-      const folderId = await getOrCreateFolderIdForPath(parts);
-      const idsToAttach: string[] = [];
-
-      for (const file of groupFiles) {
-        try {
-          const detectedDuration = total > 120 ? 0 : await getAudioDuration(file);
-          const formData = new FormData();
-          formData.append('file', file);
-          if (detectedDuration > 0) formData.append('duration', String(detectedDuration));
-
-          const uploadData = await apiClient.request<any>('/tracks/upload', {
-            method: 'POST',
-            body: formData,
-            allowedStatuses: [409],
-          });
-
-          let newId: string | null = null;
-
-          if (uploadData?.existingTrack) {
-            const existingTrack = uploadData.existingTrack;
-            const baseName = String(existingTrack?.name || file.name || 'Track').replace(/ \((\d+)\)$/, '');
-            const aliasName = getNextSequentialName(baseName, tracks.map((t) => String(t.name || '')).filter(Boolean));
-            const t = await tracksAPI.alias(existingTrack.id, aliasName);
-            const mapped: Track = {
-              id: t.id,
-              name: t.name,
-              artist: t.artist,
-              duration: t.duration && t.duration > 0 ? t.duration : detectedDuration,
-              size: t.size,
-              filePath: resolveUploadsUrl((t as any).filePath || (t as any).file_path),
-              hash: t.hash,
-              dateAdded: (t as any).date_added ? new Date((t as any).date_added) : new Date(),
-            };
-            setTracks((prev) => [mapped, ...prev]);
-            newId = mapped.id;
-            if ((!t.duration || t.duration === 0) && mapped.filePath) {
-              hydrateTrackDurationInLibrary(mapped.id, mapped.filePath);
-            }
-          } else if (uploadData?.id) {
-            const mapped: Track = {
-              id: uploadData.id,
-              name: uploadData.name,
-              artist: uploadData.artist,
-              duration: uploadData.duration && uploadData.duration > 0 ? uploadData.duration : detectedDuration,
-              size: uploadData.size,
-              filePath: resolveUploadsUrl(uploadData.filePath || uploadData.file_path),
-              hash: uploadData.hash,
-              dateAdded: uploadData.date_added ? new Date(uploadData.date_added) : new Date(),
-            };
-            setTracks((prev) => [mapped, ...prev]);
-            newId = mapped.id;
-            if ((!uploadData.duration || uploadData.duration === 0) && mapped.filePath) {
-              hydrateTrackDurationInLibrary(mapped.id, mapped.filePath);
-            }
-          }
-
-          if (newId) idsToAttach.push(newId);
-        } catch (err) {
-          console.error('Failed to import folder file', err);
-          failed += 1;
-        } finally {
-          processed += 1;
-          setLibraryImportProgress({
-            percent: Math.min(100, (processed / total) * 100),
-            label: `Importing… ${processed}/${total}`,
-          });
-        }
-
-        if (processed % 10 === 0) {
-          await yieldToBrowser();
-        }
-      }
-
-      if (idsToAttach.length > 0) {
-        try {
-          await foldersAPI.attachTracks(folderId, idsToAttach);
-        } catch (err) {
-          console.error('Failed to attach imported tracks to folder', err);
-        }
-      }
-    }
-
-    setLibraryImportProgress(null);
-    try {
-      window.dispatchEvent(new Event('redio:library-resync'));
-    } catch {
-      // ignore
-    }
-    if (failed > 0) {
-      toast.error('Folder import finished with errors', { description: `${failed} failed` });
-    } else {
-      toast.success('Folder import complete');
-    }
-  };
-
-  const handleCreatePlaylist = async () => {
-    setPlaylistNameDialog({ mode: 'create', name: '' });
-  };
-
-  const handleRenamePlaylist = async (playlistId: string) => {
-    const playlist = playlists.find((p) => p.id === playlistId);
-    if (!playlist) return;
-    setPlaylistNameDialog({ mode: 'rename', playlistId, name: playlist.name });
-  };
-
-  const handleDeletePlaylist = async (playlistId: string) => {
-    try {
-      const playlist = playlists.find((p) => p.id === playlistId);
-      if (!playlist) return;
-
-      const preview = await playlistsAPI.deletePreview(playlistId);
-      const requires = Boolean(preview?.requiresConfirmation);
-      const trackCount = Number(preview?.trackCount || 0);
-      const mediaCount = Number(preview?.mediaCount || 0);
-      const scheduledCount = Number(preview?.scheduledCount || 0);
-
-      if (requires) {
-        setDeletePlaylistConfirm({
-          playlistId,
-          name: playlist.name,
-          trackCount,
-          mediaCount,
-          scheduledCount,
-        });
-        return;
-      }
-
-      await playlistsAPI.deleteRecursive(playlistId, false);
-      setPlaylists((prev) => prev.filter((p) => p.id !== playlistId));
-    } catch (err: any) {
-      toast.error(err?.message || 'Failed to delete playlist');
-    }
-  };
-
-  const confirmDeletePlaylist = async () => {
-    const pending = deletePlaylistConfirm;
-    if (!pending) return;
-    setDeletePlaylistConfirm(null);
-    try {
-      await playlistsAPI.deleteRecursive(pending.playlistId, true);
-      setPlaylists((prev) => prev.filter((p) => p.id !== pending.playlistId));
-    } catch (err: any) {
-      toast.error(err?.message || 'Failed to delete playlist');
-    }
-  };
-
-  const handleToggleLockPlaylist = async (playlistId: string) => {
-    const playlist = playlists.find((p) => p.id === playlistId);
-    if (!playlist) return;
-    const locked = !playlist.locked;
-    try {
-      await playlistsAPI.update(playlistId, { locked });
-      setPlaylists((prev) => prev.map((p) => (p.id === playlistId ? { ...p, locked } : p)));
-    } catch (err: any) {
-      toast.error(err?.message || 'Failed to update playlist');
-    }
-  };
-
-  const setPlaylistLocked = async (playlistId: string, locked: boolean): Promise<boolean> => {
-    const prev = playlists;
-    setPlaylists((p) => p.map((x) => (x.id === playlistId ? { ...x, locked } : x)));
-    try {
-      await playlistsAPI.update(playlistId, { locked });
-      return true;
-    } catch (err) {
-      setPlaylists(prev);
-      return false;
-    }
-  };
-
-  const handleDuplicatePlaylist = async (playlistId: string) => {
-    const playlist = playlists.find((p) => p.id === playlistId);
-    if (!playlist) return;
-    try {
-      const created = await playlistsAPI.create(`${playlist.name} Copy`);
-      const trackIds = (playlist.tracks || []).map((t) => t.id);
-      if (trackIds.length > 0) {
-        await playlistsAPI.addTracks(created.id, trackIds);
-      }
-      const fetched = await playlistsAPI.getById(created.id);
-      const fetchedTracks: Track[] = (fetched?.tracks || []).map((t: any) => normalizeServerTrack(t));
-      const duration = fetchedTracks.reduce((sum, t) => sum + (t.duration || 0), 0);
-      setPlaylists((prev) => [...prev, { ...(fetched as any), tracks: fetchedTracks, duration } as any]);
-
-      setTracks((prev) => {
-        const byId = new Map(prev.map((t) => [t.id, t] as const));
-        for (const t of fetchedTracks) byId.set(t.id, t);
-        return Array.from(byId.values());
-      });
-    } catch (err: any) {
-      toast.error(err?.message || 'Failed to duplicate playlist');
-    }
-  };
+  // usePlaylistOperations handles playlist actions
 
   const handleAddSongsToPlaylist = async (playlistId: string, tracksToAdd: Track[]) => {
     const playlist = playlists.find((p) => p.id === playlistId);
@@ -929,15 +624,6 @@ export default function App() {
     await handleAddToPlaylist(item.track, playlistId, true);
   };
 
-  const createFolderPath = async (parts: string[], parentFolderId?: string): Promise<string | undefined> => {
-    let currentParentId = parentFolderId;
-    for (const name of parts) {
-      const created = await foldersAPI.create(name, currentParentId);
-      currentParentId = created.id;
-    }
-    return currentParentId;
-  };
-
   const prevQueueLengthRef = useRef(0);
 
   const handleSeekWithTiming = (seconds: number) => {
@@ -972,6 +658,7 @@ export default function App() {
         };
         window.localStorage.setItem(PLAYBACK_SNAPSHOT_KEY, JSON.stringify(snapshot));
       } catch {
+        // ignore
       }
     }, 1000);
 
@@ -979,56 +666,6 @@ export default function App() {
       window.clearInterval(id);
     };
   }, [currentQueueItemId, isPlaying]);
-
-  const startPlaybackHistoryIfNeeded = useCallback(
-    async (track: Track, source: string, playedAt: Date) => {
-      // If we already started a row for this exact track instance, do nothing.
-      if (historyEntryIdRef.current && historyEntryTrackIdRef.current === track.id) return;
-
-      // If a create is already in-flight for this same track, do nothing.
-      if (historyEntryCreatePromiseRef.current && historyEntryTrackIdRef.current === track.id) return;
-
-      // Reset playhead snapshot for the new track.
-      historyLastPlayheadSecondsRef.current = 0;
-      playbackPositionSecondsRef.current = 0;
-
-      const playedAtIso = playedAt.toISOString();
-      historyEntryPlayedAtIsoRef.current = playedAtIso;
-      historyEntryTrackIdRef.current = track.id;
-      historyEntryIdRef.current = null;
-
-      const createToken = ++historyEntryCreateTokenRef.current;
-
-      try {
-        const createPromise = historyAPI.create({
-          trackId: track.id,
-          playedAt: playedAtIso,
-          positionStart: 0,
-          positionEnd: 0,
-          completed: false,
-          source,
-          fileStatus: 'ok',
-        });
-        historyEntryCreatePromiseRef.current = createPromise;
-
-        const entry = await createPromise;
-
-        // If we finalized/changed track while this request was in-flight, ignore.
-        if (historyEntryCreateTokenRef.current !== createToken) return;
-
-        historyEntryIdRef.current = entry?.id ?? null;
-        historyEntryCreatePromiseRef.current = null;
-        console.log(`History created: track ${track.name}, start: ${playedAtIso}`);
-        window.dispatchEvent(new Event('redio:history-changed'));
-      } catch (error) {
-        if (historyEntryCreateTokenRef.current === createToken) {
-          historyEntryCreatePromiseRef.current = null;
-        }
-        console.error('Failed to create playback history row', error);
-      }
-    },
-    [],
-  );
 
   const finalizePlaybackHistory = useCallback(
     async (
@@ -1122,7 +759,7 @@ export default function App() {
   );
 
   const leftPanel = useResizable({ initialWidth: 420, minWidth: 320, maxWidth: 640 });
-  const rightPanel = useResizable({ initialWidth: 320, minWidth: 250, maxWidth: 500, direction: 'rtl' });
+  const rightPanel = useResizable({ initialWidth: 320, minWidth: 250, maxWidth: 500, direction: 'rtl' }); // rightPanel is unused
 
   const LIBRARY_RAIL_WIDTH = 52;
   const [isLibraryPanelOpen, setIsLibraryPanelOpen] = useState(true);
@@ -1146,7 +783,7 @@ export default function App() {
   const preemptTimerRef = useRef<number | null>(null);
   const scheduledGapTimerRef = useRef<number | null>(null);
   const hasLiveQueueRef = useRef(false);
-  const pinnedQueueItemIdRef = useRef<string | null>(null);
+  const pinnedQueueItemIdRef = useRef<string | null>(null); // pinnedQueueItemIdRef is unused
 
   // Determine the next track in the queue for crossfade/preview logic.
   const currentIndex = currentQueueItemId
@@ -1211,6 +848,7 @@ export default function App() {
         setGapSeconds(Number.isFinite(gapRaw) ? Math.min(12, Math.max(0, Math.round(gapRaw))) : 2);
         setCrossfadeSeconds(Number.isFinite(cfRaw) ? Math.min(12, Math.max(0, Math.round(cfRaw))) : 2);
       } catch {
+        // ignore
       }
     })();
 
@@ -1400,7 +1038,7 @@ export default function App() {
         const merged = Array.from(new Set([...prev, ...allIds]));
         return merged;
       });
-    }, 3000);
+    }, 1000);
 
     return () => window.clearTimeout(timeoutId);
   }, [scheduledPlaylists]);
@@ -1642,11 +1280,11 @@ export default function App() {
         const mapped: ScheduledPlaylist[] = (serverSchedules as any[]).map((s: any) => ({
           id: s.id,
           playlistId: s.playlist_id ?? s.playlistId,
-          playlistName: String(s.playlist_name ?? s.playlistName ?? ''),
-          type: s.type,
+          playlistName: s.playlist_name ?? s.playlistName,
+          type: s.type as ScheduledPlaylist['type'],
           dateTime: s.date_time ? new Date(s.date_time) : s.dateTime ? new Date(s.dateTime) : undefined,
           queueSongId: s.queue_song_id ?? s.queueSongId ?? undefined,
-          triggerPosition: (s.trigger_position ?? s.triggerPosition) as any,
+          triggerPosition: s.trigger_position ?? s.triggerPosition ?? undefined,
           lockPlaylist: Boolean(s.lock_playlist ?? s.lockPlaylist),
           status: s.status as ScheduledPlaylist['status'],
         }));
@@ -1671,7 +1309,9 @@ export default function App() {
       if (stopped) return;
       try {
         socket?.close();
-      } catch { }
+      } catch {
+        // ignore
+      }
 
       socket = new WebSocket(wsUrl);
 
@@ -1726,6 +1366,53 @@ export default function App() {
           }
           if (data.type === 'playlistsUpdated') {
             void resyncAll();
+            // Also refresh schedules to clear any fired/deleted schedules from UI
+            void (async () => {
+              try {
+                const serverSchedules = await schedulesAPI.getAll();
+                const mapped: ScheduledPlaylist[] = (serverSchedules as any[]).map((s: any) => ({
+                  id: s.id,
+                  playlistId: s.playlist_id ?? s.playlistId,
+                  playlistName: s.playlist_name ?? s.playlistName,
+                  type: s.type as ScheduledPlaylist['type'],
+                  dateTime: s.date_time ? new Date(s.date_time) : s.dateTime ? new Date(s.dateTime) : undefined,
+                  queueSongId: s.queue_song_id ?? s.queueSongId ?? undefined,
+                  triggerPosition: s.trigger_position ?? s.triggerPosition ?? undefined,
+                  lockPlaylist: Boolean(s.lock_playlist ?? s.lockPlaylist),
+                  status: s.status as ScheduledPlaylist['status'],
+                }));
+                setScheduledPlaylists(mapped);
+              } catch (error) {
+                console.error('Failed to refresh schedules on playlistsUpdated', error);
+              }
+            })();
+            return;
+          }
+          if (data.type === 'schedule-deleted') {
+            const deletedId = data.scheduleId;
+            setScheduledPlaylists((prev) => prev.filter((s) => s.id !== deletedId));
+            return;
+          }
+          if (data.type === 'schedule-pre-fire') {
+            console.log('[Scheduler] Received schedule-pre-fire event');
+
+            // 1. Force state cleanup
+            setRestoreSeekSeconds(null);
+            setSeekAnchor(null);
+
+            if (isPlayingRef.current && currentTrackRef.current) {
+              const track = currentTrackRef.current;
+              console.log(`[Scheduler] Overriding current track: ${track.name}`);
+              // 2. Finalize history for the current track
+              void finalizePlaybackHistory(track, { completed: false });
+              // 3. Stop playback immediately to allow for the 2s gap
+              setIsPlaying(false);
+              setCurrentQueueItemId(null);
+            } else {
+              // Even if not playing, ensure we are ready for the new tracks
+              setIsPlaying(false);
+              setCurrentQueueItemId(null);
+            }
             return;
           }
           if (data.type === 'playback-state-updated' && data.settings) {
@@ -1762,9 +1449,9 @@ export default function App() {
             });
 
             const previousCurrentId = currentQueueItemIdRef.current;
-            const wasCurrentStillPresent = previousCurrentId
-              ? newQueue.some((item) => item.id === previousCurrentId)
-              : false;
+            // const wasCurrentStillPresent = previousCurrentId // wasCurrentStillPresent is unused
+            //   ? newQueue.some((item) => item.id === previousCurrentId)
+            //   : false;
 
             setQueue(newQueue);
 
@@ -1781,97 +1468,40 @@ export default function App() {
                 scheduledGapTimerRef.current = null;
               }
               setScheduledGapOverride(null);
-              const preemptToken = ++preemptTokenRef.current;
+              // const preemptToken = ++preemptTokenRef.current; // preemptToken is unused
 
-              // MISSION-CRITICAL: Decouple history logging from playback transitions.
-              // We do NOT await this call because it performs async I/O that could
-              // block the entire WebSocket message loop or UI thread.
-              const interruptedTrack = currentTrackRef.current;
-              if (interruptedTrack) {
-                const now = Date.now();
-                const wallClockStart = nowPlayingStartRef.current;
-                const wallClockElapsedSeconds = wallClockStart
-                  ? Math.max(0, Math.round((now - wallClockStart.getTime()) / 1000))
-                  : 0;
-                const playheadSeconds = Math.max(0, Math.round(playbackPositionSecondsRef.current || 0));
-                const interruptionTime = nowIst ?? new Date();
-                const interruptedSeconds = Math.max(playheadSeconds, wallClockElapsedSeconds);
-                const playedAtOverride = new Date(interruptionTime.getTime() - interruptedSeconds * 1000).toISOString();
-
-                // Fire and forget (history is non-blocking for automation)
-                void finalizePlaybackHistory(interruptedTrack, {
-                  completed: false,
-                  source: 'queue',
-                  playedAtOverride,
-                  endTimestampOverride: interruptionTime,
-                }).catch(err => console.error('[History] Failed to finalize non-blocking entry:', err));
-              }
-
-              // HARD-STOP old track state and immediately select the new one.
-              setIsPlaying(false);
+              // Force the new first item to be current and start playing.
               setCurrentQueueItemId(firstQueueItemId);
-              setRestoreSeekSeconds(null);
-              setSeekAnchor(null);
+              setIsPlaying(true);
 
-              // Refresh schedules asynchronously.
+              // Refresh schedules immediately to clear the UI state
               void (async () => {
                 try {
                   const serverSchedules = await schedulesAPI.getAll();
                   const mapped: ScheduledPlaylist[] = (serverSchedules as any[]).map((s: any) => ({
                     id: s.id,
                     playlistId: s.playlist_id ?? s.playlistId,
-                    playlistName: String(s.playlist_name ?? s.playlistName ?? ''),
-                    type: s.type,
+                    playlistName: s.playlist_name ?? s.playlistName,
+                    type: s.type as ScheduledPlaylist['type'],
                     dateTime: s.date_time ? new Date(s.date_time) : s.dateTime ? new Date(s.dateTime) : undefined,
                     queueSongId: s.queue_song_id ?? s.queueSongId ?? undefined,
-                    triggerPosition: (s.trigger_position ?? s.triggerPosition) as any,
+                    triggerPosition: s.trigger_position ?? s.triggerPosition ?? undefined,
                     lockPlaylist: Boolean(s.lock_playlist ?? s.lockPlaylist),
                     status: s.status as ScheduledPlaylist['status'],
                   }));
                   setScheduledPlaylists(mapped);
-                } catch {
-                  // ignore
+                } catch (error) {
+                  console.error('Failed to refresh schedules on schedule-preempt', error);
                 }
               })();
-
-              const mode = transitionModeRef.current;
-              const gap = mode === 'gap' ? Math.max(0, Number(gapSecondsRef.current) || 0) : 0;
-
-              if (gap > 0) {
-                const headTrack = newQueue[0]?.track ?? null;
-                const endAt = Date.now() + gap * 1000;
-                if (headTrack) {
-                  setScheduledGapOverride({ nextTrack: headTrack, remainingSeconds: gap });
-                  scheduledGapTimerRef.current = window.setInterval(() => {
-                    const remaining = Math.max(0, Math.ceil((endAt - Date.now()) / 1000));
-                    setScheduledGapOverride((prev) => (prev ? { ...prev, remainingSeconds: remaining } : null));
-                    if (remaining <= 0) {
-                      if (scheduledGapTimerRef.current != null) {
-                        window.clearInterval(scheduledGapTimerRef.current);
-                        scheduledGapTimerRef.current = null;
-                      }
-                    }
-                  }, 250);
-                }
-                preemptTimerRef.current = window.setTimeout(() => {
-                  if (preemptTokenRef.current !== preemptToken) return;
-                  preemptTimerRef.current = null;
-                  if (scheduledGapTimerRef.current != null) {
-                    window.clearInterval(scheduledGapTimerRef.current);
-                    scheduledGapTimerRef.current = null;
-                  }
-                  setScheduledGapOverride(null);
-                  const startAt = nowIst ?? new Date();
-                  setNowPlayingStart(startAt);
-                  setIsPlaying(true);
-                }, gap * 1000);
-              } else {
-                setScheduledGapOverride(null);
-                const startAt = nowIst ?? new Date();
-                setNowPlayingStart(startAt);
-                setIsPlaying(true);
-              }
               return;
+            }
+
+            // If we just received a standard queue update and the first item is new (scheduled),
+            // ensure it starts playing if we were previously in a pre-fire pause.
+            if (firstQueueItemId && !isPlayingRef.current && !currentQueueItemIdRef.current) {
+              setCurrentQueueItemId(firstQueueItemId);
+              setIsPlaying(true);
             }
           }
         } catch (error) {
@@ -2086,14 +1716,14 @@ export default function App() {
     playlistId: string,
     files: File[],
     insertIndex?: number,
-    suppressDuplicateDialog?: boolean,
+    _suppressDuplicateDialog?: boolean, // suppressDuplicateDialog is unused
   ) => {
     if (!playlistId) {
       throw new Error('Playlist ID is required');
     }
 
     let playlist: Playlist | undefined;
-    const playlistWasMissing = !playlists.find(p => p.id === playlistId);
+    // const playlistWasMissing = !playlists.find(p => p.id === playlistId); // playlistWasMissing is unused
     if (!playlist) {
       try {
         playlist = await playlistsAPI.getById(playlistId);
@@ -2107,8 +1737,8 @@ export default function App() {
       return;
     }
 
-    let importedTracks: Track[] = [];
-    let duplicates = 0;
+    // let importedTracks: Track[] = []; // importedTracks is unused
+    // let duplicates = 0; // duplicates is unused
     let failed = 0;
 
     // Track existing names in this playlist so we can apply OS-style,
@@ -2123,20 +1753,8 @@ export default function App() {
       setPlaylistImportProgress({ percent: 0, label: `Adding to playlist… 0/${totalFiles}`, playlistId });
     }
 
+    const normalizedItems: { trackId: string; fileName: string | null }[] = [];
     for (const file of files) {
-      const index = importedTracks.length + duplicates + failed;
-      // Throttle UI updates for smoothness; still keep it responsive.
-      if (totalFiles > 0 && (index % 3 === 0 || index === totalFiles - 1)) {
-        setPlaylistImportProgress({
-          percent: Math.min(100, (index / totalFiles) * 100),
-          label: `Adding to playlist… ${index}/${totalFiles}`,
-          playlistId,
-        });
-
-        if (totalFiles >= 25) {
-          await yieldToBrowser();
-        }
-      }
       const validation = isValidUploadFile(file);
       if (!validation.ok) {
         failed += 1;
@@ -2144,117 +1762,55 @@ export default function App() {
         continue;
       }
 
-      const detectedDuration = files.length > 120 ? 0 : await getAudioDuration(file);
-      const formData = new FormData();
-      formData.append('file', file);
-
-      // Derive a base name from the file name and apply playlist-level
-      // OS-style naming so duplicates inside this playlist follow
-      // Name, Name (1), Name (2) and fill gaps after deletions.
       const dotIndex = file.name.lastIndexOf('.');
       const baseName = dotIndex > 0 ? file.name.slice(0, dotIndex) : file.name;
       const desiredName = getNextSequentialName(baseName, existingNames);
-      formData.append('name', desiredName);
-
-      if (detectedDuration > 0) {
-        formData.append('duration', String(detectedDuration));
-      }
 
       try {
+        const formData = new FormData();
+        formData.append('file', file);
+        formData.append('name', desiredName);
+        const detectedDuration = files.length > 120 ? 0 : await getAudioDuration(file);
+        if (detectedDuration > 0) formData.append('duration', String(detectedDuration));
+
         const uploadData = await apiClient.request<any>('/tracks/upload', {
           method: 'POST',
           body: formData,
           allowedStatuses: [409],
         });
 
-        if (uploadData?.existingTrack) {
-          // Duplicate audio file. For OS drag-and-drop into playlists we
-          // suppress the interactive dialog and always behave like "Add
-          // Copy", so large drops remain smooth.
-          const existingTrack = uploadData?.existingTrack;
-
-          if (!existingTrack) {
-            duplicates += 1;
-            continue;
-          }
-
-          // If the audio already exists in the library, adding it to a
-          // different playlist should not be treated as a warning-worthy
-          // duplication. Always create a playlist-local alias copy.
-          const decision: 'skip' | 'cancel' | 'add' | 'addAll' = 'add';
-
-          // For duplicate-audio cases, create an alias that also respects the
-          // playlist-level OS-style naming. Use desiredName so the alias name
-          // in the library matches what we show inside this playlist.
-          const t = await tracksAPI.alias(existingTrack.id, desiredName);
-          const mapped: Track = {
-            id: t.id,
-            name: t.name,
-            artist: t.artist,
-            duration: t.duration && t.duration > 0 ? t.duration : detectedDuration,
-            size: t.size,
-            filePath: resolveUploadsUrl((t as any).filePath || (t as any).file_path),
-            hash: t.hash,
-            dateAdded: (t as any).dateAdded ? new Date((t as any).dateAdded) : new Date(),
-          };
-          importedTracks.push(mapped);
-          existingNames.push(mapped.name);
-          if ((!t.duration || t.duration === 0) && mapped.filePath) {
-            hydrateTrackDurationInLibrary(mapped.id, mapped.filePath);
-          }
-          continue;
-        }
-
-        const t = uploadData;
-        if (!t?.id) {
+        const trackIdToAttach = uploadData?.existingTrack?.id || uploadData?.id;
+        if (trackIdToAttach) {
+          normalizedItems.push({ trackId: trackIdToAttach, fileName: file.name });
+          existingNames.push(desiredName);
+        } else {
           failed += 1;
-          continue;
         }
-        const mapped: Track = {
-          id: t.id,
-          name: t.name,
-          artist: t.artist,
-          duration: t.duration && t.duration > 0 ? t.duration : detectedDuration,
-          size: t.size,
-          filePath: resolveUploadsUrl(t.filePath || t.file_path),
-          hash: t.hash,
-          dateAdded: t.dateAdded ? new Date(t.dateAdded) : new Date(),
-        };
-        importedTracks.push(mapped);
-        existingNames.push(mapped.name);
-        if ((!t.duration || t.duration === 0) && mapped.filePath) {
-          hydrateTrackDurationInLibrary(mapped.id, mapped.filePath);
-        }
-      } catch (error) {
-        console.error('Failed to import track for playlist', error);
+      } catch (err) {
+        console.error('Failed to upload for playlist', err);
         failed += 1;
       }
     }
 
+    if (normalizedItems.length === 0) {
+      setPlaylistImportProgress(null);
+      return;
+    }
+
     try {
-      const trackIds = importedTracks.map((t) => t.id);
-      if (trackIds.length === 0) return;
-
-      const beforeIds = new Set((playlist?.tracks || []).map((t) => t.id));
-      await playlistsAPI.addTracks(playlistId, trackIds);
-
+      // const result = await playlistsAPI.addTracks(playlistId, normalizedItems); // result is unused
+      await playlistsAPI.addTracks(playlistId, normalizedItems);
       const refreshed = await playlistsAPI.getById(playlistId);
       const refreshedTracks: Track[] = (refreshed?.tracks || []).map((t: any) => normalizeServerTrack(t));
-
-      // Playlist API creates playlist-owned copies (new IDs). Determine which ones
-      // were newly added by diffing against the previous playlist.
+      const beforeIds = new Set((playlist?.tracks || []).map((t) => t.id));
       const newOnes = refreshedTracks.filter((t) => !beforeIds.has(t.id));
       const existing = refreshedTracks.filter((t) => beforeIds.has(t.id));
 
       if (insertIndex != null) {
         const idx = Math.min(Math.max(insertIndex ?? existing.length, 0), existing.length);
         const desiredOrder = [...existing.slice(0, idx), ...newOnes, ...existing.slice(idx)];
-        try {
-          if (desiredOrder.length > 0) {
-            await playlistsAPI.reorder(playlistId, desiredOrder.map((t) => t.id));
-          }
-        } catch (err) {
-          console.error('Failed to persist playlist reorder after import', err);
+        if (desiredOrder.length > 0) {
+          await playlistsAPI.reorder(playlistId, desiredOrder.map((t) => t.id));
         }
       }
 
@@ -2264,9 +1820,9 @@ export default function App() {
 
       setPlaylists((prev) => {
         const idx = prev.findIndex((p) => p.id === playlistId);
-        if (idx === -1) return [...prev, { ...(finalPlaylist as any), tracks: finalTracks, duration } as any];
+        if (idx === -1) return prev;
         const next = [...prev];
-        next[idx] = { ...prev[idx], ...(finalPlaylist as any), tracks: finalTracks, duration } as any;
+        next[idx] = { ...prev[idx], ...(finalPlaylist as any), tracks: finalTracks, duration };
         return next;
       });
 
@@ -2276,12 +1832,8 @@ export default function App() {
         return Array.from(byId.values());
       });
 
-      if (!suppressDuplicateDialog && importedTracks.length > 0) {
-        void handleAddToQueue(importedTracks[0]);
-      }
-
       toast.success('Playlist updated', {
-        description: `${importedTracks.length} imported, ${duplicates} duplicates skipped, ${failed} failed`,
+        description: `${newOnes.length} tracks added to playlist storage`,
       });
     } catch (error: any) {
       console.error('Failed to attach tracks to playlist', error);
@@ -2535,7 +2087,7 @@ export default function App() {
 
       if (failedCount > 0) {
         toast.warning(`Deleted ${ids.length - failedCount} tracks. Failed to delete ${failedCount} tracks.`);
-        // If some failed, we might want to re-fetch or revert. 
+        // If some failed, we might want to re-fetch or revert.
         // Re-fetching is safer than complex logic to revert specific ones.
         void resyncAll();
       } else {
@@ -3040,16 +2592,15 @@ export default function App() {
         title={deletePlaylistConfirm ? `Delete playlist "${deletePlaylistConfirm.name}"?` : 'Delete playlist?'}
         description={
           deletePlaylistConfirm
-            ? `${deletePlaylistConfirm.trackCount} track records will be removed.\n\n${deletePlaylistConfirm.mediaCount} media files will be removed from storage.${
-                deletePlaylistConfirm.scheduledCount > 0
-                  ? `\n\nWARNING: This playlist is currently scheduled.`
-                  : ''
-              }`
+            ? `${deletePlaylistConfirm.trackCount} track records will be removed.\n\n${deletePlaylistConfirm.mediaCount} media files will be removed from storage.${deletePlaylistConfirm.scheduledCount > 0
+              ? `\n\nWARNING: This playlist is currently scheduled.`
+              : ''
+            }`
             : undefined
         }
         confirmLabel="Delete"
         cancelLabel="Cancel"
-        onConfirm={confirmDeletePlaylist}
+        onConfirm={() => deletePlaylistConfirm && confirmDeletePlaylist(deletePlaylistConfirm)}
         onCancel={() => setDeletePlaylistConfirm(null)}
       />
 
@@ -3072,7 +2623,7 @@ export default function App() {
               <div className="mb-3">
                 <h2 className="text-sm font-semibold mb-1">Duplicate file detected</h2>
                 <p className="text-xs text-muted-foreground">
-                  "{duplicatePrompt.existingName}" is already in your library.
+                  Track already exists in your library.
                 </p>
                 <p className="text-[11px] text-muted-foreground mt-1 break-all">
                   Importing file: <span className="font-mono">{duplicatePrompt.fileName}</span>

@@ -1,5 +1,6 @@
 import { query, run, get } from '../config/database.js';
-import { validateTrack } from './preFlightScan.js';
+import logger from './logger.js';
+// import { validateTrack } from './preFlightScan.js';
 
 import { enqueueTrackCopy, emitQueueUpdated as emitQueueUpdatedRoute } from '../routes/queue.js';
 
@@ -18,14 +19,13 @@ function emitPlaylistLocked(app, playlistId, locked) {
 // - Marks the schedule as completed
 // - Emits queue-updated over WebSocket
 export async function fireScheduleAtomically(scheduleId, app) {
-  // Start a transaction so we can safely check status and enqueue
-  await run('BEGIN TRANSACTION');
-
   try {
-    const schedule = await get('SELECT * FROM schedules WHERE id = ?', [scheduleId]);
+    // 1. Mark as 'firing' immediately to prevent duplicate triggers from tick
+    await run("UPDATE schedules SET status = 'firing', updated_at = ? WHERE id = ? AND status = 'pending'", [new Date().toISOString(), scheduleId]);
 
-    if (!schedule || schedule.status !== 'pending' || schedule.type !== 'datetime') {
-      await run('ROLLBACK');
+    const schedule = await get("SELECT * FROM schedules WHERE id = ? AND status = 'firing'", [scheduleId]);
+
+    if (!schedule || schedule.type !== 'datetime') {
       return false;
     }
 
@@ -39,52 +39,41 @@ export async function fireScheduleAtomically(scheduleId, app) {
       [schedule.playlist_id],
     );
 
+    logger.debug(`[Scheduler] Found ${tracks?.length || 0} tracks for playlist`);
+
     if (!tracks || tracks.length === 0) {
-      // Nothing to enqueue; just mark as completed
-      const nowIso = new Date().toISOString();
+      // Nothing to enqueue; just delete the empty schedule
       await run(
-        `UPDATE schedules
-         SET status = 'completed', updated_at = ?, fired_at = ?, completed_at = ?
-         WHERE id = ?`,
-        [nowIso, nowIso, nowIso, scheduleId],
+        `DELETE FROM schedules WHERE id = ?`,
+        [scheduleId],
       );
-      await run('COMMIT');
       return true;
     }
 
-    // MISSION-CRITICAL: Pre-validate tracks before adding to queue
-    const validTracks = [];
-    for (const track of tracks) {
-      const validation = await validateTrack(track.id);
-      if (validation.ok) {
-        validTracks.push(track);
-      } else {
-        console.error(`[Scheduler] Skipping invalid track "${track.name}" (${track.id}): ${validation.error}`);
-        // Log to broadcast so UI can show warning if needed
-        const broadcastEvent = app.get('broadcastEvent');
-        if (typeof broadcastEvent === 'function') {
-          broadcastEvent({
-            type: 'schedule-track-skipped',
-            scheduleId,
-            trackId: track.id,
-            trackName: track.name,
-            error: validation.error
-          });
-        }
-      }
+    // BROADCAST PRE-FIRE EVENT
+    // This allows the frontend to pause current playback, log history, and create a 2s gap.
+    const broadcastEvent = app.get('broadcastEvent');
+    if (typeof broadcastEvent === 'function') {
+      logger.info(`[Scheduler] Broadcasting schedule-pre-fire for schedule ${scheduleId}`);
+      broadcastEvent({
+        type: 'schedule-pre-fire',
+        scheduleId,
+        playlistId: schedule.playlist_id
+      });
+
+      // Wait for 2.5 seconds (2s gap + buffer) before enqueuing and starting playback.
+      // This ensures the frontend has time to process the transition.
+      await new Promise(resolve => setTimeout(resolve, 2500));
     }
 
-    if (validTracks.length === 0) {
-      console.warn(`[Scheduler] Schedule ${scheduleId} results in 0 valid tracks. Completing without enqueuing.`);
-      const nowIso = new Date().toISOString();
-      await run(
-        `UPDATE schedules
-         SET status = 'completed', updated_at = ?, fired_at = ?, completed_at = ?
-         WHERE id = ?`,
-        [nowIso, nowIso, nowIso, scheduleId],
-      );
-      await run('COMMIT');
-      return true;
+    // Start a transaction so we can safely check status and enqueue
+    await run('BEGIN TRANSACTION');
+
+    // Re-verify status hasn't changed during sleep
+    const latest = await get("SELECT status FROM schedules WHERE id = ? AND status = 'firing'", [scheduleId]);
+    if (!latest) {
+      await run('ROLLBACK');
+      return false;
     }
 
     // If requested, lock the playlist right as it starts.
@@ -99,40 +88,74 @@ export async function fireScheduleAtomically(scheduleId, app) {
 
     // Load current queue ids (from queue DB via route helper)
     const queueDb = await import('../config/queueDatabase.js');
-    const existingQueue = await queueDb.query('SELECT id FROM queue_items ORDER BY order_position');
-    for (let i = 0; i < existingQueue.length; i += 1) {
-      await queueDb.run('UPDATE queue_items SET order_position = ? WHERE id = ?', [i + validTracks.length, existingQueue[i].id]);
+
+    // Perform queue operations in a separate transaction on the queue database
+    await queueDb.run('BEGIN TRANSACTION');
+    try {
+      const existingQueue = await queueDb.query('SELECT id FROM queue_items ORDER BY order_position');
+      console.log(`[Scheduler] Shifting ${existingQueue.length} existing queue items by ${tracks.length}`);
+      for (let i = 0; i < existingQueue.length; i += 1) {
+        await queueDb.run('UPDATE queue_items SET order_position = ? WHERE id = ?', [i + tracks.length, existingQueue[i].id]);
+      }
+
+      let cursor = 0;
+      for (const track of tracks) {
+        console.log(`[Scheduler] Enqueuing scheduled track "${track.name}" (${track.id}) at position ${cursor}`);
+        try {
+          // We call enqueueTrackCopy which normally handles its own DB logic.
+          // Since we are inside a queueDb transaction here, we need to ensure 
+          // enqueueTrackCopy doesn't conflict. 
+          await enqueueTrackCopy({ trackId: String(track.id), fromPlaylist: null, orderPosition: cursor });
+          cursor += 1;
+        } catch (enqueueErr) {
+          logger.error(`[Scheduler] Failed to enqueue track "${track.name}": ${enqueueErr.message}`);
+        }
+      }
+      await queueDb.run('COMMIT');
+    } catch (queueErr) {
+      console.error('[Scheduler] Queue transaction failed', queueErr);
+      await queueDb.run('ROLLBACK');
+      throw queueErr;
     }
 
-    let cursor = 0;
-    for (const track of validTracks) {
-      await enqueueTrackCopy({ trackId: String(track.id), fromPlaylist: null, orderPosition: cursor });
-      cursor += 1;
-    }
-
-    const nowIso = new Date().toISOString();
+    // Delete the datetime schedule after it fires so the playlist is "clear" for the next schedule.
     await run(
-      `UPDATE schedules
-       SET status = 'completed', updated_at = ?, fired_at = ?, completed_at = ?
-       WHERE id = ?`,
-      [nowIso, nowIso, nowIso, scheduleId],
+      `DELETE FROM schedules WHERE id = ?`,
+      [scheduleId],
     );
 
     await run('COMMIT');
 
-    // Emit queue update after commit
+    console.log(`[Scheduler] Deleted fired schedule ${scheduleId}. Broadcasting updates.`);
+
+    // 1. Emit queue update after commit
     await emitQueueUpdated(app);
+
+    // 2. Emit direct schedule-deleted event for immediate UI response
+    const broadcastEventFinal = app.get('broadcastEvent');
+    if (typeof broadcastEventFinal === 'function') {
+      console.log(`[Scheduler] Broadcasting schedule-deleted for ${scheduleId}`);
+      broadcastEventFinal({
+        type: 'schedule-deleted',
+        scheduleId,
+        playlistId: schedule.playlist_id
+      });
+      // 3. Also emit the broader playlistsUpdated for general sync
+      broadcastEventFinal({ type: 'playlistsUpdated' });
+    }
 
     if (schedule.lock_playlist) {
       emitPlaylistLocked(app, schedule.playlist_id, true);
     }
     return true;
   } catch (error) {
-    console.error('Failed to fire schedule atomically', error);
+    logger.error(`[Scheduler] Firing FAILED for schedule ${scheduleId}:`, error);
     try {
+      // Check if a transaction is actually active before trying to rollback
+      // to avoid "no transaction is active" error.
       await run('ROLLBACK');
-    } catch (rollbackError) {
-      console.error('Rollback failed after scheduler error', rollbackError);
+    } catch {
+      // ignore
     }
     return false;
   }

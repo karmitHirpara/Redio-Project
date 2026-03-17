@@ -439,9 +439,10 @@ router.get('/:id/tracks', async (req, res) => {
 // Add tracks to folder
 router.post('/:id/tracks', async (req, res) => {
   try {
-    const { trackIds } = req.body;
-    if (!Array.isArray(trackIds) || trackIds.length === 0) {
-      return res.status(400).json({ error: 'trackIds array is required' });
+    const trackIds = Array.isArray(req.body?.trackIds) ? req.body.trackIds : null;
+    const items = Array.isArray(req.body?.items) ? req.body.items : null;
+    if ((!items || items.length === 0) && (!trackIds || trackIds.length === 0)) {
+      return res.status(400).json({ error: 'trackIds array or items array is required' });
     }
 
     const folder = await get('SELECT * FROM folders WHERE id = ?', [req.params.id]);
@@ -453,7 +454,18 @@ router.post('/:id/tracks', async (req, res) => {
     const folderAbsDir = path.join(libraryDir, folderDirName);
     if (!fs.existsSync(folderAbsDir)) fs.mkdirSync(folderAbsDir, { recursive: true });
 
-    for (const sourceTrackId of trackIds) {
+    const normalizedItems = (items || []).map((it) => ({
+      trackId: String(it?.trackId || '').trim(),
+      fileName: it?.fileName != null ? String(it.fileName) : '',
+    })).filter((it) => it.trackId);
+
+    const idsOnly = (trackIds || []).map((id) => String(id || '').trim()).filter(Boolean);
+    const work = normalizedItems.length > 0
+      ? normalizedItems
+      : idsOnly.map((id) => ({ trackId: id, fileName: '' }));
+
+    for (const item of work) {
+      const sourceTrackId = item.trackId;
       const source = await get('SELECT * FROM tracks WHERE id = ?', [sourceTrackId]);
       if (!source) continue;
 
@@ -462,7 +474,11 @@ router.post('/:id/tracks', async (req, res) => {
       const srcAbs = resolveUploadPath(rel);
       if (!fs.existsSync(srcAbs)) continue;
 
-      const baseFileName = path.basename(rel);
+      // Folder is a container: prefer the incoming original filename so that
+      // identical names in different folders remain identical (Explorer-style).
+      // Uniqueness is enforced only within this folder's physical directory.
+      const requested = String(item.fileName || '').trim();
+      const baseFileName = requested ? path.basename(requested) : path.basename(rel);
       const { destAbs, destFileName } = ensureUniqueDestPath(folderAbsDir, baseFileName);
 
       fs.copyFileSync(srcAbs, destAbs);
@@ -471,18 +487,21 @@ router.post('/:id/tracks', async (req, res) => {
       const newTrackId = uuidv4();
       const newRel = `/uploads/library/${folderDirName}/${destFileName}`;
 
+      const ext = path.extname(destFileName);
+      const stem = path.basename(destFileName, ext);
+
       await run(
         `INSERT INTO tracks (id, name, artist, duration, size, file_path, hash, original_filename)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
         [
           newTrackId,
-          source.name,
+          stem || source.name,
           source.artist,
           Number(source.duration || 0),
           Number(st.size || 0),
           newRel,
           source.hash,
-          source.original_filename || baseFileName,
+          baseFileName,
         ],
       );
 
