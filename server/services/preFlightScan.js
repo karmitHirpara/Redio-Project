@@ -106,40 +106,36 @@ export async function validateTrack(trackId) {
 
 /**
  * Synchronizes the database with the file system on startup.
- * 1. Removes any tracks from the DB where the physical file is missing.
+ * Updates 'exists_on_disk' flag for all tracks.
  */
-export async function runStartupSync(uploadsDir) {
+export async function runStartupScan(uploadsDir) {
     try {
         logger.info('[Sync] Starting startup pre-flight scan...');
         const tracks = await query('SELECT id, file_path FROM tracks');
-        let removedCount = 0;
-
-        const allowDelete = process.env.PREFLIGHT_DELETE_ORPHANS === '1';
+        let unavailableCount = 0;
+        let availableCount = 0;
 
         for (const track of tracks) {
             if (!track.file_path) continue;
 
             const absolutePath = resolveTrackAbsolutePath(track.file_path, uploadsDir);
-            if (!absolutePath) {
-                continue;
-            }
+            const exists = absolutePath && fs.existsSync(absolutePath);
 
-            if (!fs.existsSync(absolutePath)) {
-                const baseName = path.basename(absolutePath);
-                if (allowDelete) {
-                    console.log(`[Sync] Orphaned DB record found for missing file: ${baseName}. Removing track...`);
-                    await run('DELETE FROM tracks WHERE id = ?', [track.id]);
-                    removedCount++;
-                } else {
-                    console.log(`[Sync] Missing file on disk (not deleting): ${baseName}`);
-                }
+            await run('UPDATE tracks SET exists_on_disk = ? WHERE id = ?', [exists ? 1 : 0, track.id]);
+            
+            if (exists) {
+                availableCount++;
+            } else {
+                unavailableCount++;
+                const baseName = absolutePath ? path.basename(absolutePath) : 'Unknown';
+                logger.warn(`[Sync] Audio file missing for track: ${baseName} (${track.id})`);
             }
         }
 
-        logger.info(`[Sync] Pre-flight scan complete. Removed ${removedCount} orphaned track records.`);
-        return { removedCount };
+        logger.info(`[Sync] Pre-flight scan complete. Available: ${availableCount}, Missing: ${unavailableCount}`);
+        return { availableCount, unavailableCount };
     } catch (err) {
-        console.error('[Sync] Error during startup scan:', err);
-        return { removedCount: 0, error: err.message };
+        logger.error('[Sync] Error during startup scan:', err);
+        return { error: err.message };
     }
 }

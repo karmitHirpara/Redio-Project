@@ -9,7 +9,12 @@ import ffmpegPath from 'ffmpeg-static';
 import { fileURLToPath } from 'url';
 import { dirname } from 'path';
 import { TrackService } from '../services/track.service.js';
+import { query, run, get } from '../config/database.js';
 import { resolveUploadPath, uploadsDir } from '../utils/paths.js';
+import { isS3UploadStorage, s3KeyFromUploadsPath, s3PutFile, s3ObjectExists, s3DeleteObject } from '../services/objectStorage.js';
+import { sha256File, getDuration } from '../services/audio.js';
+import { emitQueueUpdated } from './queue.js';
+import { trackSchema, trackEditSchema } from '../validators/track.validator.js';
 
 const sanitizePlaylistFolderName = (name, fallback) => {
   const cleaned = String(name || '').replace(/[^a-zA-Z0-9 _-]/g, '').trim();
@@ -19,15 +24,6 @@ const sanitizePlaylistFolderName = (name, fallback) => {
 const router = express.Router();
 
 // Ensure we use the same uploads directory as the main server (server.js)
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = dirname(__filename);
-
-// If UPLOAD_PATH is absolute, use it as-is; otherwise resolve relative to this file
-const rawUploadPath = process.env.UPLOAD_PATH || 'uploads';
-const uploadsDir = path.isAbsolute(rawUploadPath)
-  ? rawUploadPath
-  : path.join(__dirname, '..', rawUploadPath);
-
 const libraryDir = path.join(uploadsDir, 'library');
 const playlistsDir = path.join(uploadsDir, 'playlists');
 
@@ -178,7 +174,8 @@ router.get('/', async (req, res) => {
   try {
     const limit = parseInt(req.query.limit, 10) || 0;
     const offset = parseInt(req.query.offset, 10) || 0;
-    const tracks = await TrackService.getAllTracks(limit, offset);
+    const onlyExisting = req.query.all !== 'true'; // Default to hiding missing files
+    const tracks = await TrackService.getAllTracks(limit, offset, onlyExisting);
     res.json(tracks);
   } catch (error) {
     res.status(500).json({ error: error.message });
@@ -505,11 +502,13 @@ router.post('/upload', (req, res, next) => {
     return res.status(400).json({ error: err?.message || 'Upload failed' });
   });
 }, async (req, res) => {
+  console.log('[Upload] Request received. File:', req.file ? req.file.filename : 'MISSING', 'Body:', JSON.stringify(req.body));
   try {
     if (!req.file) {
       return res.status(400).json({ error: 'No file uploaded' });
     }
 
+    const trackId = uuidv4();
     const uploadedPath = req.file.path || resolveUploadPath(req.file.filename);
 
     // Hash is computed during streaming upload when using hashingDiskStorage.
@@ -568,6 +567,7 @@ router.post('/upload', (req, res, next) => {
           if (fs.existsSync(uploadedPath)) fs.unlinkSync(uploadedPath);
         } catch { /* ignore */ }
       }
+      console.error('[Upload] Validation failed:', JSON.stringify(validation.error.format(), null, 2));
       return res.status(400).json({
         error: 'Invalid metadata',
         details: validation.error.format()

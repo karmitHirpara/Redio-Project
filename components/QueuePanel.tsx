@@ -44,6 +44,20 @@ export function QueuePanel({
   const dragStartOrderRef = useRef<QueueItem[] | null>(null);
   const reduceMotion = useReducedMotion() ?? false;
 
+  const [scrollTop, setScrollTop] = useState(0);
+  const containerRef = useRef<HTMLDivElement | null>(null);
+  const rowHeight = 48; // Standard height for QueueItemRow
+  const overscan = 10;
+  const viewportHeight = 600; // Estimated or measured height
+
+  const totalHeight = queue.length * rowHeight;
+  const startIndex = Math.max(0, Math.floor(scrollTop / rowHeight) - overscan);
+  const endIndex = Math.min(
+    queue.length,
+    Math.ceil((scrollTop + viewportHeight) / rowHeight) + overscan
+  );
+  const items = queue.slice(startIndex, endIndex);
+
   const pinnedIndex = currentQueueItemId
     ? queue.findIndex((item) => item.id === currentQueueItemId)
     : -1;
@@ -142,52 +156,67 @@ export function QueuePanel({
       )}
 
       {/* Queue List */}
-      <div className="flex-1 overflow-y-auto p-2 scroll-thin">
+      <div 
+        className="flex-1 overflow-y-auto p-2 scroll-thin"
+        onScroll={(e) => {
+          const target = e.currentTarget;
+          setScrollTop(target.scrollTop);
+        }}
+        ref={containerRef}
+      >
         {queue.length === 0 ? (
           <div className="flex items-center justify-center h-32 text-muted-foreground">
             Queue is empty
           </div>
         ) : (
-          <AnimatePresence mode="popLayout">
-            {queue.map((item, index) => {
-              const entry = timingByQueueItemId.get(item.id);
-              const isCurrent = Boolean(currentQueueItemId && item.id === currentQueueItemId);
-              const isPendingNext = Boolean(pendingNextQueueItemId && item.id === pendingNextQueueItemId);
-              const np = isCurrent ? timing?.nowPlaying : undefined;
+          <div className="relative" style={{ height: totalHeight }}>
+            <div 
+              className="absolute left-0 right-0" 
+              style={{ transform: `translateY(${startIndex * rowHeight}px)` }}
+            >
+              <div className="flex flex-col gap-[1px]">
+                {items.map((item) => {
+                  const originalIndex = queue.findIndex(q => q.id === item.id);
+                  const entry = timingByQueueItemId.get(item.id);
+                  const isCurrent = Boolean(currentQueueItemId && item.id === currentQueueItemId);
+                  const isPendingNext = Boolean(pendingNextQueueItemId && item.id === pendingNextQueueItemId);
+                  const np = isCurrent ? timing?.nowPlaying : undefined;
 
-              const startTime = (isCurrent ? np?.start : entry?.start) ?? undefined;
-              const endTime = (isCurrent ? np?.end : entry?.end) ?? undefined;
+                  const startTime = (isCurrent ? np?.start : entry?.start) ?? undefined;
+                  const endTime = (isCurrent ? np?.end : entry?.end) ?? undefined;
 
-              return (
-                <QueueItemRow
-                  key={item.id}
-                  item={item}
-                  isPlaying={item.id === currentQueueItemId}
-                  isNext={isPendingNext || (index === 0 && item.id !== currentQueueItemId)}
-                  pendingGapRemainingSeconds={
-                    isPendingNext && typeof gapRemainingSeconds === 'number' ? gapRemainingSeconds : undefined
-                  }
-                  onRemoveFromQueue={onRemoveFromQueue}
-                  onSelect={(id) => {
-                    if (locked) return;
-                    if (onSelectQueueItem) onSelectQueueItem(id);
-                  }}
-                  selected={Boolean(selectedQueueItemId && item.id === selectedQueueItemId)}
-                  index={index}
-                  onDragStart={handleDragStart}
-                  onDragOverRow={handleDragOverRow}
-                  onDragEnd={handleDragEnd}
-                  dropIndex={dropIndex}
-                  startTime={startTime}
-                  endTime={endTime}
-                  playlists={playlists}
-                  onAddToPlaylist={onAddQueueItemToPlaylist}
-                  reduceMotion={reduceMotion}
-                  locked={locked}
-                />
-              );
-            })}
-          </AnimatePresence>
+                  return (
+                    <QueueItemRow
+                      key={item.id}
+                      item={item}
+                      isPlaying={item.id === currentQueueItemId}
+                      isNext={isPendingNext || (originalIndex === 0 && item.id !== currentQueueItemId)}
+                      pendingGapRemainingSeconds={
+                        isPendingNext && typeof gapRemainingSeconds === 'number' ? gapRemainingSeconds : undefined
+                      }
+                      onRemoveFromQueue={onRemoveFromQueue}
+                      onSelect={(id) => {
+                        if (locked) return;
+                        if (onSelectQueueItem) onSelectQueueItem(id);
+                      }}
+                      selected={Boolean(selectedQueueItemId && item.id === selectedQueueItemId)}
+                      index={originalIndex}
+                      onDragStart={handleDragStart}
+                      onDragOverRow={handleDragOverRow}
+                      onDragEnd={handleDragEnd}
+                      dropIndex={dropIndex}
+                      startTime={startTime}
+                      endTime={endTime}
+                      playlists={playlists}
+                      onAddToPlaylist={onAddQueueItemToPlaylist}
+                      reduceMotion={reduceMotion}
+                      locked={locked}
+                    />
+                  );
+                })}
+              </div>
+            </div>
+          </div>
         )}
       </div>
     </div>

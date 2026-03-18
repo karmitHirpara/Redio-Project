@@ -43,6 +43,7 @@ function ensureCoreSchema(database) {
         file_path TEXT,
         original_filename TEXT,
         hash TEXT,
+        exists_on_disk INTEGER DEFAULT 1,
         date_added DATETIME DEFAULT CURRENT_TIMESTAMP
       )
     `);
@@ -161,6 +162,22 @@ function ensureCoreSchema(database) {
         database.run(`ALTER TABLE schedules ADD COLUMN lock_playlist INTEGER DEFAULT 0`, (alterErr) => {
           if (alterErr) {
             console.error('Failed to add schedules.lock_playlist column', alterErr.message);
+          }
+        });
+      }
+    });
+
+    // Migration: ensure tracks has exists_on_disk
+    database.all(`PRAGMA table_info(tracks)`, (pragmaErr, cols) => {
+      if (pragmaErr) {
+        console.error('Failed to inspect tracks table for migrations', pragmaErr.message);
+        return;
+      }
+      const hasExistsOnDisk = Array.isArray(cols) && cols.some((c) => c.name === 'exists_on_disk');
+      if (!hasExistsOnDisk) {
+        database.run(`ALTER TABLE tracks ADD COLUMN exists_on_disk INTEGER DEFAULT 1`, (alterErr) => {
+          if (alterErr) {
+            console.error('Failed to add tracks.exists_on_disk column', alterErr.message);
           }
         });
       }

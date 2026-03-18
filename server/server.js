@@ -260,11 +260,31 @@ server.listen(PORT, HOST, () => {
   // 1s interval so fired schedules line up closely with the visible clock.
   const intervalMs = Number(process.env.SCHEDULER_INTERVAL_MS || 1000);
   logger.info(`⏱️  Scheduler running every ${intervalMs}ms`);
+  
+  let lastSchedulerTick = Date.now();
+  
   schedulerInterval = setInterval(() => {
+    lastSchedulerTick = Date.now();
     runSchedulerTick(app).catch((err) => {
       logger.error('Scheduler tick error', err);
     });
   }, intervalMs);
+
+  // Watchdog: If scheduler doesn't tick for 5s, something is wrong.
+  // We attempt to restart it.
+  const watchdogInterval = setInterval(() => {
+    const drift = Date.now() - lastSchedulerTick;
+    if (drift > 5000) {
+      logger.error(`🚨 SCHEDULER WATCHDOG: Last tick was ${drift}ms ago. Restarting loop...`);
+      clearInterval(schedulerInterval);
+      schedulerInterval = setInterval(() => {
+        lastSchedulerTick = Date.now();
+        runSchedulerTick(app).catch((err) => {
+          logger.error('Scheduler tick error (recovered)', err);
+        });
+      }, intervalMs);
+    }
+  }, 5000);
 
   // Initialize file system watcher for local uploads
   if (!isS3UploadStorage()) {
@@ -294,8 +314,14 @@ server.listen(PORT, HOST, () => {
         const relativePath = `/uploads/library/${basename}`;
 
         // Check if track already exists (duplicate event or already tracked)
-        const existing = await get('SELECT id FROM tracks WHERE file_path = ?', [relativePath]);
+        const existing = await get('SELECT id, exists_on_disk FROM tracks WHERE file_path = ?', [relativePath]);
+        
         if (existing) {
+          if (existing.exists_on_disk === 0) {
+            console.log(`[Watcher] Missing file reappeared: ${basename}. Marking as available.`);
+            await run('UPDATE tracks SET exists_on_disk = 1 WHERE id = ?', [existing.id]);
+            broadcastEvent({ type: 'tracksUpdated', trackIds: [existing.id] });
+          }
           return;
         }
 
@@ -318,8 +344,8 @@ server.listen(PORT, HOST, () => {
         const trackId = uuidv4();
 
         await run(
-          `INSERT INTO tracks (id, name, artist, duration, size, file_path, hash)
-           VALUES (?, ?, ?, ?, ?, ?, ?)`,
+          `INSERT INTO tracks (id, name, artist, duration, size, file_path, hash, exists_on_disk)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
           [
             trackId,
             trackName,
@@ -328,6 +354,7 @@ server.listen(PORT, HOST, () => {
             stat.size,
             relativePath,
             hash,
+            1, // exists_on_disk
           ]
         );
 
@@ -347,14 +374,14 @@ server.listen(PORT, HOST, () => {
         const tracks = await query('SELECT * FROM tracks WHERE file_path = ?', [relativePath]);
         if (tracks && tracks.length > 0) {
           const trackIds = tracks.map(t => t.id);
-          console.log(`[Watcher] File deleted natively: ${basename}. Removing ${tracks.length} track(s)...`);
+          console.log(`[Watcher] File missing natively: ${basename}. Marking ${tracks.length} track(s) as unavailable...`);
 
           for (const trackId of trackIds) {
-            await run('DELETE FROM tracks WHERE id = ?', [trackId]);
+            await run('UPDATE tracks SET exists_on_disk = 0 WHERE id = ?', [trackId]);
           }
 
           // Emit events to sync clients
-          broadcastEvent({ type: 'tracksDeleted', trackIds });
+          broadcastEvent({ type: 'tracksUpdated', trackIds });
           await emitQueueUpdated(app);
           broadcastEvent({ type: 'playlistsUpdated' });
         }

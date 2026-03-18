@@ -69,6 +69,7 @@ export function useAudioEngine({
   >({ phase: 'idle' });
 
   const activeIndexRef = useRef<0 | 1>(0);
+  const retryCountRef = useRef<Record<string, number>>({});
 
   const getAudioByIndex = (index: 0 | 1) =>
     index === 0 ? primaryAudioRef.current : secondaryAudioRef.current;
@@ -471,18 +472,50 @@ export function useAudioEngine({
       }, delayMs);
     };
 
+    const handleAudioError = (audio: HTMLAudioElement) => {
+      if (audio !== getActiveAudio() || !currentTrack) return;
+
+      const trackId = currentTrack.id;
+      const currentRetries = retryCountRef.current[trackId] || 0;
+
+      if (currentRetries < 3) {
+        const backoffMs = Math.pow(2, currentRetries) * 1000;
+        console.warn(`[AudioEngine] Playback error for track ${currentTrack.name}. Retrying in ${backoffMs}ms (attempt ${currentRetries + 1}/3)...`, audio.error);
+        
+        retryCountRef.current[trackId] = currentRetries + 1;
+        
+        setTimeout(() => {
+          if (currentTrack?.id === trackId && isPlaying) {
+             audio.load();
+             audio.play().catch(e => console.error("[AudioEngine] Retry play failed", e));
+          }
+        }, backoffMs);
+      } else {
+        console.error(`[AudioEngine] Critical playback error for track ${currentTrack.name} after 3 retries.`, audio.error);
+        // On ultimate failure in live mode, maybe we should skip to next? 
+        // For now just log, but in a real radio app, silence is the enemy.
+        // autoAdvanceRef.current = true;
+        // onNext();
+      }
+    };
+
     const attach = (audio: HTMLAudioElement | null) => {
       if (!audio) return;
       const onTimeUpdate = () => handleTimeUpdate(audio);
       const onLoadedMetadata = () => handleLoadedMetadata(audio);
       const onEnded = () => handleEnded(audio);
+      const onError = () => handleAudioError(audio);
+      
       audio.addEventListener('timeupdate', onTimeUpdate);
       audio.addEventListener('loadedmetadata', onLoadedMetadata);
       audio.addEventListener('ended', onEnded);
+      audio.addEventListener('error', onError);
+      
       return () => {
         audio.removeEventListener('timeupdate', onTimeUpdate);
         audio.removeEventListener('loadedmetadata', onLoadedMetadata);
         audio.removeEventListener('ended', onEnded);
+        audio.removeEventListener('error', onError);
       };
     };
 

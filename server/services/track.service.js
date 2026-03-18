@@ -4,11 +4,18 @@ import { query, run, get } from '../config/database.js';
 
 export class TrackService {
     /**
-     * Get all tracks with pagination
+     * Get all tracks with pagination and availability filtering
      */
-    static async getAllTracks(limit = 0, offset = 0) {
-        let sql = `SELECT * FROM tracks WHERE file_path NOT LIKE '/uploads/playlists/%' ORDER BY date_added DESC`;
+    static async getAllTracks(limit = 0, offset = 0, onlyExisting = true) {
+        let sql = `SELECT * FROM tracks WHERE file_path NOT LIKE '/uploads/playlists/%'`;
         const params = [];
+
+        if (onlyExisting) {
+            sql += ` AND exists_on_disk = 1`;
+        }
+
+        sql += ` ORDER BY date_added DESC`;
+
         if (limit > 0) {
             sql += ' LIMIT ? OFFSET ?';
             params.push(limit, offset);

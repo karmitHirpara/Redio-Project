@@ -1,9 +1,9 @@
 import { z } from 'zod';
 
 export const trackSchema = z.object({
-    name: z.string().min(1, 'Name is required'),
+    name: z.string().optional(),
     artist: z.string().optional().default('Unknown Artist'),
-    duration: z.number().nonnegative().optional().default(0),
+    duration: z.coerce.number().nonnegative().optional().default(0),
 });
 
 export const trackEditSchema = z.object({

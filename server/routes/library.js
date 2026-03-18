@@ -67,6 +67,7 @@ router.get('/library/search', async (req, res) => {
         LEFT JOIN folder_tracks ft ON ft.track_id = t.id
         LEFT JOIN folders f ON f.id = ft.folder_id
         LEFT JOIN folder_paths p ON p.id = f.id
+        WHERE t.exists_on_disk = 1
         ORDER BY t.name COLLATE NOCASE
         LIMIT ?`,
         [ftsQ, limit, limit],
@@ -103,9 +104,10 @@ router.get('/library/search', async (req, res) => {
         LEFT JOIN folders f ON f.id = ft.folder_id
         LEFT JOIN folder_paths p ON p.id = f.id
         WHERE
-          t.name LIKE ? COLLATE NOCASE OR
+          (t.name LIKE ? COLLATE NOCASE OR
           t.artist LIKE ? COLLATE NOCASE OR
-          t.original_filename LIKE ? COLLATE NOCASE
+          t.original_filename LIKE ? COLLATE NOCASE)
+          AND t.exists_on_disk = 1
         ORDER BY t.name COLLATE NOCASE
         LIMIT ?`,
         [like, like, like, limit],
