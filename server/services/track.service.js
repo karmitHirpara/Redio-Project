@@ -24,6 +24,13 @@ export class TrackService {
     }
 
     /**
+     * Get a single track by ID
+     */
+    static async getTrackById(id) {
+        return await get('SELECT * FROM tracks WHERE id = ?', [id]);
+    }
+
+    /**
      * Create a real file copy of an existing track
      */
     static async copyTrack(sourceId, nameStrategy = 'suffix') {
@@ -81,8 +88,8 @@ export class TrackService {
 
         const trackId = uuidv4();
         await run(
-            `INSERT INTO tracks (id, name, artist, duration, size, file_path, hash)
-             VALUES (?, ?, ?, ?, ?, ?, ?)`,
+            `INSERT INTO tracks (id, name, artist, duration, size, file_path, hash, exists_on_disk)
+             VALUES (?, ?, ?, ?, ?, ?, ?, 1)`,
             [trackId, newName, existing.artist, existing.duration, existing.size, newRelativePath, existing.hash]
         );
 
@@ -98,12 +105,77 @@ export class TrackService {
 
         const trackId = uuidv4();
         await run(
-            `INSERT INTO tracks (id, name, artist, duration, size, file_path, hash)
-             VALUES (?, ?, ?, ?, ?, ?, ?)`,
+            `INSERT INTO tracks (id, name, artist, duration, size, file_path, hash, exists_on_disk)
+             VALUES (?, ?, ?, ?, ?, ?, ?, 1)`,
             [trackId, aliasName, existing.artist, existing.duration, existing.size, existing.file_path, existing.hash]
         );
 
         return await this.getTrackById(trackId);
+    }
+
+    /**
+     * Rename a track (both database and physical file)
+     */
+    static async renameTrack(id, newName, newFileNameBase) {
+        const existing = await this.getTrackById(id);
+        if (!existing) throw new Error('Track not found');
+
+        const fs = await import('fs');
+        const path = await import('path');
+        const { resolveUploadPath } = await import('../utils/paths.js');
+        const { isS3UploadStorage } = await import('./objectStorage.js');
+
+        if (isS3UploadStorage()) {
+            throw new Error('Physical renaming is not supported directly on S3 storage yet.');
+        }
+
+        const oldRelativePath = existing.file_path || '';
+        if (!oldRelativePath) throw new Error('Track has no physical file path');
+
+        const originalExt = path.extname(oldRelativePath);
+        // Clean the new file name base
+        const safeFileName = String(newFileNameBase).replace(/[^a-zA-Z0-9 _-]/g, '').trim() || 'Track';
+        const newFileName = `${safeFileName}${originalExt}`;
+        
+        const dir = path.dirname(oldRelativePath);
+        const newRelativePath = `${dir}/${newFileName}`;
+
+        if (oldRelativePath === newRelativePath && existing.name === newName) {
+            return existing; // Nothing to change
+        }
+
+        const oldAbsPath = resolveUploadPath(oldRelativePath);
+        const newAbsPath = resolveUploadPath(newRelativePath);
+
+        if (oldAbsPath !== newAbsPath && fs.existsSync(newAbsPath)) {
+            throw new Error('A file with this name already exists in the same directory.');
+        }
+
+        // 1. Rename physical file
+        if (oldAbsPath !== newAbsPath) {
+            if (!fs.existsSync(oldAbsPath)) throw new Error('Original physical file not found on disk.');
+            fs.renameSync(oldAbsPath, newAbsPath);
+        }
+
+        // 2. Update database
+        try {
+            await run(
+                'UPDATE tracks SET name = ?, file_path = ? WHERE id = ?',
+                [newName, newRelativePath, id]
+            );
+        } catch (error) {
+            // Rollback file rename if DB update fails (best effort)
+            if (oldAbsPath !== newAbsPath) {
+                try {
+                    fs.renameSync(newAbsPath, oldAbsPath);
+                } catch (rollbackError) {
+                    console.error('Failed to rollback physical file rename after DB error:', rollbackError);
+                }
+            }
+            throw error;
+        }
+
+        return await this.getTrackById(id);
     }
 
     /**

@@ -28,12 +28,32 @@ if (!fs.existsSync(dbDir)) {
 
 console.log('SQLite DB path:', dbPath);
 
-function ensureCoreSchema(database) {
+/**
+ * Promisified database actions for use during initialization/migration.
+ */
+function dbRun(database, sql, params = []) {
+  return new Promise((resolve, reject) => {
+    database.run(sql, params, function (err) {
+      if (err) reject(err);
+      else resolve({ id: this.lastID, changes: this.changes });
+    });
+  });
+}
+
+function dbAll(database, sql, params = []) {
+  return new Promise((resolve, reject) => {
+    database.all(sql, params, (err, rows) => {
+      if (err) reject(err);
+      else resolve(rows);
+    });
+  });
+}
+
+async function ensureCoreSchema(database) {
   // Ensure core tables exist for a fresh database (used by the packaged
   // Electron app) and then create helpful indexes. This is safe to run on
   // every startup.
-  database.serialize(() => {
-    database.run(`
+  await dbRun(database, `
       CREATE TABLE IF NOT EXISTS tracks (
         id TEXT PRIMARY KEY,
         name TEXT,
@@ -44,64 +64,81 @@ function ensureCoreSchema(database) {
         original_filename TEXT,
         hash TEXT,
         exists_on_disk INTEGER DEFAULT 1,
+        cue_in REAL DEFAULT 0,
+        cue_out REAL DEFAULT NULL,
         date_added DATETIME DEFAULT CURRENT_TIMESTAMP
       )
     `);
 
-    database.run(
-      `CREATE VIRTUAL TABLE IF NOT EXISTS tracks_fts USING fts5(
-        track_id UNINDEXED,
-        name,
-        artist,
-        original_filename,
-        tokenize='unicode61 remove_diacritics 2'
-      )`,
-      (ftsErr) => {
-        if (ftsErr) {
-          console.warn('FTS5 not available; library search will use fallback', ftsErr.message);
-          return;
-        }
-
-        database.run(
-          `CREATE TRIGGER IF NOT EXISTS tracks_fts_ai AFTER INSERT ON tracks BEGIN
-            INSERT INTO tracks_fts(track_id, name, artist, original_filename)
-            VALUES (new.id, new.name, new.artist, new.original_filename);
-          END;`,
-        );
-
-        database.run(
-          `CREATE TRIGGER IF NOT EXISTS tracks_fts_ad AFTER DELETE ON tracks BEGIN
-            DELETE FROM tracks_fts WHERE track_id = old.id;
-          END;`,
-        );
-
-        database.run(
-          `CREATE TRIGGER IF NOT EXISTS tracks_fts_au AFTER UPDATE ON tracks BEGIN
-            DELETE FROM tracks_fts WHERE track_id = old.id;
-            INSERT INTO tracks_fts(track_id, name, artist, original_filename)
-            VALUES (new.id, new.name, new.artist, new.original_filename);
-          END;`,
-        );
-
-        database.get('SELECT COUNT(1) AS c FROM tracks_fts', (countErr, row) => {
-          if (countErr) return;
-          const c = Number(row?.c || 0);
-          if (c > 0) return;
+  // We still use serialize for the FTS/Triggers block as it doesn't return Promises
+  // but we should ensure it completes. For simplicity, we'll keep the FTS logic
+  // callback-based but wrap it in a Promise for ensureCoreSchema to await.
+  await new Promise((resolve, reject) => {
+    database.serialize(() => {
+      database.run(
+        `CREATE VIRTUAL TABLE IF NOT EXISTS tracks_fts USING fts5(
+          track_id UNINDEXED,
+          name,
+          artist,
+          original_filename,
+          tokenize='unicode61 remove_diacritics 2'
+        )`,
+        (ftsErr) => {
+          if (ftsErr) {
+            console.warn('FTS5 not available; library search will use fallback', ftsErr.message);
+            resolve(); // Non-critical failure
+            return;
+          }
 
           database.run(
-            `INSERT INTO tracks_fts(track_id, name, artist, original_filename)
-             SELECT id, name, artist, original_filename FROM tracks`,
-            (fillErr) => {
-              if (fillErr) {
-                console.warn('Failed to backfill tracks_fts', fillErr.message);
-              }
-            },
+            `CREATE TRIGGER IF NOT EXISTS tracks_fts_ai AFTER INSERT ON tracks BEGIN
+              INSERT INTO tracks_fts(track_id, name, artist, original_filename)
+              VALUES (new.id, new.name, new.artist, new.original_filename);
+            END;`,
           );
-        });
-      },
-    );
 
-    database.run(`
+          database.run(
+            `CREATE TRIGGER IF NOT EXISTS tracks_fts_ad AFTER DELETE ON tracks BEGIN
+              DELETE FROM tracks_fts WHERE track_id = old.id;
+            END;`,
+          );
+
+          database.run(
+            `CREATE TRIGGER IF NOT EXISTS tracks_fts_au AFTER UPDATE ON tracks BEGIN
+              DELETE FROM tracks_fts WHERE track_id = old.id;
+              INSERT INTO tracks_fts(track_id, name, artist, original_filename)
+              VALUES (new.id, new.name, new.artist, new.original_filename);
+            END;`,
+          );
+
+          database.get('SELECT COUNT(1) AS c FROM tracks_fts', (countErr, row) => {
+            if (countErr) {
+              resolve();
+              return;
+            }
+            const c = Number(row?.c || 0);
+            if (c > 0) {
+              resolve();
+              return;
+            }
+
+            database.run(
+              `INSERT INTO tracks_fts(track_id, name, artist, original_filename)
+               SELECT id, name, artist, original_filename FROM tracks`,
+              (fillErr) => {
+                if (fillErr) {
+                  console.warn('Failed to backfill tracks_fts', fillErr.message);
+                }
+                resolve();
+              },
+            );
+          });
+        },
+      );
+    });
+  });
+
+  await dbRun(database, `
       CREATE TABLE IF NOT EXISTS playlists (
         id TEXT PRIMARY KEY,
         name TEXT NOT NULL,
@@ -110,7 +147,7 @@ function ensureCoreSchema(database) {
       )
     `);
 
-    database.run(`
+  await dbRun(database, `
       CREATE TABLE IF NOT EXISTS playlist_tracks (
         playlist_id TEXT NOT NULL,
         track_id TEXT NOT NULL,
@@ -121,7 +158,7 @@ function ensureCoreSchema(database) {
       )
     `);
 
-    database.run(`
+  await dbRun(database, `
       CREATE TABLE IF NOT EXISTS queue (
         id TEXT PRIMARY KEY,
         track_id TEXT NOT NULL,
@@ -132,7 +169,7 @@ function ensureCoreSchema(database) {
       )
     `);
 
-    database.run(`
+  await dbRun(database, `
       CREATE TABLE IF NOT EXISTS schedules (
         id TEXT PRIMARY KEY,
         playlist_id TEXT NOT NULL,
@@ -150,40 +187,29 @@ function ensureCoreSchema(database) {
       )
     `);
 
-    // Lightweight migration: older installs may not have lock_playlist on schedules.
-    database.all(`PRAGMA table_info(schedules)`, (pragmaErr, cols) => {
-      if (pragmaErr) {
-        console.error('Failed to inspect schedules table for migrations', pragmaErr.message);
-        return;
-      }
+  // Migration: schedules.lock_playlist
+  const scheduleCols = await dbAll(database, `PRAGMA table_info(schedules)`);
+  const hasLockPlaylist = scheduleCols.some((c) => c.name === 'lock_playlist');
+  if (!hasLockPlaylist) {
+    await dbRun(database, `ALTER TABLE schedules ADD COLUMN lock_playlist INTEGER DEFAULT 0`);
+  }
 
-      const hasLockPlaylist = Array.isArray(cols) && cols.some((c) => c.name === 'lock_playlist');
-      if (!hasLockPlaylist) {
-        database.run(`ALTER TABLE schedules ADD COLUMN lock_playlist INTEGER DEFAULT 0`, (alterErr) => {
-          if (alterErr) {
-            console.error('Failed to add schedules.lock_playlist column', alterErr.message);
-          }
-        });
-      }
-    });
+  // Migration: tracks.exists_on_disk and cues
+  const trackCols = await dbAll(database, `PRAGMA table_info(tracks)`);
+  const hasExistsOnDisk = trackCols.some((c) => c.name === 'exists_on_disk');
+  if (!hasExistsOnDisk) {
+    console.log('[Migration] Adding exists_on_disk column to tracks table...');
+    await dbRun(database, `ALTER TABLE tracks ADD COLUMN exists_on_disk INTEGER DEFAULT 1`);
+  }
+  
+  const hasCueIn = trackCols.some((c) => c.name === 'cue_in');
+  if (!hasCueIn) {
+    console.log('[Migration] Adding cue_in and cue_out columns to tracks table...');
+    await dbRun(database, `ALTER TABLE tracks ADD COLUMN cue_in REAL DEFAULT 0`);
+    await dbRun(database, `ALTER TABLE tracks ADD COLUMN cue_out REAL DEFAULT NULL`);
+  }
 
-    // Migration: ensure tracks has exists_on_disk
-    database.all(`PRAGMA table_info(tracks)`, (pragmaErr, cols) => {
-      if (pragmaErr) {
-        console.error('Failed to inspect tracks table for migrations', pragmaErr.message);
-        return;
-      }
-      const hasExistsOnDisk = Array.isArray(cols) && cols.some((c) => c.name === 'exists_on_disk');
-      if (!hasExistsOnDisk) {
-        database.run(`ALTER TABLE tracks ADD COLUMN exists_on_disk INTEGER DEFAULT 1`, (alterErr) => {
-          if (alterErr) {
-            console.error('Failed to add tracks.exists_on_disk column', alterErr.message);
-          }
-        });
-      }
-    });
-
-    database.run(`
+  await dbRun(database, `
       CREATE TABLE IF NOT EXISTS playback_history (
         id TEXT PRIMARY KEY,
         track_id TEXT NOT NULL,
@@ -199,21 +225,20 @@ function ensureCoreSchema(database) {
       )
     `);
 
-    database.run(`
+  await dbRun(database, `
       CREATE TABLE IF NOT EXISTS settings (
         key TEXT PRIMARY KEY,
         value TEXT NOT NULL,
         updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
       )
     `);
-    database.run(
-      `INSERT OR IGNORE INTO settings (key, value) VALUES
+
+  await dbRun(database, `INSERT OR IGNORE INTO settings (key, value) VALUES
         ('playback.transition_mode', 'gap'),
         ('playback.gap_seconds', '2'),
-        ('playback.crossfade_seconds', '2')`,
-    );
+        ('playback.crossfade_seconds', '2')`);
 
-    database.run(`
+  await dbRun(database, `
       CREATE TABLE IF NOT EXISTS folders (
         id TEXT PRIMARY KEY,
         name TEXT NOT NULL,
@@ -221,105 +246,37 @@ function ensureCoreSchema(database) {
       )
     `);
 
-    database.all(`PRAGMA table_info(folders)`, (pragmaErr, cols) => {
-      if (pragmaErr) {
-        console.error('Failed to inspect folders table for migrations', pragmaErr.message);
-        return;
-      }
+  const folderCols = await dbAll(database, `PRAGMA table_info(folders)`);
+  const hasParentId = folderCols.some((c) => c.name === 'parent_id');
 
-      const hasParentId = Array.isArray(cols) && cols.some((c) => c.name === 'parent_id');
-      if (hasParentId) {
-        database.run(`UPDATE folders SET parent_id = '' WHERE parent_id IS NULL`);
-
-        database.run(
-          `CREATE UNIQUE INDEX IF NOT EXISTS idx_folders_parent_name ON folders (parent_id, name COLLATE NOCASE)`
-        );
-
-        database.run(`CREATE INDEX IF NOT EXISTS idx_folders_parent_id ON folders (parent_id)`);
-        return;
-      }
-
-      // Migration from legacy folders schema (name globally UNIQUE, no parent_id)
-      database.run('BEGIN IMMEDIATE TRANSACTION', (beginErr) => {
-        if (beginErr) {
-          console.error('Failed to start folders migration transaction', beginErr.message);
-          return;
-        }
-
-        database.run(
-          `CREATE TABLE IF NOT EXISTS folders__migrated (
+  if (hasParentId) {
+    await dbRun(database, `UPDATE folders SET parent_id = '' WHERE parent_id IS NULL`);
+    await dbRun(database, `CREATE UNIQUE INDEX IF NOT EXISTS idx_folders_parent_name ON folders (parent_id, name COLLATE NOCASE)`);
+    await dbRun(database, `CREATE INDEX IF NOT EXISTS idx_folders_parent_id ON folders (parent_id)`);
+  } else {
+    // Migration from legacy folders
+    console.log('[Migration] Migrating folders table schema...');
+    await dbRun(database, 'BEGIN IMMEDIATE TRANSACTION');
+    try {
+      await dbRun(database, `CREATE TABLE IF NOT EXISTS folders__migrated (
             id TEXT PRIMARY KEY,
             name TEXT NOT NULL,
             parent_id TEXT NOT NULL DEFAULT ''
-          )`,
-          (createErr) => {
-            if (createErr) {
-              console.error('Failed to create folders migration table', createErr.message);
-              database.run('ROLLBACK');
-              return;
-            }
+          )`);
+      await dbRun(database, `INSERT OR IGNORE INTO folders__migrated (id, name, parent_id)
+               SELECT id, name, '' FROM folders`);
+      await dbRun(database, `DROP TABLE folders`);
+      await dbRun(database, `ALTER TABLE folders__migrated RENAME TO folders`);
+      await dbRun(database, `CREATE UNIQUE INDEX IF NOT EXISTS idx_folders_parent_name ON folders (parent_id, name COLLATE NOCASE)`);
+      await dbRun(database, `CREATE INDEX IF NOT EXISTS idx_folders_parent_id ON folders (parent_id)`);
+      await dbRun(database, 'COMMIT');
+    } catch (err) {
+      console.error('Failed to migrate folders table', err);
+      await dbRun(database, 'ROLLBACK');
+    }
+  }
 
-            database.run(
-              `INSERT OR IGNORE INTO folders__migrated (id, name, parent_id)
-               SELECT id, name, '' FROM folders`,
-              (copyErr) => {
-                if (copyErr) {
-                  console.error('Failed to copy legacy folders data', copyErr.message);
-                  database.run('ROLLBACK');
-                  return;
-                }
-
-                database.run(`DROP TABLE folders`, (dropErr) => {
-                  if (dropErr) {
-                    console.error('Failed to drop legacy folders table', dropErr.message);
-                    database.run('ROLLBACK');
-                    return;
-                  }
-
-                  database.run(`ALTER TABLE folders__migrated RENAME TO folders`, (renameErr) => {
-                    if (renameErr) {
-                      console.error('Failed to rename migrated folders table', renameErr.message);
-                      database.run('ROLLBACK');
-                      return;
-                    }
-
-                    database.run(
-                      `CREATE UNIQUE INDEX IF NOT EXISTS idx_folders_parent_name ON folders (parent_id, name COLLATE NOCASE)`,
-                      (idxErr) => {
-                        if (idxErr) {
-                          console.error('Failed to ensure folders unique index', idxErr.message);
-                          database.run('ROLLBACK');
-                          return;
-                        }
-
-                        database.run(
-                          `CREATE INDEX IF NOT EXISTS idx_folders_parent_id ON folders (parent_id)`,
-                          (idx2Err) => {
-                            if (idx2Err) {
-                              console.error('Failed to ensure folders parent index', idx2Err.message);
-                              database.run('ROLLBACK');
-                              return;
-                            }
-
-                            database.run('COMMIT', (commitErr) => {
-                              if (commitErr) {
-                                console.error('Failed to commit folders migration', commitErr.message);
-                              }
-                            });
-                          }
-                        );
-                      }
-                    );
-                  });
-                });
-              }
-            );
-          }
-        );
-      });
-    });
-
-    database.run(`
+  await dbRun(database, `
       CREATE TABLE IF NOT EXISTS folder_tracks (
         folder_id TEXT NOT NULL,
         track_id TEXT NOT NULL,
@@ -327,37 +284,29 @@ function ensureCoreSchema(database) {
       )
     `);
 
-    const indexSpecs = [
-      { sql: 'CREATE INDEX IF NOT EXISTS idx_playlists_created_at ON playlists (created_at)', table: 'playlists' },
-      { sql: 'CREATE INDEX IF NOT EXISTS idx_playlist_tracks_playlist_position ON playlist_tracks (playlist_id, position)', table: 'playlist_tracks' },
-      { sql: 'CREATE INDEX IF NOT EXISTS idx_queue_track_id ON queue (track_id)', table: 'queue' },
-      { sql: 'CREATE INDEX IF NOT EXISTS idx_queue_order ON queue (order_position)', table: 'queue' },
-      { sql: 'CREATE INDEX IF NOT EXISTS idx_history_played_at ON playback_history (played_at)', table: 'playback_history' },
-      { sql: 'CREATE INDEX IF NOT EXISTS idx_history_track_id ON playback_history (track_id)', table: 'playback_history' },
-      { sql: 'CREATE INDEX IF NOT EXISTS idx_schedules_status_date_time ON schedules (status, date_time)', table: 'schedules' },
-      { sql: 'CREATE INDEX IF NOT EXISTS idx_schedules_queue_song ON schedules (queue_song_id)', table: 'schedules' },
-      { sql: 'CREATE INDEX IF NOT EXISTS idx_tracks_hash ON tracks (hash)', table: 'tracks' },
-      { sql: 'CREATE INDEX IF NOT EXISTS idx_tracks_date_added ON tracks (date_added)', table: 'tracks' },
-      { sql: 'CREATE INDEX IF NOT EXISTS idx_tracks_name ON tracks (name COLLATE NOCASE)', table: 'tracks' },
-      { sql: 'CREATE INDEX IF NOT EXISTS idx_tracks_artist ON tracks (artist COLLATE NOCASE)', table: 'tracks' },
-    ];
+  const indexSpecs = [
+    { sql: 'CREATE INDEX IF NOT EXISTS idx_playlists_created_at ON playlists (created_at)', table: 'playlists' },
+    { sql: 'CREATE INDEX IF NOT EXISTS idx_playlist_tracks_playlist_position ON playlist_tracks (playlist_id, position)', table: 'playlist_tracks' },
+    { sql: 'CREATE INDEX IF NOT EXISTS idx_queue_track_id ON queue (track_id)', table: 'queue' },
+    { sql: 'CREATE INDEX IF NOT EXISTS idx_queue_order ON queue (order_position)', table: 'queue' },
+    { sql: 'CREATE INDEX IF NOT EXISTS idx_history_played_at ON playback_history (played_at)', table: 'playback_history' },
+    { sql: 'CREATE INDEX IF NOT EXISTS idx_history_track_id ON playback_history (track_id)', table: 'playback_history' },
+    { sql: 'CREATE INDEX IF NOT EXISTS idx_schedules_status_date_time ON schedules (status, date_time)', table: 'schedules' },
+    { sql: 'CREATE INDEX IF NOT EXISTS idx_schedules_queue_song ON schedules (queue_song_id)', table: 'schedules' },
+    { sql: 'CREATE INDEX IF NOT EXISTS idx_tracks_hash ON tracks (hash)', table: 'tracks' },
+    { sql: 'CREATE INDEX IF NOT EXISTS idx_tracks_date_added ON tracks (date_added)', table: 'tracks' },
+    { sql: 'CREATE INDEX IF NOT EXISTS idx_tracks_name ON tracks (name COLLATE NOCASE)', table: 'tracks' },
+    { sql: 'CREATE INDEX IF NOT EXISTS idx_tracks_artist ON tracks (artist COLLATE NOCASE)', table: 'tracks' },
+  ];
 
-    database.all("SELECT name FROM sqlite_master WHERE type='table'", (e, rows) => {
-      if (e) {
-        console.error('Failed to inspect database tables for index creation', e.message);
-        return;
-      }
-      const existingTables = new Set(rows.map((r) => r.name));
-      indexSpecs.forEach(({ sql, table }) => {
-        if (!existingTables.has(table)) return;
-        database.run(sql, (err2) => {
-          if (err2) {
-            console.error('Failed to ensure index:', sql, err2.message);
-          }
-        });
-      });
-    });
-  });
+  const tables = await dbAll(database, "SELECT name FROM sqlite_master WHERE type='table'");
+  const existingTables = new Set(tables.map((r) => r.name));
+
+  for (const { sql, table } of indexSpecs) {
+    if (existingTables.has(table)) {
+      await dbRun(database, sql);
+    }
+  }
 }
 
 function openDatabaseConnection() {
@@ -378,13 +327,13 @@ export let db = await openDatabaseConnection().catch((err) => {
 });
 
 console.log('Connected to SQLite database');
-ensureCoreSchema(db);
+await ensureCoreSchema(db);
 
 export async function reconnectDatabase() {
   const previous = db;
   await new Promise((resolve) => previous.close(() => resolve()));
   db = await openDatabaseConnection();
-  ensureCoreSchema(db);
+  await ensureCoreSchema(db);
   return db;
 }
 

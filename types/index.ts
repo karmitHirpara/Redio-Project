@@ -7,6 +7,8 @@ export interface Track {
   dateAdded: Date;
   filePath: string;
   hash: string;
+  cueIn?: number;
+  cueOut?: number;
 }
 
 export interface Playlist {

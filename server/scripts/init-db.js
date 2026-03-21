@@ -36,6 +36,9 @@ db.serialize(() => {
       file_path TEXT NOT NULL,
       original_filename TEXT,
       hash TEXT NOT NULL,
+      exists_on_disk INTEGER DEFAULT 1,
+      cue_in REAL DEFAULT 0,
+      cue_out REAL DEFAULT NULL,
       date_added DATETIME DEFAULT CURRENT_TIMESTAMP
     )
   `);
@@ -130,18 +133,19 @@ db.serialize(() => {
   console.log('Creating tables...');
 
   // Demo tracks
+  const trackStmt = db.prepare(`
+    INSERT INTO tracks (id, name, artist, duration, size, file_path, original_filename, hash, exists_on_disk)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `);
+
   const demoTracks = [
-    ['track1', 'Summer Vibes', 'DJ Solar', 215, 5242880, '/demo/summer-vibes.mp3', 'summer-vibes.mp3', 'hash1'],
-    ['track2', 'Midnight Drive', 'The Nocturnes', 198, 4718592, '/demo/midnight-drive.mp3', 'midnight-drive.mp3', 'hash2'],
-    ['track3', 'Electric Dreams', 'Synthwave Station', 267, 6291456, '/demo/electric-dreams.mp3', 'electric-dreams.mp3', 'hash3'],
-    ['track4', 'Morning Coffee', 'Acoustic Blend', 183, 4404019, '/demo/morning-coffee.mp3', 'morning-coffee.mp3', 'hash4'],
-    ['track5', 'Rush Hour', 'Urban Beats', 201, 4823449, '/demo/rush-hour.mp3', 'rush-hour.mp3', 'hash5']
+    ['track1', 'Summer Vibes', 'DJ Solar', 215, 5242880, '/demo/summer-vibes.mp3', 'summer-vibes.mp3', 'hash1', 0],
+    ['track2', 'Midnight Drive', 'The Nocturnes', 198, 4718592, '/demo/midnight-drive.mp3', 'midnight-drive.mp3', 'hash2', 0],
+    ['track3', 'Electric Dreams', 'Synthwave Station', 267, 6291456, '/demo/electric-dreams.mp3', 'electric-dreams.mp3', 'hash3', 0],
+    ['track4', 'Morning Coffee', 'Acoustic Blend', 183, 4404019, '/demo/morning-coffee.mp3', 'morning-coffee.mp3', 'hash4', 0],
+    ['track5', 'Rush Hour', 'Urban Beats', 201, 4823449, '/demo/rush-hour.mp3', 'rush-hour.mp3', 'hash5', 0]
   ];
 
-  const trackStmt = db.prepare(`
-    INSERT INTO tracks (id, name, artist, duration, size, file_path, original_filename, hash)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-  `);
 
   demoTracks.forEach(track => trackStmt.run(track));
   trackStmt.finalize();

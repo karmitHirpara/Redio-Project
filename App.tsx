@@ -59,7 +59,7 @@ export default function App() {
   const [queue, setQueue] = useState<QueueItem[]>([]);
   const [currentQueueItemId, setCurrentQueueItemId] = useState<string | null>(null);
   const [isPlaying, setIsPlaying] = useState(false);
-  const [isLive] = useState(true); // setIsLive removed, so it's effectively a constant
+  const [isLive, setIsLive] = useState(false); // Live = stops at end of track. Auto = plays continuously.
   const [scheduledPlaylists, setScheduledPlaylists] = useState<ScheduledPlaylist[]>([]);
   const [transitionMode, setTransitionMode] = useState<'gap' | 'crossfade'>('gap');
   const [gapSeconds, setGapSeconds] = useState(2);
@@ -847,6 +847,9 @@ export default function App() {
         setTransitionMode(mode);
         setGapSeconds(Number.isFinite(gapRaw) ? Math.min(12, Math.max(0, Math.round(gapRaw))) : 2);
         setCrossfadeSeconds(Number.isFinite(cfRaw) ? Math.min(12, Math.max(0, Math.round(cfRaw))) : 2);
+
+        const liveRaw = String(payload?.settings?.['playback.is_live'] || 'false');
+        setIsLive(liveRaw === 'true');
       } catch {
         // ignore
       }
@@ -869,6 +872,7 @@ export default function App() {
         'playback.transition_mode': transitionMode,
         'playback.gap_seconds': gapSeconds,
         'playback.crossfade_seconds': crossfadeSeconds,
+        'playback.is_live': String(isLive),
       });
     }, 400);
 
@@ -878,7 +882,7 @@ export default function App() {
         settingsSaveTimerRef.current = null;
       }
     };
-  }, [transitionMode, gapSeconds, crossfadeSeconds]);
+  }, [transitionMode, gapSeconds, crossfadeSeconds, isLive]);
 
   const handleDropTrackOnPlaylistHeader = async (playlistId: string, trackIds: string[]) => {
     for (const trackId of trackIds) {
@@ -2110,7 +2114,7 @@ export default function App() {
     }
   };
 
-  const handleNext = () => {
+  const handleNext = (isAutoAdvance: boolean = false) => {
     if (queue.length === 0) return;
 
     const currentIndex = currentQueueItemId
@@ -2201,8 +2205,15 @@ export default function App() {
 
     if (baseQueue.length > 0) {
       setCurrentQueueItemId(baseQueue[0].id);
-      setIsPlaying(true);
-      setNowPlayingStart(nowIst ?? new Date());
+      // In Live mode, auto-advances stop playback at the next cued track.
+      // Auto mode (or manual clicks) start playing immediately.
+      if (isLive && isAutoAdvance) {
+        setIsPlaying(false);
+        setNowPlayingStart(null);
+      } else {
+        setIsPlaying(true);
+        setNowPlayingStart(nowIst ?? new Date());
+      }
     } else {
       setCurrentQueueItemId(null);
       setIsPlaying(false);
@@ -2521,9 +2532,10 @@ export default function App() {
           scheduledGapOverride={scheduledGapOverride}
           isPlaying={isPlaying}
           onPlayPause={handlePlayPause}
-          onNext={handleNext}
+          onNext={() => handleNext(false)}
           onPrevious={handlePrevious}
           isLive={isLive}
+          onIsLiveChange={setIsLive}
           transitionMode={transitionMode}
           onTransitionModeChange={setTransitionMode}
           gapSeconds={gapSeconds}

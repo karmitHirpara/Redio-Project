@@ -1,20 +1,12 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { toast } from 'sonner';
 import { Track } from '../types';
-import { resolveUploadsUrl } from '../services/api';
+import { resolveUploadsUrl, tracksAPI } from '../services/api';
 import { Button } from './ui/button';
 import { StepperInput } from './ui/stepper-input';
 import { Slider } from './ui/slider';
 import { Switch } from './ui/switch';
 import { Label } from './ui/label';
-import {
-  Dialog,
-  DialogContent,
-  DialogDescription,
-  DialogFooter,
-  DialogHeader,
-  DialogTitle,
-} from './ui/dialog';
 import {
   Select,
   SelectContent,
@@ -22,8 +14,8 @@ import {
   SelectTrigger,
   SelectValue,
 } from './ui/select';
-import { tracksAPI } from '../services/api';
 import { ConfirmDialog } from './ConfirmDialog';
+import { AnimatePresence, motion, useReducedMotion } from 'framer-motion';
 
 type SilenceDetectionResult = {
   leadingSilenceSeconds: number;
@@ -106,6 +98,7 @@ export function EditSongDialog(props: {
   const { open, onOpenChange, track, onTrackUpdated, playlistContext } = props;
   const isDark = typeof window !== 'undefined' && document.documentElement.classList.contains('dark');
   const theme = isDark ? 'dark' : 'light';
+  const reduceMotion = useReducedMotion() ?? false;
 
   const duration = useMemo(() => Math.max(0, Number(track.duration || 0)), [track.duration]);
 
@@ -454,144 +447,192 @@ export function EditSongDialog(props: {
 
   return (
     <>
-      <Dialog
-        open={open}
-        onOpenChange={onOpenChange}
-        modal={false}
-      >
-        <DialogContent
-          className="sm:max-w-3xl border shadow-lg"
-          onInteractOutside={(e) => {
-            // Do not close when interacting outside
-            e.preventDefault();
-          }}
-          onEscapeKeyDown={(e) => {
-            // Optional: allow escape key to close. If they want only explicit UI, we stay preventDefault or let it close. Let's close on escape but not clicking outside. Or they said "click on close icons, cancle button so that close and not close of out of box area". So prevent interacting outside.
-          }}
-        >
-          <DialogHeader>
-            <DialogTitle>Trim boundaries</DialogTitle>
-            <DialogDescription className="text-xs font-mono opacity-70 truncate max-w-xl">
-              {track.name}
-            </DialogDescription>
-          </DialogHeader>
-
-          <audio ref={testAudioRef} className="hidden" />
-
-          <div className="space-y-6 pt-2">
-            {/* Header Controls Block */}
-            <div className="flex items-center justify-between">
-              <div className="flex items-center space-x-2">
-                <Switch
-                  id="auto-silence"
-                  checked={autoRemoveSilence}
-                  onCheckedChange={setAutoRemoveSilence}
-                  disabled={!analysis || isWaveformLoading}
-                />
-                <Label htmlFor="auto-silence" className="text-xs font-semibold cursor-pointer select-none">
-                  Auto-remove silence
-                </Label>
-                {isWaveformLoading && (
-                  <span className="text-[11px] text-muted-foreground animate-pulse ml-2">Analyzing...</span>
-                )}
+      <AnimatePresence>
+        {open && (
+          <motion.div
+            className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm"
+            initial={reduceMotion ? false : { opacity: 0 }}
+            animate={reduceMotion ? undefined : { opacity: 1 }}
+            exit={reduceMotion ? undefined : { opacity: 0 }}
+            transition={reduceMotion ? undefined : { duration: 0.2, ease: 'easeOut' }}
+          >
+            <motion.div
+              className="w-full max-w-4xl rounded-xl border border-border/60 bg-background text-foreground shadow-2xl p-6"
+              onClick={(e) => e.stopPropagation()}
+              initial={reduceMotion ? false : { opacity: 0, scale: 0.98, y: 8 }}
+              animate={reduceMotion ? undefined : { opacity: 1, scale: 1, y: 0 }}
+              exit={reduceMotion ? undefined : { opacity: 0, scale: 0.98, y: 8 }}
+              transition={reduceMotion ? undefined : { duration: 0.25, ease: [0.16, 1, 0.3, 1] }}
+            >
+              <div className="flex items-center justify-between mb-2">
+                <div>
+                  <h3 className="text-base font-semibold tracking-tight text-foreground">
+                    Trim boundaries
+                  </h3>
+                  <p className="text-[10px] font-mono opacity-70 truncate max-w-xl text-muted-foreground mt-0.5">
+                    {track.name}
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => onOpenChange(false)}
+                  className="text-muted-foreground hover:text-foreground text-xl leading-none px-2 h-8 w-8 flex items-center justify-center rounded-full hover:bg-muted/50 transition-colors"
+                >
+                  ×
+                </button>
               </div>
 
-              <div className="text-[11px] text-muted-foreground font-mono bg-muted px-2 py-1 rounded">
-                Kept: {editedDuration.toFixed(3)}s / Base: {duration.toFixed(3)}s
-              </div>
-            </div>
+              <audio ref={testAudioRef} className="hidden" />
 
-            {/* Master Timeline Editor */}
-            <div className="relative w-full h-[120px] rounded-lg border bg-black/5 dark:bg-black/40 overflow-hidden ring-1 ring-inset ring-black/10">
-              {/* Embedded visually-matched canvas */}
-              <canvas
-                ref={waveformCanvasRef}
-                className="absolute inset-0 w-full h-full"
-              />
-              {/* Transparent overlay slider styled to act as the direct bounding box editor */}
-              <Slider
-                className="absolute inset-0 w-full h-full opacity-0 hover:opacity-100 transition-opacity [&_[role=slider]]:h-full [&_[role=slider]]:w-4 [&_[role=slider]]:rounded-[1px] [&_[role=slider]]:bg-primary [&_[role=slider]]:border-0 cursor-ew-resize mix-blend-overlay"
-                value={[startSeconds, endSeconds]}
-                min={0}
-                max={duration}
-                step={0.001}
-                onValueChange={(v) => {
-                  const s = roundMs(Number(v?.[0] ?? 0));
-                  const e = roundMs(Number(v?.[1] ?? 0));
-                  if (autoRemoveSilence) setAutoRemoveSilence(false);
-                  setStartSeconds(clamp(s, 0, duration));
-                  setEndSeconds(clamp(e, s, duration));
-                  setPlayheadSeconds(s);
-                }}
-              />
-            </div>
+              <div className="space-y-6 pt-4">
+                {/* Header Controls Block */}
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center space-x-2">
+                    <Switch
+                      id="auto-silence"
+                      checked={autoRemoveSilence}
+                      onCheckedChange={setAutoRemoveSilence}
+                      disabled={!analysis || isWaveformLoading}
+                    />
+                    <Label htmlFor="auto-silence" className="text-xs font-semibold cursor-pointer select-none">
+                      Auto-remove silence
+                    </Label>
+                    {isWaveformLoading && (
+                      <span className="text-[11px] text-muted-foreground animate-pulse ml-2">Analyzing...</span>
+                    )}
+                  </div>
 
-            <div className="grid grid-cols-2 gap-6">
-              <div className="space-y-1.5">
-                <div className="text-[10px] font-semibold text-muted-foreground uppercase tracking-wider">Start Point (sec)</div>
-                <StepperInput value={startSeconds} min={0} max={endSeconds} step={0.001} showButtons={false} onChange={(v) => {
-                  setStartSeconds(roundMs(v));
-                  if (autoRemoveSilence) setAutoRemoveSilence(false);
-                }} />
-              </div>
-              <div className="space-y-1.5">
-                <div className="text-[10px] font-semibold text-muted-foreground uppercase tracking-wider">End Point (sec)</div>
-                <StepperInput value={endSeconds} min={startSeconds} max={duration} step={0.001} showButtons={false} onChange={(v) => {
-                  setEndSeconds(roundMs(v));
-                  if (autoRemoveSilence) setAutoRemoveSilence(false);
-                }} />
-              </div>
-            </div>
+                  <div className="text-[11px] text-muted-foreground font-mono bg-muted/50 px-3 py-1.5 rounded-md border border-border/40">
+                    <span className="text-primary font-bold">{editedDuration.toFixed(3)}s</span>
+                    <span className="mx-2 opacity-30">/</span>
+                    <span className="opacity-70">{duration.toFixed(3)}s</span>
+                  </div>
+                </div>
 
-            <div className="bg-secondary/40 rounded-lg p-3 grid grid-cols-[2fr_1fr] gap-4 items-end mt-2 border border-border/50">
-              <div className="space-y-2">
-                <div className="text-[11px] font-semibold mb-1">Preview Audio Out</div>
-                <Select value={testDeviceId} onValueChange={(v) => setTestDeviceId(v)}>
-                  <SelectTrigger size="sm" className="h-8 text-xs bg-background">
-                    <SelectValue placeholder="System default" />
-                  </SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value="default">System default (OS)</SelectItem>
-                    {devices.map((d) => (
-                      <SelectItem key={d.deviceId} value={d.deviceId}>
-                        {d.label}
-                      </SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
+                {/* Master Timeline Editor */}
+                <div className="relative w-full h-[140px] rounded-xl border border-border/60 bg-black/[0.02] dark:bg-black/20 overflow-hidden shadow-inner">
+                  {/* Embedded visually-matched canvas */}
+                  <canvas
+                    ref={waveformCanvasRef}
+                    className="absolute inset-0 w-full h-full"
+                  />
+                  {/* Transparent overlay slider styled to act as the direct bounding box editor */}
+                  <Slider
+                    className="absolute inset-0 w-full h-full opacity-0 hover:opacity-100 transition-opacity [&_[role=slider]]:h-full [&_[role=slider]]:w-4 [&_[role=slider]]:rounded-[2px] [&_[role=slider]]:bg-primary [&_[role=slider]]:shadow-lg [&_[role=slider]]:border-x [&_[role=slider]]:border-primary-foreground/20 cursor-ew-resize mix-blend-overlay"
+                    value={[startSeconds, endSeconds]}
+                    min={0}
+                    max={duration}
+                    step={0.001}
+                    onValueChange={(v) => {
+                      const s = roundMs(Number(v?.[0] ?? 0));
+                      const e = roundMs(Number(v?.[1] ?? 0));
+                      if (autoRemoveSilence) setAutoRemoveSilence(false);
+                      setStartSeconds(clamp(s, 0, duration));
+                      setEndSeconds(clamp(e, s, duration));
+                      setPlayheadSeconds(s);
+                    }}
+                  />
+                </div>
+
+                <div className="grid grid-cols-2 gap-8 px-1">
+                  <div className="space-y-2">
+                    <div className="text-[10px] font-bold text-muted-foreground uppercase tracking-widest pl-1">START POINT</div>
+                    <StepperInput 
+                      value={startSeconds} 
+                      min={0} 
+                      max={endSeconds} 
+                      step={0.001} 
+                      showButtons={false} 
+                      onChange={(v) => {
+                        setStartSeconds(roundMs(v));
+                        if (autoRemoveSilence) setAutoRemoveSilence(false);
+                      }}
+                      className="bg-background border-border/60 focus:scale-[1.01] transition-transform"
+                    />
+                  </div>
+                  <div className="space-y-2">
+                    <div className="text-[10px] font-bold text-muted-foreground uppercase tracking-widest pl-1">END POINT</div>
+                    <StepperInput 
+                      value={endSeconds} 
+                      min={startSeconds} 
+                      max={duration} 
+                      step={0.001} 
+                      showButtons={false} 
+                      onChange={(v) => {
+                        setEndSeconds(roundMs(v));
+                        if (autoRemoveSilence) setAutoRemoveSilence(false);
+                      }}
+                      className="bg-background border-border/60 focus:scale-[1.01] transition-transform"
+                    />
+                  </div>
+                </div>
+
+                <div className="bg-muted/30 rounded-xl p-4 grid grid-cols-[1fr_auto] gap-6 items-end mt-4 border border-border/40">
+                  <div className="space-y-2">
+                    <div className="text-[11px] font-bold text-muted-foreground uppercase tracking-wider mb-1 px-1">PREVIEW OUTPUT</div>
+                    <Select value={testDeviceId} onValueChange={(v) => setTestDeviceId(v)}>
+                      <SelectTrigger size="sm" className="h-9 text-xs bg-background border-border/60 hover:border-primary/50 transition-colors">
+                        <SelectValue placeholder="System default" />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="default">System default (OS)</SelectItem>
+                        {devices.map((d) => (
+                          <SelectItem key={d.deviceId} value={d.deviceId}>
+                            {d.label}
+                          </SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                  </div>
+                  <div className="flex justify-end h-9">
+                    <Button 
+                      type="button" 
+                      variant="outline" 
+                      size="sm" 
+                      className="h-full px-8 shadow-sm font-semibold hover:border-primary/50 transition-all active:scale-95" 
+                      onClick={() => void handleTest()}
+                    >
+                      {isTesting ? '⏹ Stop' : '▶ Preview'}
+                    </Button>
+                  </div>
+                </div>
               </div>
-              <div className="flex justify-end">
-                <Button type="button" variant="outline" size="sm" className="h-8 w-full shadow-sm font-medium" onClick={() => void handleTest()}>
-                  {isTesting ? '⏹ Stop' : '▶ Preview'}
+
+              <div className="mt-8 flex flex-col sm:flex-row gap-3 pt-6 border-t border-border/40">
+                <Button 
+                  type="button" 
+                  variant="ghost" 
+                  size="sm"
+                  onClick={() => onOpenChange(false)} 
+                  disabled={isSaving} 
+                  className="sm:mr-auto h-9 px-6 hover:bg-muted transition-all"
+                >
+                  Close
+                </Button>
+                <Button
+                  type="button"
+                  size="sm"
+                  variant="secondary"
+                  className="h-9 px-6 shadow-sm font-semibold transition-all hover:scale-105 active:scale-95"
+                  disabled={isSaving || editedDuration === 0}
+                  onClick={() => handleSave('duplicate')}
+                >
+                  Duplicate & Save
+                </Button>
+                <Button
+                  type="button"
+                  size="sm"
+                  className="h-9 px-8 shadow-sm font-bold transition-all hover:scale-105 active:scale-95"
+                  disabled={isSaving || editedDuration === 0}
+                  onClick={() => setSaveConfirmOpen(true)}
+                >
+                  Save file
                 </Button>
               </div>
-            </div>
-          </div>
-
-          <DialogFooter className="mt-4 flex-col sm:flex-row gap-2 border-t pt-4">
-            <Button type="button" variant="ghost" onClick={() => onOpenChange(false)} disabled={isSaving} className="sm:mr-auto h-9">
-              Close
-            </Button>
-            <Button
-              type="button"
-              variant="secondary"
-              className="h-9 shadow-sm"
-              disabled={isSaving || editedDuration === 0}
-              onClick={() => handleSave('duplicate')}
-            >
-              Duplicate & Save
-            </Button>
-            <Button
-              type="button"
-              className="h-9 shadow-sm px-6"
-              disabled={isSaving || editedDuration === 0}
-              onClick={() => setSaveConfirmOpen((prev) => prev || true)}
-            >
-              Save file
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
+            </motion.div>
+          </motion.div>
+        )}
+      </AnimatePresence>
 
       <ConfirmDialog
         open={saveConfirmOpen}
@@ -608,3 +649,4 @@ export function EditSongDialog(props: {
     </>
   );
 }
+

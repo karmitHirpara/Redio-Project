@@ -26,23 +26,20 @@ function resolveTrackAbsolutePath(rawFilePath, uploadsRootDir) {
 
     if (path.isAbsolute(p)) return path.normalize(p);
 
+    // Normalize uploadsRootDir to be absolute and without trailing slash/relative parts
+    const normalizedRoot = path.resolve(uploadsRootDir);
+
     if (p.startsWith('/uploads/')) {
         const rel = p.slice(9); // remove '/uploads/'
-        // The slash in '/uploads/playlists' might be duplicated if uploadsRootDir already ends with slash
-        const resolved = path.join(uploadsRootDir, rel);
-        // console.log(`[resolveTrackAbsolutePath DEBUG] input: "${p}"`);
-        // console.log(`[resolveTrackAbsolutePath DEBUG] rel: "${rel}"`);
-        // console.log(`[resolveTrackAbsolutePath DEBUG] uploadsRootDir: "${uploadsRootDir}"`);
-        // console.log(`[resolveTrackAbsolutePath DEBUG] resolved: "${resolved}"`);
-        return resolved;
+        return path.join(normalizedRoot, rel);
     }
 
-    // /uploads_queue is not under uploadsRootDir; we cannot resolve reliably here.
-    if (p.startsWith('/uploads_queue/')) {
-        return null;
+    if (p.startsWith('uploads/')) {
+        const rel = p.slice(8);
+        return path.join(normalizedRoot, rel);
     }
 
-    return path.join(uploadsRootDir, p);
+    return path.join(normalizedRoot, p);
 }
 
 /**
@@ -110,25 +107,28 @@ export async function validateTrack(trackId) {
  */
 export async function runStartupScan(uploadsDir) {
     try {
-        logger.info('[Sync] Starting startup pre-flight scan...');
-        const tracks = await query('SELECT id, file_path FROM tracks');
+        const normalizedUploadsDir = path.resolve(uploadsDir);
+        logger.info(`[Sync] Starting startup pre-flight scan using: ${normalizedUploadsDir}`);
+        
+        const tracks = await query('SELECT id, file_path, name FROM tracks');
         let unavailableCount = 0;
         let availableCount = 0;
 
         for (const track of tracks) {
             if (!track.file_path) continue;
 
-            const absolutePath = resolveTrackAbsolutePath(track.file_path, uploadsDir);
+            const absolutePath = resolveTrackAbsolutePath(track.file_path, normalizedUploadsDir);
             const exists = absolutePath && fs.existsSync(absolutePath);
 
-            await run('UPDATE tracks SET exists_on_disk = ? WHERE id = ?', [exists ? 1 : 0, track.id]);
-            
             if (exists) {
                 availableCount++;
+                // If it was marked as missing, mark it available now
+                await run('UPDATE tracks SET exists_on_disk = 1 WHERE id = ?', [track.id]);
             } else {
                 unavailableCount++;
-                const baseName = absolutePath ? path.basename(absolutePath) : 'Unknown';
-                logger.warn(`[Sync] Audio file missing for track: ${baseName} (${track.id})`);
+                await run('UPDATE tracks SET exists_on_disk = 0 WHERE id = ?', [track.id]);
+                const baseName = track.name || (absolutePath ? path.basename(absolutePath) : 'Unknown');
+                logger.warn(`[Sync] Audio file missing for track: ${baseName} (ID: ${track.id}) - Path: ${absolutePath}`);
             }
         }
 

@@ -52,6 +52,7 @@ interface PlaybackBarProps {
   onNext: () => void;
   onPrevious: () => void;
   isLive: boolean;
+  onIsLiveChange: (value: boolean) => void;
   transitionMode: 'gap' | 'crossfade';
   onTransitionModeChange: (value: 'gap' | 'crossfade') => void;
   gapSeconds: number;
@@ -74,6 +75,7 @@ export function PlaybackBar({
   onNext,
   onPrevious,
   isLive,
+  onIsLiveChange,
   transitionMode,
   onTransitionModeChange,
   gapSeconds,
@@ -224,7 +226,7 @@ export function PlaybackBar({
         if (b && b.src && b.paused) b.play().catch(() => { });
       }
     });
-  }, [applyToAudioElements, primaryAudioRef, secondaryAudioRef, selectedDeviceId, isPlaying]);
+  }, [applyToAudioElements, primaryAudioRef, secondaryAudioRef, selectedDeviceId, isPlaying, currentTrack?.id]);
 
   const handlePlayPause = () => {
     if (isLive && isPlaying) {
@@ -260,11 +262,16 @@ export function PlaybackBar({
                   </Tooltip>
                 </TooltipProvider>
                 <div className="text-xs text-muted-foreground truncate">{currentTrack.artist}</div>
-                {showPendingLine && pendingTrack && (
-                  <div className="text-[11px] text-muted-foreground truncate mt-0.5">
-                    Next pending: {pendingTrack.name} ({formatDuration(pendingRemainingSeconds)})
+                <div className="flex items-center gap-3 mt-0.5">
+                  <div className="text-lg font-mono font-bold text-primary tracking-tight tabular-nums">
+                    -{formatDuration(Math.max(0, (duration || currentTrack.duration || 0) - currentTime))}
                   </div>
-                )}
+                  {showPendingLine && pendingTrack && (
+                    <div className="text-[11px] text-muted-foreground truncate">
+                      Next pending: {pendingTrack.name} ({formatDuration(pendingRemainingSeconds)})
+                    </div>
+                  )}
+                </div>
               </div>
             </>
           ) : (
@@ -319,6 +326,18 @@ export function PlaybackBar({
             </Button>
             <Button size="sm" variant="ghost" onClick={onNext}>
               <SkipForward className="w-4 h-4" />
+            </Button>
+            
+            <div className="w-px h-6 bg-border mx-1" />
+
+            <Button
+              size="sm"
+              variant={isLive ? 'default' : 'secondary'}
+              onClick={() => onIsLiveChange(!isLive)}
+              className={`ml-1 px-3 text-[11px] font-bold h-7 tracking-wider ${isLive ? 'bg-red-500 hover:bg-red-600 text-white' : ''}`}
+              title={isLive ? 'Live Assist: Stops playback after current track ends' : 'Auto Play: Automatically continuously plays the next track'}
+            >
+              {isLive ? 'LIVE' : 'AUTO'}
             </Button>
             <Button
               size="sm"

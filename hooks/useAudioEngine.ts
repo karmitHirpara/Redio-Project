@@ -10,7 +10,7 @@ interface UseAudioEngineOptions {
   transitionMode: 'gap' | 'crossfade';
   gapSeconds: number;
   crossfadeSeconds: number;
-  onNext: () => void;
+  onNext: (isAutoAdvance?: boolean) => void;
 }
 
 interface UseAudioEngineResult {
@@ -59,6 +59,28 @@ export function useAudioEngine({
   const autoAdvanceRef = useRef(false);
   const pendingAdvanceRemainingMsRef = useRef<number | null>(null);
   const pendingAdvanceLastTickMsRef = useRef<number | null>(null);
+  const audioWorkerRef = useRef<Worker | null>(null);
+
+  // Initialize Audio Worker
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    const worker = new Worker('/audio-worker.js');
+    audioWorkerRef.current = worker;
+
+    return () => {
+      worker.postMessage({ type: 'STOP_TIMER' });
+      worker.terminate();
+      audioWorkerRef.current = null;
+    };
+  }, []);
+
+  // Prefetch the next track to guarantee zero-ms interruption
+  useEffect(() => {
+    if (nextTrack && audioWorkerRef.current) {
+      const url = resolveUploadsUrl(nextTrack.filePath);
+      audioWorkerRef.current.postMessage({ type: 'PREFETCH_TRACK', payload: { url } });
+    }
+  }, [nextTrack]);
 
   const getActiveAudio = () => primaryAudioRef.current;
   const getInactiveAudio = () => secondaryAudioRef.current;
@@ -107,8 +129,11 @@ export function useAudioEngine({
       clearPendingAdvance();
       lastTrackIdRef.current = currentTrack.id;
       activeAudio.src = resolveUploadsUrl(currentTrack.filePath);
-      activeAudio.currentTime = 0;
-      setCurrentTime(0);
+      
+      const startPos = currentTrack.cueIn || 0;
+      activeAudio.currentTime = startPos;
+      setCurrentTime(startPos);
+      
       setDuration(currentTrack.duration || 0);
       setIsInGap(false);
       setGapRemainingSeconds(0);
@@ -147,7 +172,9 @@ export function useAudioEngine({
     if (host) {
       host.pause();
       host.src = resolveUploadsUrl(currentTrack.filePath);
-      host.currentTime = 0;
+      
+      const startPos = currentTrack.cueIn || 0;
+      host.currentTime = startPos;
 
       if (isPlaying) {
         host.play().catch(() => {
@@ -156,7 +183,8 @@ export function useAudioEngine({
       }
     }
     lastTrackIdRef.current = currentTrack.id;
-    setCurrentTime(0);
+    const startPos = currentTrack.cueIn || 0;
+    setCurrentTime(startPos);
     setDuration(currentTrack.duration || 0);
     setIsInGap(false);
     setGapRemainingSeconds(0);
@@ -204,11 +232,13 @@ export function useAudioEngine({
       if (audio !== getActiveAudio()) return;
       setCurrentTime(audio.currentTime);
 
-      const effectiveDuration = duration || audio.duration || 0;
+      const effectiveDuration = currentTrack?.cueOut || duration || audio.duration || 0;
       if (!isPlaying) return;
 
-      // Gap-only mode: no fades, no overlap, no crossfade.
-      void effectiveDuration;
+      // Check if we hit the non-destructive cue trigger
+      if (audio.currentTime >= effectiveDuration - 0.05) {
+        if (!isInGap) handleEnded(audio);
+      }
     };
 
     const handleProgress = (audio: HTMLAudioElement) => {
@@ -236,14 +266,14 @@ export function useAudioEngine({
       // Keep the playhead pinned at the end during the gap, so the UI doesn't
       // jump back to 0:00 while we're waiting to advance.
       try {
-        const effectiveDuration = duration || audio.duration || 0;
+        const effectiveDuration = currentTrack?.cueOut || duration || audio.duration || 0;
         if (Number.isFinite(effectiveDuration) && effectiveDuration > 0) {
           setCurrentTime(effectiveDuration);
         } else {
-          setCurrentTime(0);
+          setCurrentTime(currentTrack?.cueIn || 0);
         }
       } catch (_err) {
-        setCurrentTime(0);
+        setCurrentTime(currentTrack?.cueIn || 0);
       }
 
       const gap = Number.isFinite(gapSecondsRef.current) ? Math.max(0, gapSecondsRef.current) : 0;
@@ -252,7 +282,7 @@ export function useAudioEngine({
 
       if (delayMs <= 0) {
         autoAdvanceRef.current = true;
-        onNext();
+        onNext(true);
         return;
       }
 
@@ -265,18 +295,13 @@ export function useAudioEngine({
     const ensurePoll = () => {
       if (pollIntervalRef.current !== null) return;
 
-      // Background throttling can pause timeupdate, preventing crossfade start.
-      // Use a small interval as a fallback to drive crossfade/advance decisions.
-      pollIntervalRef.current = window.setInterval(() => {
+      const tick = (now: number) => {
         if (!currentTrack) return;
         const audio = getActiveAudio();
         if (!audio) return;
 
-        // While in a gap (silence), keep counting down deterministically.
-        // The countdown pauses if playback is paused.
         const remaining = pendingAdvanceRemainingMsRef.current;
         if (remaining != null) {
-          const now = Date.now();
           const lastTick = pendingAdvanceLastTickMsRef.current ?? now;
           const dt = Math.max(0, now - lastTick);
           pendingAdvanceLastTickMsRef.current = now;
@@ -295,7 +320,7 @@ export function useAudioEngine({
               setIsInGap(false);
               setGapRemainingSeconds(0);
               autoAdvanceRef.current = true;
-              onNext();
+              onNext(true);
             }
           } else {
             const secondsLeft = Math.max(0, Math.ceil(remaining / 1000));
@@ -308,7 +333,18 @@ export function useAudioEngine({
         if (isPlaying) {
           handleTimeUpdate(audio);
         }
-      }, 250);
+      };
+
+      if (!audioWorkerRef.current) return;
+      
+      const worker = audioWorkerRef.current;
+      worker.onmessage = (e) => {
+        if (e.data.type === 'TIMER_TICK') {
+           tick(e.data.timestamp);
+        }
+      };
+      worker.postMessage({ type: 'START_TIMER' });
+      pollIntervalRef.current = 1 as any; // Mark as active
     };
 
     const attach = (audio: HTMLAudioElement | null) => {
@@ -341,15 +377,18 @@ export function useAudioEngine({
     return () => {
       detachA?.();
       detachB?.();
-      if (pollIntervalRef.current !== null) {
-        window.clearInterval(pollIntervalRef.current);
+      if (pollIntervalRef.current !== null && audioWorkerRef.current) {
+        audioWorkerRef.current.postMessage({ type: 'STOP_TIMER' });
         pollIntervalRef.current = null;
       }
     };
   }, [onNext, duration, currentTrack, isPlaying]);
 
   const handleSeek = (value: number[]) => {
-    const newTime = value[0];
+    let newTime = value[0];
+    if (currentTrack?.cueIn !== undefined && newTime < currentTrack.cueIn) newTime = currentTrack.cueIn;
+    if (currentTrack?.cueOut !== undefined && newTime > currentTrack.cueOut) newTime = currentTrack.cueOut;
+
     setCurrentTime(newTime);
     const audio = getActiveAudio();
     if (audio && currentTrack) {

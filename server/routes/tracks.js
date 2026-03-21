@@ -225,13 +225,9 @@ router.get('/:id', async (req, res) => {
   }
 });
 
-// Edit an existing track by trimming audio in-place (local disk only)
+// Edit an existing track by setting non-destructive cue points
 router.post('/:id/edit', async (req, res) => {
   try {
-    if (useS3) {
-      return res.status(400).json({ error: 'Edit Song is not supported in S3 storage mode' });
-    }
-
     const id = String(req.params.id || '');
 
     // Validate request body
@@ -252,38 +248,6 @@ router.post('/:id/edit', async (req, res) => {
       return res.status(404).json({ error: 'Track not found' });
     }
 
-    const rel = String(track.file_path || '');
-    if (!rel) {
-      return res.status(400).json({ error: 'Track has no file_path' });
-    }
-
-    const absInput = resolveUploadPath(rel);
-    if (!fs.existsSync(absInput)) {
-      return res.status(404).json({ error: 'Audio file not found on disk' });
-    }
-
-    if (!ffmpegPath) {
-      return res.status(500).json({ error: 'FFmpeg binary not available' });
-    }
-
-    const ext = path.extname(absInput).toLowerCase();
-    const tmpOut = `${absInput}.tmp-${uuidv4()}${ext || ''}`;
-
-    // Encode settings by extension. We re-encode for consistent trimming.
-    const encodeArgs = (() => {
-      if (ext === '.mp3') return ['-c:a', 'libmp3lame', '-q:a', '2'];
-      if (ext === '.wav') return ['-c:a', 'pcm_s16le'];
-      if (ext === '.ogg') return ['-c:a', 'libvorbis', '-q:a', '5'];
-      if (ext === '.flac') return ['-c:a', 'flac'];
-      if (ext === '.m4a' || ext === '.mp4' || ext === '.aac') return ['-c:a', 'aac', '-b:a', '192k'];
-      // Fallback: let ffmpeg choose
-      return [];
-    })();
-
-    let args;
-    let durationSeconds;
-
-
     const start = Number(startSecondsRaw);
     const end = Number(endSecondsRaw);
     if (!Number.isFinite(start) || start < 0) {
@@ -296,78 +260,7 @@ router.post('/:id/edit', async (req, res) => {
       return res.status(400).json({ error: 'endSeconds must be greater than startSeconds' });
     }
 
-    durationSeconds = Math.max(0, end - start);
-
-    // Use -ss after -i for accuracy.
-    args = [
-      '-y',
-      '-i',
-      absInput,
-      '-ss',
-      String(start),
-      '-t',
-      String(durationSeconds),
-      ...encodeArgs,
-      tmpOut,
-    ];
-
-    await new Promise((resolve, reject) => {
-      const child = spawn(ffmpegPath, args, { windowsHide: true });
-      let stderr = '';
-      child.stderr.on('data', (d) => {
-        stderr += d.toString();
-      });
-      child.on('error', (e) => reject(e));
-      child.on('close', (code) => {
-        if (code === 0) return resolve();
-        reject(new Error(stderr || `ffmpeg exited with code ${code}`));
-      });
-    });
-
-    if (!fs.existsSync(tmpOut)) {
-      return res.status(500).json({ error: 'Failed to write trimmed audio file' });
-    }
-
-    const stat = fs.statSync(tmpOut);
-    const newHash = await sha256File(tmpOut);
-    const newDuration = Math.max(0, Math.round(Number(durationSeconds || 0)));
-
-    // PLAYLIST-SCOPED OVERWRITE:
-    // When editing from within a playlist, overwrite must only affect the
-    // exact track instance being edited (track id + file_path).
-    if (mode === 'overwrite' && playlistContext && playlistContext.playlistId) {
-      // In our independent media model, playlist tracks ALWAYS have their own file.
-      // We can safely overwrite it in-place.
-      try {
-        if (fs.existsSync(absInput)) {
-          try {
-            fs.unlinkSync(absInput);
-          } catch {
-            // ignore
-          }
-        }
-        fs.renameSync(tmpOut, absInput);
-      } catch (e) {
-        try {
-          if (fs.existsSync(tmpOut)) fs.unlinkSync(tmpOut);
-        } catch {
-          // ignore
-        }
-        throw e;
-      }
-
-      await run('UPDATE tracks SET duration = ?, size = ?, hash = ? WHERE id = ?', [
-        newDuration,
-        stat.size,
-        newHash,
-        id,
-      ]);
-
-      const updated = await get('SELECT * FROM tracks WHERE id = ?', [id]);
-      return res.json(updated);
-    }
-
-    if (mode === 'duplicate' || mode === 'overwrite') {
+    if (mode === 'duplicate') {
       const originalName = track.name || 'Track';
       const baseNameRaw = originalName.replace(/\s*\(\d+\)\s*$/, '').trim();
       const baseName = baseNameRaw.endsWith(' edit') ? baseNameRaw.slice(0, -5).trim() : baseNameRaw;
@@ -391,100 +284,48 @@ router.post('/:id/edit', async (req, res) => {
       }
 
       const newName = maxIndex > 0 ? `${prefix} (${maxIndex + 1})` : hasEdit ? `${prefix} (1)` : prefix;
-      const fileExt = path.extname(absInput) || '.mp3';
-      const cleanFileName = newName.replace(/[^a-zA-Z0-9 _-]/g, '') + fileExt;
 
-      let finalDir = libraryDir;
-      let virtualPathType = 'library';
+      const trackId = uuidv4();
+      await run(
+        `INSERT INTO tracks (id, name, artist, duration, size, file_path, original_filename, hash, exists_on_disk, cue_in, cue_out)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)`,
+        [
+          trackId,
+          newName,
+          track.artist,
+          track.duration,
+          track.size,
+          track.file_path,
+          track.original_filename,
+          track.hash,
+          start,
+          end
+        ]
+      );
 
-      if (playlistContext && playlistContext.playlistId) {
-        // Independent Playlist Storage: Use the playlist's dedicated folder.
-        const pObj = await get('SELECT name FROM playlists WHERE id = ?', [playlistContext.playlistId]);
-        const pFolder = sanitizePlaylistFolderName(pObj?.name || 'playlist', playlistContext.playlistId);
-        finalDir = path.join(playlistsDir, pFolder);
-        virtualPathType = `playlists/${pFolder}`;
-        if (!fs.existsSync(finalDir)) fs.mkdirSync(finalDir, { recursive: true });
-      }
-
-      let destPath = path.join(finalDir, cleanFileName);
-      let duplicateIndex = 1;
-      while (fs.existsSync(destPath)) {
-        const fallbackName = `${cleanFileName.replace(fileExt, '')} (${duplicateIndex})${fileExt}`;
-        destPath = path.join(finalDir, fallbackName);
-        duplicateIndex++;
-      }
-
-      fs.renameSync(tmpOut, destPath);
-      const newRelativePath = `/uploads/${virtualPathType}/${path.basename(destPath)}`;
-
-      if (mode === 'duplicate') {
-        const trackId = uuidv4();
-        await run(
-          `INSERT INTO tracks (id, name, artist, duration, size, file_path, hash)
-           VALUES (?, ?, ?, ?, ?, ?, ?)`,
-          [
-            trackId,
-            newName,
-            track.artist,
-            newDuration,
-            stat.size,
-            newRelativePath,
-            newHash,
-          ]
-        );
-
-        // Auto-relink if this was triggered inside a playlist
-        if (playlistContext && playlistContext.playlistId && playlistContext.position !== undefined) {
-          const pt = await get('SELECT track_id FROM playlist_tracks WHERE playlist_id = ? AND position = ?', [playlistContext.playlistId, playlistContext.position]);
-          if (pt && pt.track_id === track.id) {
-            await run('UPDATE playlist_tracks SET track_id = ? WHERE playlist_id = ? AND position = ?', [trackId, playlistContext.playlistId, playlistContext.position]);
-          }
-        }
-
-        const duplicated = await get('SELECT * FROM tracks WHERE id = ?', [trackId]);
-        return res.status(201).json(duplicated);
-      }
-
-      // mode === 'overwrite'
-      if (!(playlistContext && playlistContext.playlistId)) {
-        // Library Separation: If this track is in use by playlists, we must clone the original
-        // DB record to preserve the unedited physical file for the playlists, and let the library
-        // track point to the new overwritten file.
-        const inUseByPlaylists = await query('SELECT DISTINCT playlist_id FROM playlist_tracks WHERE track_id = ?', [id]);
-
-        if (inUseByPlaylists && inUseByPlaylists.length > 0) {
-          // Clone original track for playlists to use
-          const clonedId = uuidv4();
-          await run(
-            `INSERT INTO tracks (id, name, artist, duration, size, file_path, hash, original_filename)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-            [clonedId, track.name, track.artist, track.duration, track.size, track.file_path, track.hash, track.original_filename]
-          );
-          // Remap playlists to use the cloned track (which points to the untouched physical file)
-          await run(`UPDATE playlist_tracks SET track_id = ? WHERE track_id = ?`, [clonedId, id]);
-        } else {
-          // Safe to delete old physical file, no playlists rely on it!
-          try {
-            if (fs.existsSync(absInput)) fs.unlinkSync(absInput);
-          } catch {
-            // ignore
-          }
+      // Auto-relink if this was triggered inside a playlist
+      if (playlistContext && playlistContext.playlistId && playlistContext.position !== undefined) {
+        const pt = await get('SELECT track_id FROM playlist_tracks WHERE playlist_id = ? AND position = ?', [playlistContext.playlistId, playlistContext.position]);
+        if (pt && pt.track_id === track.id) {
+          await run('UPDATE playlist_tracks SET track_id = ? WHERE playlist_id = ? AND position = ?', [trackId, playlistContext.playlistId, playlistContext.position]);
         }
       }
 
-      // Update library track to point to the newly cut file!
-      await run('UPDATE tracks SET name = ?, duration = ?, size = ?, hash = ?, file_path = ? WHERE id = ?', [
-        newName,
-        newDuration,
-        stat.size,
-        newHash,
-        newRelativePath,
-        id,
-      ]);
-
-      const updated = await get('SELECT * FROM tracks WHERE id = ?', [id]);
-      return res.json(updated);
+      const duplicated = await get('SELECT * FROM tracks WHERE id = ?', [trackId]);
+      return res.status(201).json(duplicated);
     }
+
+    // mode === 'overwrite'
+    // For overwrite, we just update the cue points on the single DB record.
+    await run('UPDATE tracks SET cue_in = ?, cue_out = ? WHERE id = ?', [
+      start,
+      end,
+      id,
+    ]);
+
+    const updated = await get('SELECT * FROM tracks WHERE id = ?', [id]);
+    return res.json(updated);
+
   } catch (error) {
     return res.status(500).json({ error: error.message });
   }
@@ -590,8 +431,8 @@ router.post('/upload', (req, res, next) => {
     }
 
     await run(
-      `INSERT INTO tracks (id, name, artist, duration, size, file_path, hash)
-       VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      `INSERT INTO tracks (id, name, artist, duration, size, file_path, hash, exists_on_disk)
+       VALUES (?, ?, ?, ?, ?, ?, ?, 1)`,
       [
         trackId,
         name || path.basename(req.file.originalname, path.extname(req.file.originalname)),
@@ -615,6 +456,28 @@ router.post('/upload', (req, res, next) => {
         // ignore cleanup errors
       }
     }
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Rename track
+router.put('/:id/rename', async (req, res) => {
+  try {
+    const { name, fileName } = req.body;
+    if (!name || !fileName) {
+      return res.status(400).json({ error: 'Name and fileName are required' });
+    }
+    const updatedTrack = await TrackService.renameTrack(req.params.id, name, fileName);
+    
+    // Broadcast updated queue state in case this track is queued
+    await emitQueueUpdated(req.app);
+
+    res.json(updatedTrack);
+  } catch (error) {
+    if (error.message.includes('already exists')) {
+      return res.status(409).json({ error: error.message });
+    }
+    console.error('[Tracks] Rename failed:', error);
     res.status(500).json({ error: error.message });
   }
 });

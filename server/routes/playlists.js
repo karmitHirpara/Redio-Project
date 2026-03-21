@@ -478,8 +478,8 @@ router.post('/:id/tracks', async (req, res) => {
       const newRel = `/uploads/playlists/${playlistFolder}/${destFileName}`;
 
       await run(
-        `INSERT INTO tracks (id, name, artist, duration, size, file_path, hash, original_filename)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+        `INSERT INTO tracks (id, name, artist, duration, size, file_path, hash, original_filename, exists_on_disk)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1)`,
         [
           newTrackId,
           source.name,

@@ -28,6 +28,8 @@ import {
   ContextMenuTrigger,
 } from './ui/context-menu';
 
+const EMPTY_ID_SET = new Set<string>();
+
 interface VirtualizedFolderTrackListProps {
   tracks: Track[];
   folderId: string;
@@ -220,6 +222,14 @@ export const LibraryPanel = memo(function LibraryPanel({
     mediaCount: number;
   }>(null);
 
+  const [deleteFoldersConfirm, setDeleteFoldersConfirm] = useState<null | {
+    folderIds: string[];
+    folderCount: number;
+    trackCount: number;
+    mediaCount: number;
+    requiresConfirmation: boolean;
+  }>(null);
+
   const [librarySearchText, setLibrarySearchText] = useState('');
   const [librarySearchQuery, setLibrarySearchQuery] = useState('');
   const [librarySearchLoading, setLibrarySearchLoading] = useState(false);
@@ -249,6 +259,14 @@ export const LibraryPanel = memo(function LibraryPanel({
       map.set(key, arr);
     }
     return map;
+  }, [folders]);
+
+  const folderParentMap = useMemo(() => {
+    const parentOf = new Map<string, string>();
+    for (const f of folders) {
+      parentOf.set(String(f.id), String((f as any).parent_id || '').trim());
+    }
+    return parentOf;
   }, [folders]);
 
   const folderDescendantsMap = useMemo(() => {
@@ -303,6 +321,33 @@ export const LibraryPanel = memo(function LibraryPanel({
     return out;
   }, [expandedFolderIds, folderTracks, foldersByParentId]);
 
+  const applyExplorerRangeSelection = useCallback(
+    (anchorIndex: number, currentIndex: number, additive: boolean) => {
+      const items = visibleExplorerItems;
+      if (items.length === 0) return;
+      const start = Math.min(anchorIndex, currentIndex);
+      const end = Math.max(anchorIndex, currentIndex);
+
+      const nextFolders = new Set<string>(additive ? selectedFolderIds : []);
+      const nextTracks = new Set<string>(additive ? selectedTrackIds : []);
+
+      if (!additive) {
+        nextFolders.clear();
+        nextTracks.clear();
+      }
+
+      for (let i = start; i <= end; i++) {
+        const it = items[i];
+        if (it.kind === 'folder') nextFolders.add(it.id);
+        else nextTracks.add(it.id);
+      }
+
+      setSelectedFolderIds(nextFolders);
+      setSelectedTrackIds(nextTracks);
+    },
+    [selectedFolderIds, selectedTrackIds, visibleExplorerItems]
+  );
+
   const handleSelectExplorerItem = useCallback(
     (item: { kind: 'folder' | 'track'; id: string; folderId?: string }, e: MouseEvent) => {
       const meta = e.metaKey || e.ctrlKey;
@@ -353,34 +398,7 @@ export const LibraryPanel = memo(function LibraryPanel({
           anchorIndex = currentIndex;
         }
 
-        const start = Math.min(anchorIndex, currentIndex);
-        const end = Math.max(anchorIndex, currentIndex);
-
-        const nextFolders = new Set(meta ? selectedFolderIds : []);
-        const nextTracks = new Set(meta ? selectedTrackIds : []);
-
-        // Logic: specific to VS Code behavior
-        // If you Shift+Click, it selects the range. 
-        // BUT if you held Meta before, it keeps previous selection? VS Code usually clears unless you Cmd+Shift?
-        // Actually VS Code Shift+Click extends selection from anchor to target.
-        // Existing selection outside range is preserved ONLY if it was "multi-cursor" style, but usually simple Shift+Select replaces.
-        // However, standard OS behavior usually clears disjoint selections unless Cmd is held.
-        // Let's implement: Shift+Click clears everything else and selects range [Anchor, Target].
-        // If Meta+Shift+Click, it adds range to existing.
-
-        if (!meta) {
-          nextFolders.clear();
-          nextTracks.clear();
-        }
-
-        for (let i = start; i <= end; i++) {
-          const it = items[i];
-          if (it.kind === 'folder') nextFolders.add(it.id);
-          else nextTracks.add(it.id);
-        }
-
-        setSelectedFolderIds(nextFolders);
-        setSelectedTrackIds(nextTracks);
+        applyExplorerRangeSelection(anchorIndex, currentIndex, meta);
         return;
       }
 
@@ -411,7 +429,7 @@ export const LibraryPanel = memo(function LibraryPanel({
         return;
       }
     },
-    [visibleExplorerItems, selectedFolderIds, selectedTrackIds, folderSelectionAnchorId, trackSelectionAnchorId]
+    [applyExplorerRangeSelection, visibleExplorerItems, selectedFolderIds, selectedTrackIds, folderSelectionAnchorId, trackSelectionAnchorId]
   );
 
   const focusExplorerItem = useCallback(
@@ -1033,6 +1051,114 @@ export const LibraryPanel = memo(function LibraryPanel({
     }
   };
 
+  const getTopLevelSelectedFolderIds = useCallback((): string[] => {
+    const selected = Array.from(selectedFolderIds).map(String);
+    if (selected.length <= 1) return selected;
+    const selectedSet = new Set(selected);
+
+    // Remove any folder whose ancestor is also selected.
+    const out: string[] = [];
+    for (const id of selected) {
+      let p = folderParentMap.get(id);
+      let blocked = false;
+      while (p !== undefined && p !== '') {
+        if (selectedSet.has(p)) {
+          blocked = true;
+          break;
+        }
+        p = folderParentMap.get(p);
+      }
+      if (!blocked) out.push(id);
+    }
+    return out;
+  }, [folderParentMap, selectedFolderIds]);
+
+  const handleDeleteSelectedFolders = useCallback(async () => {
+    const topLevelIds = getTopLevelSelectedFolderIds();
+    if (topLevelIds.length === 0) return;
+
+    try {
+      const previews = await Promise.all(
+        topLevelIds.map(async (id) => {
+          try {
+            const p = await foldersAPI.deletePreview(id);
+            return {
+              id,
+              requiresConfirmation: Boolean(p?.requiresConfirmation),
+              folderCount: Number(p?.folderCount || 0),
+              trackCount: Number(p?.trackCount || 0),
+              mediaCount: Number(p?.mediaCount || 0),
+            };
+          } catch {
+            return {
+              id,
+              requiresConfirmation: true,
+              folderCount: 1,
+              trackCount: 0,
+              mediaCount: 0,
+            };
+          }
+        })
+      );
+
+      const requiresConfirmation = previews.some((p) => p.requiresConfirmation);
+      const folderCount = previews.reduce((acc, p) => acc + p.folderCount, 0);
+      const trackCount = previews.reduce((acc, p) => acc + p.trackCount, 0);
+      const mediaCount = previews.reduce((acc, p) => acc + p.mediaCount, 0);
+
+      setDeleteFoldersConfirm({
+        folderIds: topLevelIds,
+        folderCount,
+        trackCount,
+        mediaCount,
+        requiresConfirmation,
+      });
+    } catch (err: any) {
+      toast.error(err?.message || 'Failed to prepare folder deletion');
+    }
+  }, [getTopLevelSelectedFolderIds]);
+
+  const confirmDeleteFolders = useCallback(async () => {
+    const pending = deleteFoldersConfirm;
+    if (!pending) return;
+    setDeleteFoldersConfirm(null);
+
+    const idsToRemove = new Set<string>();
+    for (const folderId of pending.folderIds) {
+      try {
+        const result = await foldersAPI.deleteRecursive(folderId, true);
+        const ids = (result?.folderIds || [folderId]).map((x: any) => String(x));
+        ids.forEach((x: string) => idsToRemove.add(x));
+      } catch (err: any) {
+        toast.error(err?.message || 'Failed to delete one or more folders');
+      }
+    }
+
+    if (idsToRemove.size === 0) return;
+
+    setFolders((prev) => prev.filter((f) => !idsToRemove.has(String(f.id))));
+    setFolderTracks((prev) => {
+      const next = { ...prev };
+      idsToRemove.forEach((id) => {
+        delete next[id];
+      });
+      return next;
+    });
+    setExpandedFolderIds((prev) => prev.filter((id) => !idsToRemove.has(String(id))));
+    setSelectedFolderIds((prev) => {
+      const next = new Set(prev);
+      idsToRemove.forEach((id) => next.delete(id));
+      return next;
+    });
+
+    if (selectedFolderId && idsToRemove.has(String(selectedFolderId))) {
+      setSelectedFolderId(null);
+    }
+    if (activeTrackFolderId && idsToRemove.has(String(activeTrackFolderId))) {
+      setActiveTrackFolderId(null);
+    }
+  }, [activeTrackFolderId, deleteFoldersConfirm, selectedFolderId]);
+
   const handleRenameFolder = (folder: LibraryFolder) => {
     setEditingFolderId(folder.id);
     setFolderNameInput(folder.name);
@@ -1218,8 +1344,9 @@ export const LibraryPanel = memo(function LibraryPanel({
                   }}
                   onDragEnter={() => setDragOverFolderId(id)}
                   onDragLeave={(e) => {
-                    // Clear drag state when leaving folder area
-                    setDragOverFolderId(null);
+                    const nextTarget = (e as any).relatedTarget as Node | null;
+                    if (nextTarget && e.currentTarget.contains(nextTarget)) return;
+                    setDragOverFolderId((prev) => (prev === id ? null : prev));
                   }}
                   onDragOver={(e) => {
                     e.preventDefault();
@@ -1299,7 +1426,7 @@ export const LibraryPanel = memo(function LibraryPanel({
                       <VirtualizedFolderTrackList
                         tracks={tracksInFolder}
                         folderId={id}
-                        selectedTrackIds={activeTrackFolderId === id ? selectedTrackIds : new Set()}
+                        selectedTrackIds={activeTrackFolderId === id ? selectedTrackIds : EMPTY_ID_SET}
                         recentlyMovedTrackIds={recentlyMovedFolderId === id ? recentlyMovedTrackIds : undefined}
                         onSelect={handleSelectFolderTrack}
                         getDragPayload={getTrackDragPayload}
@@ -1374,13 +1501,11 @@ export const LibraryPanel = memo(function LibraryPanel({
           e.preventDefault();
           void handleDeleteSelectedTracks();
         } else if (selectedFolderIds.size > 0) {
-          // Folder deletion usually requires explicit confirm per folder or batch
-          // For safety, let's just toast if multiple folders selected, or handle single
+          e.preventDefault();
           if (selectedFolderIds.size === 1) {
-            e.preventDefault();
             void handleDeleteFolder(Array.from(selectedFolderIds)[0]);
           } else {
-            toast.error("Batch folder deletion not supported yet.");
+            void handleDeleteSelectedFolders();
           }
         }
         return;
@@ -1471,23 +1596,33 @@ export const LibraryPanel = memo(function LibraryPanel({
       const nextIndex = Math.min(visibleExplorerItems.length - 1, Math.max(0, base + dir));
       const nextItem = visibleExplorerItems[nextIndex];
 
-      focusExplorerItem(nextItem);
-
-      // Shift+Arrow selection extension
+      // VS Code-style:
+      // - Arrow keys always move focus.
+      // - Without Shift, selection follows focus.
+      // - With Shift, selection extends from the current anchor to the focused item.
       if (e.shiftKey) {
-        // If moving selection, we need to update selected set based on anchor
-        // Reuse handleSelectExplorerItem logic?
-        // It's tricky to emulate "click". 
-        // Let's manually trigger selection update
-        const anchorId = focusedExplorerItem?.kind === 'folder' ? folderSelectionAnchorId : trackSelectionAnchorId;
-        // Simple improvement: Just select the item we moved to if Shift not held? 
-        // Actually VS Code moves toggle with key.
+        // Keep the existing anchor if possible; otherwise set it to the previous focus.
+        const prevIndex = currentIndex >= 0 ? currentIndex : base;
+        const anchorIndex = (() => {
+          // Prefer explicit anchor ids, but fall back to previous index.
+          if (folderSelectionAnchorId) {
+            const idx = visibleExplorerItems.findIndex((it) => it.kind === 'folder' && it.id === folderSelectionAnchorId);
+            if (idx !== -1) return idx;
+          }
+          if (trackSelectionAnchorId) {
+            const idx = visibleExplorerItems.findIndex((it) => it.kind === 'track' && it.id === trackSelectionAnchorId);
+            if (idx !== -1) return idx;
+          }
+          return prevIndex;
+        })();
+
+        setFocusedExplorerItem(nextItem as any);
+        applyExplorerRangeSelection(anchorIndex, nextIndex, Boolean(e.metaKey || e.ctrlKey));
       } else {
-        // If no modifier, Arrow key moves SELECTION too (not just focus)
-        // focusExplorerItem handles selection set update implicitly!
+        focusExplorerItem(nextItem);
       }
     },
-    [focusExplorerItem, focusedExplorerItem, toggleFolderExpanded, visibleExplorerItems, selectedTrackIds, selectedFolderIds, folderTracks]
+    [applyExplorerRangeSelection, focusExplorerItem, focusedExplorerItem, folderSelectionAnchorId, handleDeleteSelectedFolders, selectedFolderIds.size, selectedTrackIds.size, toggleFolderExpanded, trackSelectionAnchorId, visibleExplorerItems, folderTracks]
   );
 
   const isAudioFile = (file: File) => {
@@ -1509,8 +1644,8 @@ export const LibraryPanel = memo(function LibraryPanel({
       ghost.style.position = 'absolute';
       ghost.style.top = '-1000px';
       ghost.innerText = `${count} items`;
-      ghost.style.backgroundColor = '#0ea5e9'; // sky-500
-      ghost.style.color = 'white';
+      ghost.style.backgroundColor = 'hsl(var(--primary))';
+      ghost.style.color = 'hsl(var(--primary-foreground))';
       ghost.style.padding = '4px 8px';
       ghost.style.borderRadius = '4px';
       ghost.style.fontSize = '12px';
@@ -1603,7 +1738,7 @@ export const LibraryPanel = memo(function LibraryPanel({
             value={librarySearchText}
             onChange={(e) => setLibrarySearchText(e.target.value)}
             placeholder="Search songs"
-            className="h-9 text-slate-500 placeholder:text-foreground/70 dark:text-muted-foreground dark:placeholder:text-foreground/70"
+            className="h-9 text-foreground placeholder:text-muted-foreground dark:text-foreground dark:placeholder:text-muted-foreground"
             onKeyDown={(e) => {
               if (e.key === 'Enter') {
                 e.preventDefault();
@@ -1826,19 +1961,20 @@ export const LibraryPanel = memo(function LibraryPanel({
           onKeyDown={handleExplorerKeyDown}
           onDragOver={(e) => {
             e.preventDefault();
-            if (dragOverFolderId !== null) setDragOverFolderId(null);
+            if (dragOverFolderId !== 'root') setDragOverFolderId('root');
           }}
-          onDragEnter={() => setDragOverFolderId(null)}
+          onDragEnter={() => setDragOverFolderId('root')}
           onDragLeave={(e) => {
-            // Clear drag state when leaving root folder area
-            setDragOverFolderId(null);
+            const nextTarget = (e as any).relatedTarget as Node | null;
+            if (nextTarget && e.currentTarget.contains(nextTarget)) return;
+            setDragOverFolderId((prev) => (prev === 'root' ? null : prev));
           }}
           onDrop={(e) => {
             void handleDropOnFolder(null, e);
           }}
         >
           {/* Root Drop Target Visual Feedback Overlay */}
-          {dragOverFolderId === null && (
+          {dragOverFolderId === 'root' && (
             <div className="absolute inset-0 pointer-events-none bg-white/5 dark:bg-white/[0.02] ring-2 ring-inset ring-primary/20 z-0" />
           )}
           <AnimatePresence mode="popLayout">
@@ -1853,11 +1989,11 @@ export const LibraryPanel = memo(function LibraryPanel({
           onKeyDown={handleExplorerKeyDown}
           onDragOver={(e) => {
             e.preventDefault();
-            if (dragOverFolderId !== null) setDragOverFolderId(null);
+            if (dragOverFolderId !== 'root') setDragOverFolderId('root');
           }}
-          onDragEnter={() => setDragOverFolderId(null)}
+          onDragEnter={() => setDragOverFolderId('root')}
           onDragLeave={() => {
-            setDragOverFolderId(null);
+            setDragOverFolderId((prev) => (prev === 'root' ? null : prev));
           }}
           onDrop={(e) => {
             void handleDropOnFolder(null, e);
@@ -1916,7 +2052,7 @@ export const LibraryPanel = memo(function LibraryPanel({
                     placeholder="Folder name"
                     value={folderNameInput}
                     onChange={(e) => setFolderNameInput(e.target.value)}
-                    className="bg-white text-slate-900 placeholder:text-slate-500 border-slate-300 focus-visible:ring-primary/30 focus-visible:border-primary dark:bg-input/40 dark:text-foreground dark:placeholder:text-muted-foreground/80 dark:border-input transition-all duration-200 focus:scale-[1.02]"
+                    className="bg-background text-foreground placeholder:text-muted-foreground border-input focus-visible:ring-primary/30 focus-visible:border-primary dark:bg-input/40 dark:text-foreground dark:placeholder:text-muted-foreground/80 dark:border-input transition-all duration-200 focus:scale-[1.02]"
                   />
                 </div>
                 <div className="flex justify-end gap-3 mt-6">
@@ -1955,6 +2091,20 @@ export const LibraryPanel = memo(function LibraryPanel({
         cancelLabel="Cancel"
         onConfirm={confirmDeleteFolder}
         onCancel={() => setDeleteFolderConfirm(null)}
+      />
+
+      <ConfirmDialog
+        open={deleteFoldersConfirm !== null}
+        title="Delete folders?"
+        description={
+          deleteFoldersConfirm
+            ? `This will delete ${deleteFoldersConfirm.folderCount} folders and ${deleteFoldersConfirm.trackCount} track records.\n\n${deleteFoldersConfirm.mediaCount} media files will be removed from storage.`
+            : undefined
+        }
+        confirmLabel="Delete"
+        cancelLabel="Cancel"
+        onConfirm={confirmDeleteFolders}
+        onCancel={() => setDeleteFoldersConfirm(null)}
       />
     </div>
   );

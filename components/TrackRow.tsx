@@ -4,6 +4,7 @@ import { Music, Plus } from 'lucide-react';
 import { Track, Playlist } from '../types';
 import { formatDuration, formatFileSize, cn } from '../lib/utils';
 import { EditSongDialog } from './EditSongDialog';
+import { RenameTrackDialog } from './RenameTrackDialog';
 import {
   ContextMenu,
   ContextMenuContent,
@@ -58,6 +59,7 @@ export const TrackRow = memo(function TrackRow({
   queuedTrackIds,
 }: TrackRowProps) {
   const [editOpen, setEditOpen] = useState(false);
+  const [renameOpen, setRenameOpen] = useState(false);
   const isQueued = queuedTrackIds ? queuedTrackIds.has(track.id) : false;
   const isPlaying = Boolean(currentTrackId && track.id === currentTrackId);
   const editDisabled = isQueued || isPlaying;
@@ -118,16 +120,8 @@ export const TrackRow = memo(function TrackRow({
             }
           }}
           onPointerDown={(e) => {
-            if (onSelect) {
-              // Only allow selection from the main row if NO multi-select modifiers are active.
-              // Multi-select (Ctrl/Cmd/Shift) is now restricted to the music icon specifically
-              // to prevent accidental mode switching when clicking text or buttons.
-              if (!e.metaKey && !e.ctrlKey && !e.shiftKey) {
-                if (!isSelected) {
-                  onSelect(track.id, e);
-                }
-              }
-            }
+            if (!onSelect) return;
+            onSelect(track.id, e);
           }}
           onClick={(e) => {
             // If we clicked a selected item without modifiers (and didn't drag, implicit by onClick),
@@ -145,13 +139,6 @@ export const TrackRow = memo(function TrackRow({
               "w-3.5 h-3.5 flex-shrink-0 transition-colors cursor-pointer",
               isSelected ? "text-primary" : "text-muted-foreground opacity-70"
             )}
-            onPointerDown={(e) => {
-              // The Music icon is the dedicated handle for multi-selection (Ctrl/Cmd/Shift).
-              if (onSelect && (e.metaKey || e.ctrlKey || e.shiftKey)) {
-                e.stopPropagation();
-                onSelect(track.id, e);
-              }
-            }}
           />
 
           <div className="flex-1 min-w-0 grid grid-cols-[minmax(0,1fr)_48px_72px] items-center gap-2 select-text px-1">
@@ -196,6 +183,16 @@ export const TrackRow = memo(function TrackRow({
           Edit Song
         </ContextMenuItem>
 
+        <ContextMenuItem
+          disabled={isPlaying}
+          onClick={() => {
+            if (isPlaying) return;
+            setRenameOpen(true);
+          }}
+        >
+          Rename
+        </ContextMenuItem>
+
         <ContextMenuSub>
           <ContextMenuSubTrigger>Add to Playlist</ContextMenuSubTrigger>
           <ContextMenuSubContent>
@@ -225,6 +222,13 @@ export const TrackRow = memo(function TrackRow({
         track={track}
         onTrackUpdated={onTrackUpdated}
         playlistContext={playlistContext}
+      />
+
+      <RenameTrackDialog
+        open={renameOpen}
+        onOpenChange={setRenameOpen}
+        track={track}
+        onTrackUpdated={onTrackUpdated}
       />
     </ContextMenu>
   );

@@ -491,8 +491,8 @@ router.post('/:id/tracks', async (req, res) => {
       const stem = path.basename(destFileName, ext);
 
       await run(
-        `INSERT INTO tracks (id, name, artist, duration, size, file_path, hash, original_filename)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+        `INSERT INTO tracks (id, name, artist, duration, size, file_path, hash, original_filename, exists_on_disk)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1)`,
         [
           newTrackId,
           stem || source.name,
