@@ -506,22 +506,22 @@ export function HistoryDialog({ open, onOpenChange }: HistoryDialogProps) {
                                   <ContextMenu key={entry.id}>
                                     <ContextMenuTrigger>
                                       <div className="flex items-center gap-3 px-4 py-2.5 hover:bg-accent/40 dark:hover:bg-accent/20 transition-colors text-sm group/item max-w-full overflow-hidden">
-                                        <div className="flex-1 min-w-0">
-                                          <div
-                                            className="font-medium text-foreground text-[13px] leading-tight group-hover/item:text-primary transition-colors line-clamp-2"
-                                            title={entry.track_name || 'Unknown Track'}
-                                          >
-                                            {entry.track_name || 'Unknown Track'}
+                                          <div className="flex-1 min-w-0">
+                                            <div
+                                              className="font-semibold text-foreground text-[14px] leading-tight group-hover/item:text-primary transition-colors line-clamp-2"
+                                              title={entry.track_name || 'Unknown Track'}
+                                            >
+                                              {entry.track_name || 'Unknown Track'}
+                                            </div>
                                           </div>
-                                        </div>
 
                                         <div className="flex flex-col items-end gap-1 text-[10px] font-mono text-muted-foreground/70 min-w-[8rem] shrink-0 border-l border-border/20 pl-3">
                                           <div className="flex items-center justify-end gap-2 w-full text-right" title="Starting time">
-                                            <span className="opacity-50 text-[9px] uppercase tracking-tighter">Start</span>
+                                            <span className="opacity-50 text-[9px] uppercase tracking-tighter">Starting time</span>
                                             <span className="text-foreground/90">{startTime}</span>
                                           </div>
                                           <div className="flex items-center justify-end gap-2 w-full text-right" title="Ending time">
-                                            <span className="opacity-50 text-[9px] uppercase tracking-tighter">End</span>
+                                            <span className="opacity-50 text-[9px] uppercase tracking-tighter">Ending time</span>
                                             <span className="text-foreground/90">{endTime}</span>
                                           </div>
                                         </div>

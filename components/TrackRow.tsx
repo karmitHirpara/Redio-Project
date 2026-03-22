@@ -32,6 +32,7 @@ interface TrackRowProps {
   getDragPayload?: () => { trackIds: string[]; sourceFolderId?: string };
   startTimeLabel?: string; // optional: scheduled start time for this track
   onTrackUpdated?: (track: Track) => void;
+  onRenameTrack?: (track: Track) => void;
   playlistContext?: { playlistId: string; position: number };
   currentTrackId?: string | null;
   queuedTrackIds?: Set<string> | null;
@@ -54,12 +55,12 @@ export const TrackRow = memo(function TrackRow({
   getDragPayload,
   startTimeLabel,
   onTrackUpdated,
+  onRenameTrack,
   playlistContext,
   currentTrackId,
   queuedTrackIds,
 }: TrackRowProps) {
   const [editOpen, setEditOpen] = useState(false);
-  const [renameOpen, setRenameOpen] = useState(false);
   const isQueued = queuedTrackIds ? queuedTrackIds.has(track.id) : false;
   const isPlaying = Boolean(currentTrackId && track.id === currentTrackId);
   const editDisabled = isQueued || isPlaying;
@@ -187,7 +188,7 @@ export const TrackRow = memo(function TrackRow({
           disabled={isPlaying}
           onClick={() => {
             if (isPlaying) return;
-            setRenameOpen(true);
+            if (onRenameTrack) onRenameTrack(track);
           }}
         >
           Rename
@@ -222,13 +223,6 @@ export const TrackRow = memo(function TrackRow({
         track={track}
         onTrackUpdated={onTrackUpdated}
         playlistContext={playlistContext}
-      />
-
-      <RenameTrackDialog
-        open={renameOpen}
-        onOpenChange={setRenameOpen}
-        track={track}
-        onTrackUpdated={onTrackUpdated}
       />
     </ContextMenu>
   );

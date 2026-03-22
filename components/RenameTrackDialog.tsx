@@ -10,7 +10,7 @@ import { AnimatePresence, motion, useReducedMotion } from 'framer-motion';
 interface RenameTrackDialogProps {
   open: boolean;
   onOpenChange: (open: boolean) => void;
-  track: Track;
+  track: Track | null;
   onTrackUpdated?: (track: Track) => void;
 }
 
@@ -20,24 +20,40 @@ export function RenameTrackDialog({
   track,
   onTrackUpdated,
 }: RenameTrackDialogProps) {
-  const [name, setName] = useState(track.name);
+  const [name, setName] = useState(track?.name || '');
   const [fileName, setFileName] = useState('');
   const [isSubmitting, setIsSubmitting] = useState(false);
   const reduceMotion = useReducedMotion() ?? false;
 
   useEffect(() => {
-    if (open) {
-      setName(track.name);
+    if (!open) return;
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        e.preventDefault();
+        onOpenChange(false);
+      }
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [open, onOpenChange]);
+
+  useEffect(() => {
+    if (!open || !track) return;
+    setName(track.name);
       // Extract just the filename without path and extension
       let filenameWithExt = track.filePath.split(/[/\\]/).pop() || '';
       let filenameNoExt = filenameWithExt.replace(/\.[^/.]+$/, "");
       setFileName(filenameNoExt);
-    }
+      
+      // Explicitly focus the input on open
+      setTimeout(() => {
+        document.getElementById('track-name')?.focus();
+      }, 50);
   }, [open, track]);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!name.trim() || !fileName.trim()) return;
+    if (!name.trim() || !fileName.trim() || !track) return;
 
     setIsSubmitting(true);
     try {

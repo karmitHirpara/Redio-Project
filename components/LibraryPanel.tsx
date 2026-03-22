@@ -19,6 +19,7 @@ import { TrackRow } from './TrackRow';
 import { toast } from 'sonner';
 import { foldersAPI, libraryAPI, resolveUploadsUrl } from '../services/api';
 import { ConfirmDialog } from './ConfirmDialog';
+import { RenameTrackDialog } from './RenameTrackDialog';
 import { cn } from '../lib/utils';
 import { AnimatePresence, motion, useReducedMotion } from 'framer-motion';
 import {
@@ -44,6 +45,7 @@ interface VirtualizedFolderTrackListProps {
   playlists: Playlist[];
   onRemove: (trackId: string) => void;
   onTrackUpdated?: (track: Track) => void;
+  onRenameTrack?: (track: Track) => void;
 }
 
 const VirtualizedFolderTrackList = memo(function VirtualizedFolderTrackList({
@@ -60,6 +62,7 @@ const VirtualizedFolderTrackList = memo(function VirtualizedFolderTrackList({
   playlists,
   onRemove,
   onTrackUpdated,
+  onRenameTrack,
 }: VirtualizedFolderTrackListProps) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const [viewportHeight, setViewportHeight] = useState(0);
@@ -116,8 +119,8 @@ const VirtualizedFolderTrackList = memo(function VirtualizedFolderTrackList({
                 onAddToPlaylist={onAddToPlaylist}
                 playlists={playlists}
                 onRemove={onRemove}
-                showRemove
                 onTrackUpdated={onTrackUpdated}
+                onRenameTrack={onRenameTrack}
                 currentTrackId={currentTrackId}
                 queuedTrackIds={queuedTrackIds}
               />
@@ -229,6 +232,8 @@ export const LibraryPanel = memo(function LibraryPanel({
     mediaCount: number;
     requiresConfirmation: boolean;
   }>(null);
+
+  const [renamingTrack, setRenamingTrack] = useState<Track | null>(null);
 
   const [librarySearchText, setLibrarySearchText] = useState('');
   const [librarySearchQuery, setLibrarySearchQuery] = useState('');
@@ -1435,6 +1440,7 @@ export const LibraryPanel = memo(function LibraryPanel({
                         playlists={playlists}
                         onRemove={handleRemoveFolderTrack}
                         onTrackUpdated={onTrackUpdated}
+                        onRenameTrack={(t) => setRenamingTrack(t)}
                         currentTrackId={currentTrackId}
                         queuedTrackIds={queuedTrackIds}
                       />
@@ -1943,6 +1949,7 @@ export const LibraryPanel = memo(function LibraryPanel({
                   onRemove={onRemoveTrack}
                   showRemove
                   onTrackUpdated={onTrackUpdated}
+                  onRenameTrack={(t) => setRenamingTrack(t)}
                   currentTrackId={currentTrackId}
                   queuedTrackIds={queuedTrackIds}
                 />
@@ -2101,10 +2108,15 @@ export const LibraryPanel = memo(function LibraryPanel({
             ? `This will delete ${deleteFoldersConfirm.folderCount} folders and ${deleteFoldersConfirm.trackCount} track records.\n\n${deleteFoldersConfirm.mediaCount} media files will be removed from storage.`
             : undefined
         }
-        confirmLabel="Delete"
-        cancelLabel="Cancel"
         onConfirm={confirmDeleteFolders}
         onCancel={() => setDeleteFoldersConfirm(null)}
+      />
+
+      <RenameTrackDialog
+        open={!!renamingTrack}
+        onOpenChange={(open) => !open && setRenamingTrack(null)}
+        track={renamingTrack!}
+        onTrackUpdated={onTrackUpdated}
       />
     </div>
   );

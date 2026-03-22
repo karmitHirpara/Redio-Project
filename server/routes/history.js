@@ -2,6 +2,7 @@ import express from 'express';
 import { v4 as uuidv4 } from 'uuid';
 import { query, run, get } from '../config/database.js';
 import { emitQueueUpdated, enqueueTrackCopy } from './queue.js';
+import { logPlayback } from '../services/playbackLogger.js';
 
 const router = express.Router();
 
@@ -54,6 +55,25 @@ router.put('/:id', async (req, res) => {
     );
 
     const updated = await get('SELECT * FROM playback_history WHERE id = ?', [req.params.id]);
+
+    // Log to file if completed
+    if (newCompleted && !existing.completed) {
+      try {
+        const fullEntry = await get('SELECT h.*, t.name as track_name FROM playback_history h LEFT JOIN tracks t ON h.track_id = t.id WHERE h.id = ?', [req.params.id]);
+        const start = new Date(fullEntry.played_at);
+        const durationSeconds = (newPositionEnd ?? 0) - (newPositionStart ?? 0);
+        const end = new Date(start.getTime() + Math.max(0, durationSeconds) * 1000);
+        
+        logPlayback({
+          trackName: fullEntry.track_name || 'Unknown Track',
+          startTime: start.toLocaleTimeString('en-IN', { timeZone: 'Asia/Kolkata', hour12: true }),
+          endTime: end.toLocaleTimeString('en-IN', { timeZone: 'Asia/Kolkata', hour12: true }),
+        });
+      } catch (e) {
+        console.error('Failed to log playback to file', e);
+      }
+    }
+
     res.json(updated);
   } catch (error) {
     res.status(500).json({ error: error.message });

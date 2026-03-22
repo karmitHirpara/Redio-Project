@@ -8,6 +8,7 @@ import { TrackRow } from './TrackRow';
 import { formatDuration, formatFileSize } from '../lib/utils';
 import { ConfirmDialog } from './ConfirmDialog';
 import { Progress } from './ui/progress';
+import { RenameTrackDialog } from './RenameTrackDialog';
 import {
   Dialog,
   DialogContent,
@@ -62,6 +63,7 @@ export function PlaylistEditor({
   const [dropIndex, setDropIndex] = useState<number | null>(null);
   const dragStartOrderRef = useRef<Track[] | null>(null);
   const [flashTrackId, setFlashTrackId] = useState<string | null>(null);
+  const [renamingTrack, setRenamingTrack] = useState<Track | null>(null);
 
   const [previewBaseDateTime, setPreviewBaseDateTime] = useState<Date | null>(null);
   const [previewTimeByTrackId, setPreviewTimeByTrackId] = useState<Record<string, { start: Date; end: Date }>>({});
@@ -842,6 +844,7 @@ export function PlaylistEditor({
                           showRemove={!playlist.locked}
                           startTimeLabel={effectiveBaseDateTime ? previewLabelByTrackId[track.id] : startTimeByTrackId[track.id]}
                           onTrackUpdated={onTrackUpdated}
+                          onRenameTrack={(t) => setRenamingTrack(t)}
                           playlistContext={{ playlistId: playlist.id, position: index }}
                         />
                       </div>
@@ -853,6 +856,13 @@ export function PlaylistEditor({
           </div>
         )}
       </div>
+
+      <RenameTrackDialog
+        open={!!renamingTrack}
+        onOpenChange={(open) => !open && setRenamingTrack(null)}
+        track={renamingTrack}
+        onTrackUpdated={onTrackUpdated}
+      />
     </div>
   );
 }
