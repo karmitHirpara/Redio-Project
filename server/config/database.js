@@ -329,9 +329,14 @@ export let db = await openDatabaseConnection().catch((err) => {
 console.log('Connected to SQLite database');
 await ensureCoreSchema(db);
 
-export async function reconnectDatabase() {
+export async function reconnectDatabase(beforeReconnect) {
   const previous = db;
   await new Promise((resolve) => previous.close(() => resolve()));
+  
+  if (beforeReconnect) {
+    await beforeReconnect();
+  }
+
   db = await openDatabaseConnection();
   await ensureCoreSchema(db);
   return db;

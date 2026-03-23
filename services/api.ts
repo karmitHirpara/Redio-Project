@@ -403,6 +403,15 @@ export const settingsAPI = {
       method: 'DELETE',
       json: {},
     }),
+  restoreDatabase: (file: Blob) => {
+    const formData = new FormData();
+    formData.append('database', file);
+    return apiClient.request<{ ok: true; message: string }>('/settings/restore-database', {
+      method: 'POST',
+      body: formData,
+      timeoutMs: 0,
+    });
+  },
 };
 
 // Enhanced backup types for professional features
@@ -602,18 +611,16 @@ export const backupAPI = {
     });
   },
 
-  download: (filename: string, location?: string) => {
-    const url = location ? `/api/backup/download/${filename}?location=${location}` : `/api/backup/download/${filename}`;
-
-    // Create download link
-    const link = document.createElement('a');
-    link.href = url;
-    link.download = filename;
-    document.body.appendChild(link);
-    link.click();
-    document.body.removeChild(link);
-
-    return Promise.resolve();
+  getBlob: async (filename: string, location?: string): Promise<Blob> => {
+    const url = buildUrl(location ? `/backup/download/${filename}?location=${location}` : `/backup/download/${filename}`);
+    const res = await fetch(url, {
+      method: 'GET',
+      headers: {
+        'Accept': 'application/octet-stream',
+      },
+    });
+    if (!res.ok) throw new Error('Failed to download backup');
+    return res.blob();
   },
   getSchedule: () => apiClient.get<{ enabled: boolean; intervalMinutes: number }>('/backup/schedule'),
   setSchedule: (enabled: boolean, intervalMinutes: number) =>

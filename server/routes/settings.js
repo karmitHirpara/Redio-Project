@@ -4,8 +4,10 @@ import { run as runQueue, reconnectQueueDatabase } from '../config/queueDatabase
 import { fileURLToPath } from 'url';
 import path, { dirname, join } from 'path';
 import fs from 'fs';
+import multer from 'multer';
 
 const router = express.Router();
+const upload = multer({ dest: 'temp_uploads/' });
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -197,6 +199,43 @@ router.delete('/settings/factory-reset', async (req, res) => {
       await run('ROLLBACK');
     } catch (rollbackError) {
       // Ignore rollback errors
+    }
+    res.status(500).json({ error: error.message });
+  }
+});
+
+router.post('/settings/restore-database', upload.single('database'), async (req, res) => {
+  if (!req.file) {
+    return res.status(400).json({ error: 'No database file provided' });
+  }
+
+  const tempPath = req.file.path;
+  
+  try {
+    const { resolvedDbPath, reconnectDatabase } = await import('../config/database.js');
+
+    // 1. Perform Shadow Swap
+    // We close the current connection, swap the file, and then reopen.
+    await reconnectDatabase(async () => {
+      // It's safer to use renameSync inside the callback where we know the DB is closed.
+      fs.renameSync(tempPath, resolvedDbPath);
+    });
+
+    // 2. Broadcast to all clients
+    const broadcastEvent = req.app?.get?.('broadcastEvent');
+    if (typeof broadcastEvent === 'function') {
+      broadcastEvent({ 
+        type: 'database-restored', 
+        mode: 'restore',
+        at: new Date().toISOString()
+      });
+    }
+
+    res.json({ ok: true, message: 'Database restored successfully' });
+  } catch (error) {
+    console.error('Database restore failed:', error);
+    if (fs.existsSync(tempPath)) {
+      try { fs.unlinkSync(tempPath); } catch (e) { /* ignore */ }
     }
     res.status(500).json({ error: error.message });
   }

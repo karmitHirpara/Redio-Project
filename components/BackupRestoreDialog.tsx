@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react';
-import { backupAPI, BackupFile, getBackendOrigin } from '../services/api';
+import { backupAPI, BackupFile, getBackendOrigin, settingsAPI } from '../services/api';
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from './ui/dialog';
 import { Button } from './ui/button';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from './ui/select';
@@ -96,20 +96,22 @@ export function BackupRestoreDialog({ open, onOpenChange }: BackupRestoreDialogP
     if (!selectedFilename) return;
     setRestoring(true);
     try {
-      await backupAPI.restore(selectedFilename);
-      toast.success('Backup restored', { description: 'Restart required to apply changes' });
+      // 1. Fetch the backup from the server as a Blob
+      const blob = await backupAPI.getBlob(selectedFilename);
+      
+      // 2. Upload it to the new Instant Restore endpoint
+      await settingsAPI.restoreDatabase(blob);
+      
+      toast.success('Database restored', { 
+        description: 'The application has been updated instantly.' 
+      });
+      
       setConfirmOpen(false);
       onOpenChange(false);
-
-      const back = await waitForBackend(8000);
-      if (back) {
-        window.location.reload();
-      } else {
-        toast.error('Backend stopped after restore', {
-          description: 'In dev mode you must restart backend: run "npm run dev:backend" then refresh the page.',
-        });
-      }
+      
+      // No manual reload needed! App.tsx handles the 'database-restored' event.
     } catch (err: any) {
+      console.error('Restore failed:', err);
       toast.error(err?.message || 'Restore failed');
     } finally {
       setRestoring(false);
@@ -123,7 +125,7 @@ export function BackupRestoreDialog({ open, onOpenChange }: BackupRestoreDialogP
           <DialogHeader>
             <DialogTitle>Recover Data</DialogTitle>
             <DialogDescription>
-              Restore the database from a previous backup. The app will restart after restore.
+              Restore the database from a previous backup. This will update the application instantly.
             </DialogDescription>
           </DialogHeader>
 
@@ -179,7 +181,7 @@ export function BackupRestoreDialog({ open, onOpenChange }: BackupRestoreDialogP
           <AlertDialogHeader>
             <AlertDialogTitle>Restore backup?</AlertDialogTitle>
             <AlertDialogDescription>
-              This will replace your current data with the selected backup and restart the app.
+              This will replace your current data with the selected backup. The application will update instantly.
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>

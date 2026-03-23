@@ -3,7 +3,7 @@ import { memo, useState } from 'react';
 import { Music, Plus } from 'lucide-react';
 import { Track, Playlist } from '../types';
 import { formatDuration, formatFileSize, cn } from '../lib/utils';
-import { EditSongDialog } from './EditSongDialog';
+import { SegueEditorDialog } from './SegueEditorDialog';
 import { RenameTrackDialog } from './RenameTrackDialog';
 import {
   ContextMenu,
@@ -181,7 +181,7 @@ export const TrackRow = memo(function TrackRow({
             setEditOpen(true);
           }}
         >
-          Edit Song
+          Segue Editor
         </ContextMenuItem>
 
         <ContextMenuItem
@@ -217,7 +217,7 @@ export const TrackRow = memo(function TrackRow({
         )}
       </ContextMenuContent>
 
-      <EditSongDialog
+      <SegueEditorDialog
         open={editOpen}
         onOpenChange={setEditOpen}
         track={track}

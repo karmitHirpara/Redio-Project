@@ -1176,7 +1176,6 @@ export default function App() {
     }
   };
 
-  // Load tracks from backend so library reflects database
   useEffect(() => {
     void resyncAll();
   }, []);
@@ -1532,27 +1531,6 @@ export default function App() {
       socket?.close();
     };
   }, []);
-
-  // Load tracks from backend so library reflects database
-  useEffect(() => {
-    void resyncAll();
-  }, []);
-
-  // Allow other components to request a resync (e.g. after restore)
-  useEffect(() => {
-    const onResync = () => void resyncAll();
-    window.addEventListener('redio:resync', onResync);
-    return () => window.removeEventListener('redio:resync', onResync);
-  }, []);
-
-  // Keep refs in sync with the latest current track so the WebSocket
-  // handlers can safely reason about preemption.
-  useEffect(() => {
-    currentTrackRef.current = currentTrack;
-    currentTrackIdRef.current = currentTrackId;
-    currentQueueItemIdRef.current = currentQueueItemId;
-    nowPlayingStartRef.current = nowPlayingStart;
-  }, [currentTrack, currentTrackId, currentQueueItemId, nowPlayingStart]);
 
   const handleRemoveTrackFromPlaylist = async (playlistId: string, trackId: string) => {
     const playlist = playlists.find(p => p.id === playlistId);

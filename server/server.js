@@ -270,12 +270,16 @@ server.listen(PORT, HOST, () => {
     });
   }, intervalMs);
 
-  // Watchdog: If scheduler doesn't tick for 5s, something is wrong.
-  // We attempt to restart it.
   const watchdogInterval = setInterval(() => {
     const drift = Date.now() - lastSchedulerTick;
     if (drift > 5000) {
-      logger.error(`🚨 SCHEDULER WATCHDOG: Last tick was ${drift}ms ago. Restarting loop...`);
+      // If drift is massive (> 30s), the computer likely went to sleep or the OS paused the process.
+      if (drift > 30000) {
+        logger.info(`⏰ Scheduler recovered from OS sleep/pause (Drift: ${Math.round(drift/1000)}s)`);
+      } else {
+        logger.warn(`⚠️ Scheduler delayed by ${drift}ms. Restarting tick loop to resync...`);
+      }
+      
       clearInterval(schedulerInterval);
       schedulerInterval = setInterval(() => {
         lastSchedulerTick = Date.now();
