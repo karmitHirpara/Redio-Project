@@ -43,6 +43,16 @@ function ensureQueueSchema(database) {
 
     database.run('CREATE INDEX IF NOT EXISTS idx_queue_items_order ON queue_items (order_position)');
     database.run('CREATE INDEX IF NOT EXISTS idx_queue_items_source_track_id ON queue_items (source_track_id)');
+
+    database.run(`
+      CREATE TABLE IF NOT EXISTS queue_settings (
+        id INTEGER PRIMARY KEY CHECK (id = 1),
+        mode TEXT DEFAULT 'AUTO' CHECK(mode IN ('AUTO', 'LIVE'))
+      )
+    `, () => {
+      // Ensure the singleton row exists
+      database.run(`INSERT OR IGNORE INTO queue_settings (id, mode) VALUES (1, 'AUTO')`);
+    });
   });
 }
 

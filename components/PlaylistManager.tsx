@@ -333,7 +333,7 @@ export const PlaylistManager = memo(function PlaylistManager({
         }
       };
 
-      const readEntry = async (entry: any): Promise<File[]> => {
+      const readEntry = async (entry: any, prefix: string = '', includeSelfName: boolean = false): Promise<File[]> => {
         const out: File[] = [];
         if (!entry) return out;
 
@@ -341,7 +341,17 @@ export const PlaylistManager = memo(function PlaylistManager({
           await new Promise<void>((resolve) => {
             entry.file(
               (file: File) => {
-                out.push(file);
+                // Clone the file to prevent the browser from detaching the Blob when DND ends
+                const relPath = `${prefix}${file.name}`;
+                const f = new File([file], file.name, {
+                  type: file.type,
+                  lastModified: file.lastModified,
+                });
+                try {
+                  Object.defineProperty(f, 'webkitRelativePath', { value: relPath, configurable: true });
+                } catch { /* ignore */ }
+                
+                out.push(f);
                 resolve();
               },
               () => resolve(),
@@ -361,8 +371,9 @@ export const PlaylistManager = memo(function PlaylistManager({
             all.push(...batch);
           }
 
+          const nextPrefix = includeSelfName ? `${prefix}${entry.name}/` : prefix;
           for (const child of all) {
-            const childFiles = await readEntry(child);
+            const childFiles = await readEntry(child, nextPrefix, true);
             out.push(...childFiles);
           }
         }

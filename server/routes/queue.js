@@ -116,11 +116,40 @@ export const emitQueueUpdated = async (app) => {
       order: item.order_position
     }));
 
-    broadcastEvent({ type: 'queue-updated', queue: formatted });
+    const settingsRow = await get('SELECT mode FROM queue_settings WHERE id = 1');
+    const settings = { mode: settingsRow?.mode || 'AUTO' };
+
+    broadcastEvent({ type: 'queue-updated', queue: formatted, settings });
   } catch (error) {
     console.error('Failed to emit queue-updated event', error);
   }
 };
+
+// Get queue settings
+router.get('/settings', async (req, res) => {
+  try {
+    const row = await get('SELECT mode FROM queue_settings WHERE id = 1');
+    res.json({ mode: row?.mode || 'AUTO' });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Update queue settings
+router.put('/settings', async (req, res) => {
+  try {
+    const { mode } = req.body;
+    if (mode !== 'AUTO' && mode !== 'LIVE') {
+      return res.status(400).json({ error: 'Invalid mode. Must be AUTO or LIVE.' });
+    }
+    
+    await run('UPDATE queue_settings SET mode = ? WHERE id = 1', [mode]);
+    await emitQueueUpdated(req.app);
+    res.json({ message: 'Settings updated successfully', mode });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
 
 // Get queue
 router.get('/', async (req, res) => {
@@ -145,7 +174,10 @@ router.get('/', async (req, res) => {
       order: item.order_position
     }));
 
-    res.json(formatted);
+    const settingsRow = await get('SELECT mode FROM queue_settings WHERE id = 1');
+    const settings = { mode: settingsRow?.mode || 'AUTO' };
+
+    res.json({ queue: formatted, settings });
   } catch (error) {
     res.status(500).json({ error: error.message });
   }

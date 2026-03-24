@@ -46,69 +46,55 @@ export const useTrackOperations = (
         let failed = 0;
         const importedItems: { trackId: string; fileName?: string }[] = [];
         const fileQueue = [...files];
+        const UI_BATCH_SIZE = 10; // Batch up to 10 files per request
 
-        const processBatch = async () => {
-            while (fileQueue.length > 0) {
-                const file = fileQueue.shift();
-                if (!file) break;
+        while (fileQueue.length > 0) {
+            const batchFiles = fileQueue.splice(0, UI_BATCH_SIZE);
+            const formData = new FormData();
+            batchFiles.forEach(f => formData.append('file', f));
 
-                const validation = isValidUploadFile(file);
-                if (!validation.ok) {
-                    failed += 1;
-                    continue;
-                }
+            try {
+                const response = await apiClient.request<any>('/tracks/upload', {
+                    method: 'POST',
+                    body: formData,
+                    allowedStatuses: [207, 409],
+                });
 
-                const formData = new FormData();
-                formData.append('file', file);
+                const results = response.results || [];
+                const errors = response.errors || [];
 
-                try {
-                    const uploadData = await apiClient.request<any>('/tracks/upload', {
-                        method: 'POST',
-                        body: formData,
-                        allowedStatuses: [409],
-                    });
-
-                    if (uploadData?.existingTrack) {
-                        const existingTrack = uploadData.existingTrack;
-                        if (existingTrack?.id) {
-                            importedItems.push({ trackId: String(existingTrack.id), fileName: file.name });
-                            imported += 1;
-                        } else {
-                            failed += 1;
+                for (const resItem of results) {
+                    if (resItem.id) {
+                        const mapped: Track = {
+                            id: resItem.id,
+                            name: resItem.name,
+                            artist: resItem.artist,
+                            duration: resItem.duration || 0,
+                            size: resItem.size,
+                            filePath: resolveUploadsUrl(resItem.filePath || resItem.file_path),
+                            hash: resItem.hash,
+                            dateAdded: resItem.date_added ? new Date(resItem.date_added) : new Date(),
+                        };
+                        setTracks((prev) => {
+                           if (prev.some(t => t.id === mapped.id)) return prev;
+                           return [mapped, ...prev];
+                        });
+                        importedItems.push({ trackId: mapped.id, fileName: mapped.name });
+                        imported += 1;
+                        if ((!resItem.duration || resItem.duration === 0) && mapped.filePath) {
+                            hydrateTrackDurationInLibrary(mapped.id, mapped.filePath);
                         }
-                        continue;
+                    } else if (resItem.error === 'Duplicate file' && resItem.existingTrack) {
+                        importedItems.push({ trackId: String(resItem.existingTrack.id), fileName: resItem.existingTrack.name });
+                        imported += 1;
                     }
-
-                    if (!uploadData?.id) {
-                        failed += 1;
-                        continue;
-                    }
-
-                    const mapped: Track = {
-                        id: uploadData.id,
-                        name: uploadData.name,
-                        artist: uploadData.artist,
-                        duration: uploadData.duration || 0,
-                        size: uploadData.size,
-                        filePath: resolveUploadsUrl(uploadData.filePath || uploadData.file_path),
-                        hash: uploadData.hash,
-                        dateAdded: uploadData.date_added ? new Date(uploadData.date_added) : new Date(),
-                    };
-                    setTracks((prev) => [mapped, ...prev]);
-                    importedItems.push({ trackId: mapped.id, fileName: file.name });
-                    imported += 1;
-                } catch (err) {
-                    console.error('Failed to import track', err);
-                    failed += 1;
                 }
+                failed += errors.length;
+            } catch (err) {
+                console.error('Failed to import tracks batch', err);
+                failed += batchFiles.length;
             }
-        };
-
-        const workers = [];
-        for (let i = 0; i < Math.min(BATCH_SIZE, files.length); i++) {
-            workers.push(processBatch());
         }
-        await Promise.all(workers);
 
         if (folderId && importedItems.length > 0) {
             try {
@@ -124,7 +110,7 @@ export const useTrackOperations = (
                 description: `${imported} imported, ${failed} failed`,
             });
         }
-    }, [isValidUploadFile, resolveUploadsUrl, setTracks]);
+    }, [isValidUploadFile, resolveUploadsUrl, setTracks, hydrateTrackDurationInLibrary]);
 
     const handleImportFolder = useCallback(async (files: File[], parentFolderId?: string) => {
         if (!parentFolderId) {
@@ -171,62 +157,66 @@ export const useTrackOperations = (
             await new Promise<void>((resolve) => window.setTimeout(resolve, 0));
         };
 
+        const UI_BATCH_SIZE = 10;
         for (const [pathKey, groupFiles] of groups.entries()) {
             const parts = pathKey ? pathKey.split('/').filter(Boolean) : [];
             const folderId = await getOrCreateFolderIdForPath(parts);
             const itemsToAttach: { trackId: string; fileName?: string }[] = [];
 
-            for (const file of groupFiles) {
-                try {
-                    const formData = new FormData();
-                    formData.append('file', file);
+            const fileQueue = [...groupFiles];
+            while (fileQueue.length > 0) {
+                const batchFiles = fileQueue.splice(0, UI_BATCH_SIZE);
+                const formData = new FormData();
+                batchFiles.forEach(f => formData.append('file', f));
 
-                    const uploadData = await apiClient.request<any>('/tracks/upload', {
+                try {
+                    const response = await apiClient.request<any>('/tracks/upload', {
                         method: 'POST',
                         body: formData,
-                        allowedStatuses: [409],
+                        allowedStatuses: [207, 409],
                     });
 
-                    let newId: string | null = null;
+                    const results = response.results || [];
+                    const errors = response.errors || [];
 
-                    if (uploadData?.existingTrack) {
-                        const existingTrack = uploadData.existingTrack;
-                        if (existingTrack?.id) {
-                            newId = String(existingTrack.id);
+                    for (const resItem of results) {
+                        if (resItem.id) {
+                             const mapped: Track = {
+                                id: resItem.id,
+                                name: resItem.name,
+                                artist: resItem.artist,
+                                duration: resItem.duration || 0,
+                                size: resItem.size,
+                                filePath: resolveUploadsUrl(resItem.filePath || resItem.file_path),
+                                hash: resItem.hash,
+                                dateAdded: resItem.date_added ? new Date(resItem.date_added) : new Date(),
+                            };
+                            setTracks((prev) => {
+                                if (prev.some(t => t.id === mapped.id)) return prev;
+                                return [mapped, ...prev];
+                            });
+                            itemsToAttach.push({ trackId: mapped.id, fileName: mapped.name });
+                            if ((!resItem.duration || resItem.duration === 0) && mapped.filePath) {
+                                hydrateTrackDurationInLibrary(mapped.id, mapped.filePath);
+                            }
+                        } else if (resItem.error === 'Duplicate file' && resItem.existingTrack) {
+                            itemsToAttach.push({ trackId: String(resItem.existingTrack.id), fileName: resItem.existingTrack.name });
                         }
-                    } else if (uploadData?.id) {
-                        const mapped: Track = {
-                            id: uploadData.id,
-                            name: uploadData.name,
-                            artist: uploadData.artist,
-                            duration: uploadData.duration || 0,
-                            size: uploadData.size,
-                            filePath: resolveUploadsUrl(uploadData.filePath || uploadData.file_path),
-                            hash: uploadData.hash,
-                            dateAdded: uploadData.date_added ? new Date(uploadData.date_added) : new Date(),
-                        };
-                        setTracks((prev) => [mapped, ...prev]);
-                        newId = mapped.id;
-                        if ((!uploadData.duration || uploadData.duration === 0) && mapped.filePath) {
-                            hydrateTrackDurationInLibrary(mapped.id, mapped.filePath);
-                        }
+                        processed += 1;
                     }
-
-                    if (newId) itemsToAttach.push({ trackId: newId, fileName: file.name });
+                    failed += errors.length;
+                    processed += errors.length;
                 } catch (err) {
-                    console.error('Failed to import folder file', err);
-                    failed += 1;
-                } finally {
-                    processed += 1;
-                    setLibraryImportProgress({
-                        percent: Math.min(100, (processed / total) * 100),
-                        label: `Importing… ${processed}/${total}`,
-                    });
+                    console.error('Failed to import folder batch', err);
+                    failed += batchFiles.length;
+                    processed += batchFiles.length;
                 }
 
-                if (processed % 10 === 0) {
-                    await yieldToBrowser();
-                }
+                setLibraryImportProgress({
+                    percent: Math.min(100, (processed / total) * 100),
+                    label: `Importing… ${processed}/${total}`,
+                });
+                await yieldToBrowser();
             }
 
             if (itemsToAttach.length > 0) {

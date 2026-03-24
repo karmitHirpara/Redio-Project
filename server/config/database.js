@@ -33,6 +33,7 @@ function ensureCoreSchema(database) {
   // Electron app) and then create helpful indexes. This is safe to run on
   // every startup.
   database.serialize(() => {
+    database.run('PRAGMA journal_mode = WAL');
     database.run(`
       CREATE TABLE IF NOT EXISTS tracks (
         id TEXT PRIMARY KEY,

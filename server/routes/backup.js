@@ -550,21 +550,19 @@ async function createBackup(options = {}) {
         }
       }
 
-      try {
-        await exportModuleDb({
+      // Phase 1 module DB export: split database snapshot into core/library/playlists DBs in parallel.
+      // This does not change runtime yet, but ensures backups contain isolated DB files efficiently.
+      const exportTasks = [
+        exportModuleDb({
           outPath: coreOut,
           tableSpecs: [
             { name: 'settings' },
             { name: 'schedules' },
             { name: 'playback_history' },
           ],
-        });
-      } catch {
-        // ignore
-      }
+        }).catch(err => console.warn('Failed to export core module DB:', err.message)),
 
-      try {
-        await exportModuleDb({
+        exportModuleDb({
           outPath: libraryOut,
           tableSpecs: [
             { name: 'tracks', where: `file_path IS NULL OR file_path NOT LIKE '/uploads/playlists/%'` },
@@ -572,24 +570,19 @@ async function createBackup(options = {}) {
             { name: 'folder_tracks' },
             { name: 'tracks_fts' },
           ],
-        });
-      } catch {
-        // ignore
-      }
+        }).catch(err => console.warn('Failed to export library module DB:', err.message)),
 
-      try {
-        await exportModuleDb({
+        exportModuleDb({
           outPath: playlistsOut,
           tableSpecs: [
             { name: 'playlists' },
             { name: 'playlist_tracks' },
-            // Phase 1 heuristic: playlist-owned track rows are those stored under uploads/playlists
             { name: 'tracks', where: `file_path LIKE '/uploads/playlists/%'` },
           ],
-        });
-      } catch {
-        // ignore
-      }
+        }).catch(err => console.warn('Failed to export playlists module DB:', err.message))
+      ];
+
+      await Promise.all(exportTasks);
 
       fs.writeFileSync(path.join(tmpRoot, 'metadata.json'), JSON.stringify(metadata, null, 2), 'utf8');
       fs.writeFileSync(
@@ -895,47 +888,47 @@ async function restoreFromBackup(filename, options = {}) {
 
     const extractedQueueSqlitePath = path.join(tmpRoot, 'queue.sqlite');
 
-    const resolvedUploadDir = getResolvedUploadDir();
-    const extractedUploads = path.join(tmpRoot, path.basename(resolvedUploadDir));
-    const oldUploadsBackup = path.join(backupsDir, `uploads_before_restore_${formatTimestamp(new Date())}`);
-    try {
-      if (fs.existsSync(resolvedUploadDir)) {
-        fs.renameSync(resolvedUploadDir, oldUploadsBackup);
-      }
-    } catch {
-    }
-    try {
-      if (fs.existsSync(extractedUploads)) {
-        fs.mkdirSync(path.dirname(resolvedUploadDir), { recursive: true });
-        fs.renameSync(extractedUploads, resolvedUploadDir);
-      } else {
-        fs.mkdirSync(resolvedUploadDir, { recursive: true });
-      }
-    } catch {
+    // Restore uploads and queue uploads directories in parallel.
+    const restoredUploadDir = getResolvedUploadDir();
+    const restoredQueueUploadsDir = getResolvedQueueUploadsDir();
+
+    const dirRestoreTasks = [];
+
+    // Main uploads
+    const extractedUploads = path.join(tmpRoot, path.basename(restoredUploadDir));
+    if (fs.existsSync(extractedUploads)) {
+      const oldUploadsBackup = path.join(backupsDir, `uploads_before_restore_${formatTimestamp(new Date())}`);
+      dirRestoreTasks.push((async () => {
+        try {
+          if (fs.existsSync(restoredUploadDir)) {
+            await fs.promises.rename(restoredUploadDir, oldUploadsBackup);
+          }
+          await fs.promises.mkdir(path.dirname(restoredUploadDir), { recursive: true });
+          await fs.promises.rename(extractedUploads, restoredUploadDir);
+        } catch (err) {
+          console.error('Failed to restore uploads directory:', err.message);
+        }
+      })());
     }
 
-    // Restore queue uploads directory if present in archive.
-    try {
-      const resolvedQueueUploadsDir = getResolvedQueueUploadsDir();
-      const extractedQueueUploads = path.join(tmpRoot, path.basename(resolvedQueueUploadsDir));
+    // Queue uploads
+    const extractedQueueUploads = path.join(tmpRoot, path.basename(restoredQueueUploadsDir));
+    if (fs.existsSync(extractedQueueUploads)) {
       const oldQueueUploadsBackup = path.join(backupsDir, `queue_uploads_before_restore_${formatTimestamp(new Date())}`);
-      if (fs.existsSync(resolvedQueueUploadsDir)) {
+      dirRestoreTasks.push((async () => {
         try {
-          fs.renameSync(resolvedQueueUploadsDir, oldQueueUploadsBackup);
-        } catch {
+          if (fs.existsSync(restoredQueueUploadsDir)) {
+            await fs.promises.rename(restoredQueueUploadsDir, oldQueueUploadsBackup);
+          }
+          await fs.promises.mkdir(path.dirname(restoredQueueUploadsDir), { recursive: true });
+          await fs.promises.rename(extractedQueueUploads, restoredQueueUploadsDir);
+        } catch (err) {
+          console.error('Failed to restore queue uploads directory:', err.message);
         }
-      }
-      if (fs.existsSync(extractedQueueUploads)) {
-        fs.mkdirSync(path.dirname(resolvedQueueUploadsDir), { recursive: true });
-        try {
-          fs.renameSync(extractedQueueUploads, resolvedQueueUploadsDir);
-        } catch {
-        }
-      } else {
-        fs.mkdirSync(resolvedQueueUploadsDir, { recursive: true });
-      }
-    } catch {
+      })());
     }
+
+    await Promise.all(dirRestoreTasks);
 
     if (createRestorePoint !== false) {
       try {
@@ -979,26 +972,30 @@ async function restoreFromBackup(filename, options = {}) {
       console.warn('Queue DB restore failed; continuing with core DB restore', e?.message || e);
     }
 
-    // Restore module DB files (Phase 1).
+    // Restore module DB files in parallel (Phase 1).
     try {
-      const extractedCoreSqlitePath = path.join(tmpRoot, 'core.sqlite');
-      const extractedLibrarySqlitePath = path.join(tmpRoot, 'library.sqlite');
-      const extractedPlaylistsSqlitePath = path.join(tmpRoot, 'playlists.sqlite');
+      const coreOut = path.join(tmpRoot, 'core.sqlite');
+      const libraryOut = path.join(tmpRoot, 'library.sqlite');
+      const playlistsOut = path.join(tmpRoot, 'playlists.sqlite');
 
-      if (fs.existsSync(extractedCoreSqlitePath)) {
-        const coreDbPath = getResolvedCoreDbPath();
-        fs.copyFileSync(extractedCoreSqlitePath, coreDbPath);
+      const dbRestoreTasks = [];
+
+      if (fs.existsSync(coreOut)) {
+        dbRestoreTasks.push(fs.promises.copyFile(coreOut, getResolvedCoreDbPath())
+          .catch(err => console.warn('Core module DB restore failed:', err.message)));
       }
-      if (fs.existsSync(extractedLibrarySqlitePath)) {
-        const libraryDbPath = getResolvedLibraryDbPath();
-        fs.copyFileSync(extractedLibrarySqlitePath, libraryDbPath);
+      if (fs.existsSync(libraryOut)) {
+        dbRestoreTasks.push(fs.promises.copyFile(libraryOut, getResolvedLibraryDbPath())
+          .catch(err => console.warn('Library module DB restore failed:', err.message)));
       }
-      if (fs.existsSync(extractedPlaylistsSqlitePath)) {
-        const playlistsDbPath = getResolvedPlaylistsDbPath();
-        fs.copyFileSync(extractedPlaylistsSqlitePath, playlistsDbPath);
+      if (fs.existsSync(playlistsOut)) {
+        dbRestoreTasks.push(fs.promises.copyFile(playlistsOut, getResolvedPlaylistsDbPath())
+          .catch(err => console.warn('Playlists module DB restore failed:', err.message)));
       }
-    } catch {
-      // ignore module db restore errors
+
+      await Promise.all(dbRestoreTasks);
+    } catch (e) {
+      console.warn('Module DB restoration tasks failed:', e.message);
     }
 
     await rmrf(tmpRoot);

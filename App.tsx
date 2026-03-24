@@ -1325,8 +1325,8 @@ export default function App() {
       socket.onmessage = async (event) => {
         try {
           const data = JSON.parse(event.data);
-          if (data.type === 'database-restored') {
-            if (isPlayingRef.current) {
+          if (data.type === 'database-restored' || data.type === 'library-updated' || data.type === 'tracksAdded') {
+            if (data.type === 'database-restored' && isPlayingRef.current) {
               pendingRestoreResyncRef.current = true;
               return;
             }
@@ -1334,7 +1334,13 @@ export default function App() {
             window.dispatchEvent(new Event('redio:library-resync'));
             return;
           }
-          if (data.type === 'library-updated') {
+          if (data.type === 'tracksUpdated') {
+            // For updates, we can either resync all or be more surgical.
+            // Surgical update:
+            if (Array.isArray(data.trackIds)) {
+              window.dispatchEvent(new CustomEvent('redio:tracks-updated', { detail: { trackIds: data.trackIds } }));
+            }
+            void resyncAll(); // Fallback/ensure all are sync
             window.dispatchEvent(new Event('redio:library-resync'));
             return;
           }
@@ -1754,42 +1760,74 @@ export default function App() {
     }
 
     const normalizedItems: { trackId: string; fileName: string | null }[] = [];
-    for (const file of files) {
-      const validation = isValidUploadFile(file);
-      if (!validation.ok) {
-        failed += 1;
-        toast.error(`${validation.reason}: ${file?.name || 'file'}`);
-        continue;
-      }
+    let processed = 0;
+    const UI_BATCH_SIZE = 10;
+    const fileQueue = [...files];
 
-      const dotIndex = file.name.lastIndexOf('.');
-      const baseName = dotIndex > 0 ? file.name.slice(0, dotIndex) : file.name;
-      const desiredName = getNextSequentialName(baseName, existingNames);
+    const yieldToBrowser = async () => new Promise<void>((resolve) => window.setTimeout(resolve, 0));
 
-      try {
-        const formData = new FormData();
-        formData.append('file', file);
-        formData.append('name', desiredName);
-        const detectedDuration = files.length > 120 ? 0 : await getAudioDuration(file);
-        if (detectedDuration > 0) formData.append('duration', String(detectedDuration));
+    while (fileQueue.length > 0) {
+      const batchFiles = fileQueue.splice(0, UI_BATCH_SIZE);
 
-        const uploadData = await apiClient.request<any>('/tracks/upload', {
-          method: 'POST',
-          body: formData,
-          allowedStatuses: [409],
-        });
+      const batchPromises = batchFiles.map(async (file) => {
+        const validation = isValidUploadFile(file);
+        if (!validation.ok) {
+          failed += 1;
+          processed += 1;
+          toast.error(`${validation.reason}: ${file?.name || 'file'}`);
+          return;
+        }
 
-        const trackIdToAttach = uploadData?.existingTrack?.id || uploadData?.id;
-        if (trackIdToAttach) {
-          normalizedItems.push({ trackId: trackIdToAttach, fileName: file.name });
-          existingNames.push(desiredName);
-        } else {
+        const dotIndex = file.name.lastIndexOf('.');
+        const baseName = dotIndex > 0 ? file.name.slice(0, dotIndex) : file.name;
+        
+        // Compute sequentially to avoid name collisions in the same batch
+        const desiredName = getNextSequentialName(baseName, existingNames);
+        existingNames.push(desiredName);
+
+        try {
+          const formData = new FormData();
+          formData.append('file', file);
+          formData.append('name', desiredName);
+          
+          // Skip UI-blocking duration checks for large imports
+          let detectedDuration = 0;
+          if (totalFiles <= 120) {
+            detectedDuration = await getAudioDuration(file);
+          }
+          if (detectedDuration > 0) formData.append('duration', String(detectedDuration));
+
+          const uploadData = await apiClient.request<any>('/tracks/upload', {
+            method: 'POST',
+            body: formData,
+            allowedStatuses: [207, 409], // Allow 207 Multi-Status
+          });
+
+          // Multer array upload sometimes returns an array of results
+          const resItem = uploadData?.results ? uploadData.results[0] : uploadData;
+          const trackIdToAttach = resItem?.existingTrack?.id || resItem?.id;
+          
+          if (trackIdToAttach) {
+            normalizedItems.push({ trackId: trackIdToAttach, fileName: file.name });
+          } else {
+            failed += 1;
+          }
+        } catch (err) {
+          console.error('Failed to upload for playlist', err);
           failed += 1;
         }
-      } catch (err) {
-        console.error('Failed to upload for playlist', err);
-        failed += 1;
-      }
+        processed += 1;
+      });
+
+      await Promise.all(batchPromises);
+
+      setPlaylistImportProgress({
+        percent: Math.min(100, (processed / totalFiles) * 100),
+        label: `Adding to playlist… ${processed}/${totalFiles}`,
+        playlistId
+      });
+      
+      await yieldToBrowser();
     }
 
     if (normalizedItems.length === 0) {
